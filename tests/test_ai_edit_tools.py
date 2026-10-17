@@ -2535,3 +2535,270 @@ def test_apply_between_failures_clears_stale_repeat_pressure():
     c4, d4 = es.execute(rename)
     assert 'BLOCKED' not in c4, c4
     assert d4 is not None, c4
+
+
+# ── Step 2: batch ops[] envelope (2026-10-16) ─────────────────────────
+def _batch_args(entries, file='printer.cfg'):
+    return {'name': 'config_edit',
+            'arguments': {'file': file, 'ops': entries}}
+
+
+def test_batch_sequential_evolution():
+    """Each entry sees the state the previous entry left: set then
+    re-set the SAME key in one batch — last write wins, no duplicate
+    veto mid-batch."""
+    session = EditSession(_ctx())
+    content, details = session.execute(_batch_args([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'},
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '400'},
+    ]))
+    assert 'applied 2 of 2 ops' in content
+    assert details is not None
+    assert 'max_velocity: 400' in details['newText']
+    assert 'max_velocity: 300' not in details['newText']
+
+
+def test_batch_per_index_feedback_format():
+    """The plan's pinned shape: failed entries are named by index with
+    the lean single-path error; applied entries stay committed."""
+    session = EditSession(_ctx())
+    content, details = session.execute(_batch_args([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'},
+        {'op': 'set_param', 'section': 'nope_missing', 'key': 'k',
+         'value': '1'},
+    ]))
+    assert 'applied 1 of 2 ops' in content
+    assert 'op[1]' in content
+    assert 'op[0]' not in content.split('Failed ops')[1]
+    assert details is not None  # partial commit still stages details
+
+
+def test_batch_continue_on_failure_rows_land_per_op():
+    """3 entries, middle one bad: rows land for the good ones only, one
+    change-set row PER SUB-OP (never an envelope row)."""
+    session = EditSession(_ctx())
+    content, _ = session.execute(_batch_args([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'},
+        {'op': 'delete_section', 'section': 'ghost_section'},
+        {'op': 'add_section', 'section': 'gcode_macro batched',
+         'text': 'gcode:\n  G4 P1'},
+    ]))
+    assert 'applied 2 of 3 ops' in content
+    assert 'op[1]' in content
+    assert len(session.committed_ops) == 2
+    assert {e['op'] for e in session.committed_ops} == {
+        'set_param', 'add_section'}
+    # raw_op carries the SUB-OP, not the envelope
+    assert all('ops' not in e['raw_op'] for e in session.committed_ops)
+
+
+def test_batch_stringified_recovery_direct():
+    """Zed's deserialize_maybe_stringified: 'ops' arrives as a JSON
+    STRING (small-model emission). One relaxed parse; applies normally."""
+    session = EditSession(_ctx())
+    entries = json.dumps([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'}])
+    content, details = session.execute(
+        {'name': 'config_edit',
+         'arguments': {'file': 'printer.cfg', 'ops': entries}})
+    assert 'applied 1 of 1 ops' in content
+    assert details is not None and 'max_velocity: 300' in details['newText']
+
+
+def test_batch_stringified_recovery_text_protocol(monkeypatch):
+    """End-to-end through the text fence: the model emits ops as a
+    string inside the fence JSON."""
+    args = {'file': 'printer.cfg', 'ops': json.dumps([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'},
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_accel',
+         'value': '4000'}])}
+    block = '```tool\n' + json.dumps(
+        {'name': 'config_edit', 'arguments': args}) + '\n```'
+    _install(monkeypatch, [
+        {'choices': [{'message': {'content': 'Sure.\n\n' + block}}]},
+        _final_reply('Both changed.'),
+    ])
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'max_velocity 300 and max_accel 4000'}]))
+    assert response.status_code == 200
+    body = response.json()
+    assert body['editAttempts'] == 2
+    assert len(body['changeSet']['edits']) == 2
+
+
+def test_batch_accounting_is_per_op():
+    """edit_attempts moves per INDEX (work), the thrash charge moves per
+    FAILURE (waste): 2 good + 1 bad = +3 attempts, +1 waste unit."""
+    monkeypatch_env = None  # document: default budget
+    session = EditSession(_ctx())
+    before = session.thrash_units
+    content, _ = session.execute(_batch_args([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'},
+        {'op': 'set_param', 'section': 'ghost', 'key': 'k', 'value': '1'},
+        {'op': 'add_section', 'section': 'gcode_macro b2',
+         'text': 'gcode:\n  G4 P1'},
+    ]))
+    assert 'applied 2 of 3' in content
+    assert session.edit_attempts == 3
+    assert session.thrash_units == before + 1
+
+
+def test_batch_budget_recheck_stops_remaining_entries(monkeypatch):
+    """Budget spent MID-batch (from earlier waste): the remaining
+    entries stop un-attempted with a factual note; nothing charges,
+    nothing applies."""
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '1')
+    session = EditSession(_ctx())
+    session.charge_waste(2)  # budget SPENT (over the 1-unit allowance)
+    content, details = session.execute(_batch_args([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'},
+        {'op': 'add_section', 'section': 'gcode_macro never',
+         'text': 'gcode:\n  G4 P1'},
+    ]))
+    # The CALL-level budget check fires first (both single and batch
+    # shapes): the model gets the WASTE BUDGET directive, zero applied.
+    assert 'WASTE BUDGET SPENT' in content
+    assert details is None
+    assert 'never' not in session.state.files['printer.cfg']
+
+
+def test_batch_oversize_guard_charged_once():
+    """MAX_OPS_PER_CALL is generation-limit insurance, not a work
+    budget: rejected as ONE failure (1 attempt, 1 waste unit)."""
+    from services.ai_edit_tools import MAX_OPS_PER_CALL
+    session = EditSession(_ctx())
+    entries = [{'op': 'set_param', 'section': 'printer',
+                'key': 'max_velocity', 'value': str(300 + i)}
+               for i in range(MAX_OPS_PER_CALL + 1)]
+    content, details = session.execute(_batch_args(entries))
+    assert details is None
+    assert 'the limit is' in content
+    assert session.edit_attempts == 1
+    assert session.thrash_units == 1
+
+
+def test_batch_bad_shape_kickback():
+    session = EditSession(_ctx())
+    content, details = session.execute(
+        {'name': 'config_edit',
+         'arguments': {'file': 'printer.cfg', 'ops': 'not json at all'}})
+    assert details is None
+    assert "must be a non-empty list" in content
+    content2, details2 = session.execute(
+        {'name': 'config_edit',
+         'arguments': {'file': 'printer.cfg', 'ops': []}})
+    assert details2 is None and "must be a non-empty list" in content2
+
+
+def test_single_op_back_compat_unchanged():
+    """The envelope is ADDITIVE: every single-op call works exactly as
+    before (op=..., no ops)."""
+    session = EditSession(_ctx())
+    content, details = session.execute(
+        {'name': 'config_edit', 'arguments': {
+            'file': 'printer.cfg', 'op': 'set_param',
+            'section': 'printer', 'key': 'max_velocity', 'value': '300'}})
+    assert details is not None and 'max_velocity: 300' in details['newText']
+    assert 'ops —' not in content  # NOT the batch shape's wording
+
+
+def test_prepare_batch_parity_full_apply_opens_aggregated_result():
+    """prepare() (gate path) runs the SAME engine: a fully applied batch
+    yields (content, aggregated result, preview state) with the session
+    UNTOUCHED until commit; the aggregated result carries op='batch' and
+    the cumulative diff."""
+    session = EditSession(_ctx())
+    content, result, preview = session.prepare(_batch_args([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'},
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_accel',
+         'value': '4000'},
+    ]))
+    assert 'applied 2 of 2 ops' in content
+    assert result is not None and result['op'] == 'batch'
+    assert preview is not None
+    assert 'max_velocity: 300' in preview.files['printer.cfg']
+    assert 'max_velocity: 300' not in session.state.files['printer.cfg']
+    assert result['diff'] and '+max_velocity: 300' in result['diff']
+
+
+def test_prepare_batch_partial_opens_no_card():
+    """A partially applied batch never opens a card over work the user
+    hasn't seen whole: kickback names the failed indices, nothing
+    staged."""
+    session = EditSession(_ctx())
+    content, result, preview = session.prepare(_batch_args([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'},
+        {'op': 'set_param', 'section': 'ghost', 'key': 'k', 'value': '1'},
+    ]))
+    assert result is None and preview is None
+    assert 'op[1]' in content
+    assert 'No card opened' in content
+    assert session.pending_edits == []
+
+
+def test_batch_revalidate_commit_lands_rows_per_subop():
+    """Gate-mode approve of a batch card: revalidate_and_commit replays
+    the SUB-OPS sequentially and commits one change-set row each —
+    committed_ops never sees the envelope (replay/undo shape)."""
+    session = EditSession(_ctx())
+    batch = EditSession.tool_call_to_op(
+        'config_edit', {'file': 'printer.cfg', 'ops': [
+            {'op': 'set_param', 'section': 'printer',
+             'key': 'max_velocity', 'value': '300'},
+            {'op': 'set_param', 'section': 'printer',
+             'key': 'max_accel', 'value': '4000'}]})
+    result = session.revalidate_and_commit(batch, None)
+    assert result['status'] != 'error'
+    assert len(session.committed_ops) == 2
+    assert 'max_velocity: 300' in session.state.files['printer.cfg']
+    assert 'max_accel: 4000' in session.state.files['printer.cfg']
+
+
+def test_batch_replay_undo_per_row():
+    """Mixed-batch undo inherits row-per-op: dropping ONE committed
+    sub-op's row from a keep-set replay leaves the other sub-op applied
+    (resolve_change_chain replays raw_ops, batch never entered it)."""
+    from services.ai_edit_tools import resolve_change_chain
+    session = EditSession(_ctx())
+    session.execute(_batch_args([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'},
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_accel',
+         'value': '4000'},
+    ]))
+    assert len(session.edit_records) == 2
+    ids = [r['id'] for r in session.edit_records]
+    # Undo the FIRST row only: keep the second.
+    outcome = resolve_change_chain(
+        [(session, [ids[1]], 'req-1')], _ctx())
+    assert outcome['status'] == 'ok'
+    text = outcome['files']['printer.cfg']['content']
+    assert 'max_accel: 4000' in text
+    assert 'max_velocity: 300' not in text
+
+
+def test_batch_surfaces_parity():
+    """The batching law reaches ALL FOUR model-facing surfaces (plan):
+    schema, tool snippet, both nudges, protocol prompt."""
+    from api.ai_routes import _EDIT_TOOL_SNIPPETS
+    from services.ai_edit_tools import (
+        EDIT_NUDGE_TEXT, EDIT_NUDGE_TEXT_NATIVE, EDIT_PROTOCOL_PROMPT,
+        EDIT_TOOL_SPECS)
+    schema = json.dumps(EDIT_TOOL_SPECS)
+    assert '"ops"' in schema
+    assert 'ops' in _EDIT_TOOL_SNIPPETS['config_edit']
+    assert '"ops"' in EDIT_NUDGE_TEXT
+    assert '"ops"' in EDIT_NUDGE_TEXT_NATIVE
+    assert 'ops[]' in EDIT_PROTOCOL_PROMPT
+    # Anti-elision law present where bodies are written
+    assert 'elide' in EDIT_PROTOCOL_PROMPT

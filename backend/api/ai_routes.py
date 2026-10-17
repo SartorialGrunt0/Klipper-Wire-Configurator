@@ -1231,7 +1231,12 @@ _EDIT_TOOL_SNIPPETS: dict[str, str] = {
         "project (remove its [include] line first). value must be ONE LINE — "
         "multi-line values (gcode:) are dropped by some tool-call "
         "channels, write those with replace_section/patch_section. "
-        "One op per call; changes are "
+        "Batch multiple changes to one file in ONE call with "
+        "ops=[{op=..., section=..., ...}, ...] (same fields per entry, "
+        "file applies to all; applied in order, a failed entry is named "
+        "by index while the rest apply) instead of multiple calls; never "
+        "abbreviate or elide body content in text/new_text. A single "
+        "change is a single-op call; changes are "
         "validated and staged "
         "for user review"
     ),
@@ -1342,7 +1347,8 @@ _LOAD_SKILL_NUDGE_TEXT = (
     "Unless the user explicitly said NOT to change their files, the block "
     "you just wrote in chat text is inert and must be redone through the "
     "tools: call load_skill(name='config-editing') now, then apply the "
-    "change with the edit tool, one operation per call."
+    "change with the edit tool (multiple changes to one file go in ONE "
+    "call's ops list)."
 )
 
 

@@ -64,6 +64,7 @@ delete a whole file: {"name": "config_edit", "arguments": {"file": "<file.cfg>",
 include a file: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "add_include", "target_file": "new.cfg"}}
 remove or comment out an include: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "comment_include", "target_file": "<path as written in the include line>"}} — comment_include keeps the line as '#[include ...]', remove_include deletes it; these ops work on ANY include line, including ones at the top of a file outside any section
 create a NEW file only: {"name": "config_write", "arguments": {"file": "new.cfg", "content": "<full file text>"}}
+batch many changes to one file in ONE call: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "ops": [{"op": "set_param", "section": "<section>", "key": "<param>", "value": "<new value>"}, {"op": "add_section", "section": "<name>", "text": "<body>"}]}} — applied in order; if one entry fails the others still apply and the result names the failed index
 set_param value must be ONE LINE — multi-line values (e.g. gcode:) are dropped by some tool-call channels and must go through replace_section or patch_section."""
 
 EDIT_NUDGE_TEXT_NATIVE = """Call the tool NOW using your tool-calling interface (do not read \
@@ -79,9 +80,32 @@ rename a section or macro: {"file": "<file.cfg>", "op": "rename_section", "secti
 delete a whole file: {"file": "<file.cfg>", "op": "delete_file"} — remove its [include] line first if it has one
 include a file: {"file": "<file.cfg>", "op": "add_include", "target_file": "<new.cfg>"}
 remove or comment out an include: {"file": "<file.cfg>", "op": "comment_include", "target_file": "<path as written in the include line>"} — comment_include keeps the line as '#[include ...]', remove_include deletes it; these ops work on ANY include line, including ones at the top of a file outside any section
-create a NEW file only: {"file": "<new.cfg>", "content": "<full file text>"}"""
+create a NEW file only: {"file": "<new.cfg>", "content": "<full file text>"}
+batch many changes to one file in ONE call: {"file": "<file.cfg>", "ops": [{"op": "set_param", "section": "<section>", "key": "<param>", "value": "<new value>"}, {"op": "add_section", "section": "<name>", "text": "<body>"}]} — applied in order; if one entry fails the others still apply and the result names the failed index"""
 
 EDIT_TOOL_NAMES = frozenset({"config_edit", "config_write"})
+
+
+def parse_maybe_stringified(value):
+    """Zed's `deserialize_maybe_stringified` pattern: small models emit
+    array-typed tool args as a JSON STRING — ``"ops": "[{\\"op\\": ...}]"``.
+    One relaxed parse attempt when a bracket-looking string arrives;
+    anything that is not a JSON list passes through UNCHANGED (fail-open:
+    a weird string in a value field stays a value). Applied at the single
+    chokepoint every protocol's arguments funnel through
+    (:meth:`EditSession.tool_call_to_op`), so the native and text paths
+    get the recovery identically and cannot drift.
+    """
+    if isinstance(value, str):
+        candidate = value.strip()
+        if candidate.startswith("["):
+            try:
+                parsed = json.loads(candidate, strict=False)
+            except (json.JSONDecodeError, ValueError):
+                return value
+            if isinstance(parsed, list):
+                return parsed
+    return value
 
 CONFIG_EDIT_SPEC = {
     "name": "config_edit",
@@ -125,7 +149,8 @@ CONFIG_EDIT_SPEC = {
                     "delete_file",
                     "add_include", "remove_include", "comment_include",
                 ],
-                "description": "The operation to apply",
+                "description": ("The operation to apply (single-op call). "
+                                "Omit it when passing an ops[] batch."),
             },
             "section": {
                 "type": "string",
@@ -175,8 +200,30 @@ CONFIG_EDIT_SPEC = {
                 "description": ("File to include/un-include/comment-out "
                                 "(add_include / remove_include / comment_include)"),
             },
+            "ops": {
+                "type": "array",
+                "description": (
+                    "Batch: list of operation objects, applied SEQUENTIALLY "
+                    "in ONE call — each op sees the state the previous one "
+                    "left. Each entry uses the same fields as a single-op "
+                    "call: {\"op\": ..., \"section\": ..., \"key\": ..., "
+                    "\"value\": ..., \"text\": ..., \"old_text\": ..., "
+                    "\"new_text\": ..., \"new_section\": ..., "
+                    "\"target_file\": ...} (file applies to every entry). "
+                    "When changing multiple separate locations in one file, "
+                    "use ONE call with multiple entries in ops[] instead of "
+                    "multiple calls. If one op fails the rest still apply; "
+                    "the result lists failed ops by index. NEVER abbreviate "
+                    "or elide body content in text/new_text — send it "
+                    "complete or use a narrower op."
+                ),
+            },
         },
-        "required": ["file", "op"],
+        # 'op' XOR 'ops' is validated at runtime (one clear kickback names
+        # the shape) instead of required[]: JSON Schema can't express the
+        # XOR portably, and required=['file','op'] would reject a valid
+        # ops-only batch on strict providers.
+        "required": ["file"],
     },
 }
 
@@ -238,7 +285,14 @@ Rules:
   and stage it with config_edit only when the user clearly asked to add or
   save it (then add it to printer.cfg). Never reply "not found in your
   config" to a fix-this request, and never ask where it should live.
-- One config_edit operation per call; chain calls for multi-part changes.
+- When changing multiple separate locations in one file, use ONE call
+  with multiple entries in ops[] instead of multiple calls:
+  {"file": "printer.cfg", "ops": [{"op": "set_param", "section": "...",
+  "key": "...", "value": "..."}, {"op": "add_section", ...}]}. Ops apply
+  in order; if one entry fails the others still apply and the result
+  names the failed index — fix ONLY the failed entries and re-send them.
+  NEVER abbreviate or elide body content in text/new_text — send it
+  complete or use a narrower op. A single change stays a single-op call.
 - When config_edit returns validation errors, read them, adjust, and
   retry with a CORRECTED change — never repeat the same failed call. On a
   patch_section anchor miss the result includes the section's current text;
@@ -291,6 +345,26 @@ def _lean_error_content(name: str, result: dict) -> str:
         lines.append("Current section text (quote from this verbatim):")
         lines.append(f"---\n{result['sectionText']}\n---")
     return "\n".join(lines)
+
+
+def _ops_result_content(name: str, results: list[dict]) -> str:
+    """Model-facing batch result: applied/failed counts + per-index
+    lean errors (Zed shape: 'edit at index N did not match'). Applied
+    ops STAY committed — partial progress is real progress (plan law)."""
+    n = len(results)
+    applied = [r for r in results if r.get('ok')]
+    failed = [r for r in results if not r.get('ok')]
+    head = (f"{name} applied {len(applied)} of {n} ops — "
+            f"{'all ops committed' if not failed else 'applied ops are committed; failed ops are not'}")
+    head += "\nChanges are STAGED for the user's review (not saved)."
+    if failed:
+        head += "\nFailed ops (fix ONLY these and re-send them):"
+        for r in failed[:10]:
+            where = r.get('section') or ''
+            head += (f"\n- op[{r.get('idx', '?')}] {r.get('op', '')}"
+                     + (f" [{where}]" if where else "")
+                     + f": {r.get('error', 'failed')}")
+    return head
 
 
 def _advisory_lines(advisories: list) -> str:
@@ -494,6 +568,11 @@ THRASH_BUDGET_DEFAULT = 50
 # growth; the grace allowance covers a normal read->edit->verify loop, and
 # only the overflow past it counts as thrash.
 READ_GRACE = 10
+# Upper bound on ops[] entries per call. Generation-limit insurance for
+# small models (a 60-op JSON blob risks max_tokens truncation, and a
+# truncated batch is a malformed-call round-trip), NOT a work budget —
+# gemma's own BULK-01 run needs 4 calls of ~16 to cover 62 sections.
+MAX_OPS_PER_CALL = 32
 
 
 def thrash_budget() -> int:
@@ -799,12 +878,11 @@ class EditSession:
         return bool(self.state.files)
 
     @staticmethod
-    def tool_call_to_op(name: str, args: dict) -> dict | None:
-        """Map a model-facing tool call to the internal ProjectState op.
-
-        Shared by execute() (auto-approve path) and prepare() (approval
-        path) so the two can never drift.
-        """
+    def _single_op(name: str, args: dict) -> dict | None:
+        """Map ONE model-facing arg dict (single-op shape) to the internal
+        ProjectState op. Split out of tool_call_to_op when ops[] arrived —
+        batch entries run through this same mapper so single and batch
+        semantics can never drift."""
         if name == "config_write":
             return {
                 "op": "new_file",
@@ -818,7 +896,11 @@ class EditSession:
                 if arg_key in args and args[arg_key] is not None:
                     op[arg_key] = str(args[arg_key])
             if "value" in args and args["value"] is not None:
-                op["value"] = str(args["value"])
+                # str() over repr() for non-str values (the old behavior);
+                # a list/dict value on set_param is a model error the
+                # op layer rejects, not something to silently stringify.
+                val = args["value"]
+                op["value"] = val if isinstance(val, str) else str(val)
             # Field-synonym normalization (live r3 TRIDENT-15 2026-09-19:
             # gemma routes both intents through its preferred field name —
             # set_param arrived with new_text='300' (no value), and
@@ -833,6 +915,37 @@ class EditSession:
                 op["text"] = op["new_text"]
             return op
         return None
+
+    @staticmethod
+    def tool_call_to_op(name: str, args: dict) -> dict | None:
+        """Map a model-facing tool call to the internal ProjectState op.
+
+        Shared by execute() (auto-approve path) and prepare() (approval
+        path) so the two can never drift. Batch shape: an ``ops`` entry
+        (list, or a stringified list — see parse_maybe_stringified) maps
+        to ``{"batch": True, "file": ..., "ops": [single-op dicts]}``;
+        every entry runs through _single_op with the top-level `file`
+        merged in (entries may override it). None = unknown tool or an
+        unusable batch shape (the caller kickbacks).
+        """
+        if name == "config_edit" and "ops" in args and args["ops"] is not None:
+            ops_arg = parse_maybe_stringified(args["ops"])
+            if not isinstance(ops_arg, list) or not ops_arg:
+                return None
+            file_default = str(args.get("file", "") or "")
+            mapped: list[dict] = []
+            for entry in ops_arg:
+                if not isinstance(entry, dict):
+                    return None
+                entry_args = dict(entry)
+                if not entry_args.get("file"):
+                    entry_args["file"] = file_default
+                single = EditSession._single_op(name, entry_args)
+                if single is None or single.get("op") == "new_file":
+                    return None
+                mapped.append(single)
+            return {"batch": True, "file": file_default, "ops": mapped}
+        return EditSession._single_op(name, args)
 
     @staticmethod
     def _op_target(op: dict) -> tuple | None:
@@ -867,7 +980,8 @@ class EditSession:
             resolved = op
         return self._op_target(resolved)
 
-    def _duplicate_of_committed(self, op: dict) -> dict | None:
+    def _duplicate_of_committed(self, op: dict,
+                                up_to: int | None = None) -> dict | None:
         """If this op re-overwrites a target already committed THIS
         request, return the committed result; else None.
 
@@ -886,11 +1000,17 @@ class EditSession:
         not read the model's second attempt as flip-flopping. Nothing else
         clears the ledger, so the oscillation family stays closed between
         steers.
+
+        ``up_to`` (batch engine, 2026-10-16): only entries committed
+        BEFORE index up_to count as evidence — re-writing a target the
+        same batch just applied is the batch contract (sequential
+        evolution), not flip-flopping.
         """
         target = self._resolved_op_target(op)
         if target is None:
             return None
-        for entry in reversed(self.committed_ops):
+        limit = (len(self.committed_ops) if up_to is None else up_to)
+        for entry in reversed(self.committed_ops[:limit]):
             if entry.get("epoch", 0) != self._steer_epoch:
                 continue
             if self._resolved_op_target(entry.get("raw_op") or {}) == target:
@@ -1133,6 +1253,207 @@ class EditSession:
         )
         return "\n".join(lines)
 
+    def _batch_engine(self, name: str, batch: dict, *, commit: bool):
+        """Shared per-index engine for the batch shape — execute() and
+        prepare() run through the SAME loop (paths must not drift).
+
+        Sequential application: each entry applies to the state the
+        previous entry left. Continue-on-failure: a bad entry never
+        aborts the rest; with commit=True applied entries COMMIT
+        (partial progress = real progress, rows land); with commit=False
+        the session is untouched and only the preview state advances.
+        Accounting per INDEX: edit_attempts++ and the thrash charge move
+        per entry; the budget is re-checked per index;
+        _duplicate_of_committed re-checks per index (the call-level
+        duplicate guard must not veto a legitimate in-batch target);
+        _repetition_blocked stays per-CALL at the caller. Each committed
+        sub-op records its OWN change-set row with the SUB-OP as
+        ``raw_op`` — batch envelopes never enter committed_ops, so
+        replay/undo/resolve_change_chain keep the row-per-op shape
+        (PR #36 ghost family).
+
+        Returns ``(results, cur_state, last_result)``.
+        """
+        file_default = batch.get("file", "")
+        ops = batch.get("ops") or []
+        baseline = self.baseline
+        # Duplicate guard boundary: entries may legitimately re-write a
+        # target THIS batch just applied (sequential evolution is the
+        # contract — set 300 then 400 in one batch means final=400). Only
+        # targets committed BEFORE this call are flip-flop evidence.
+        dup_boundary = len(self.committed_ops)
+        results: list[dict] = []
+        cur = self.state
+        last_result: dict | None = None
+        for idx, sub in enumerate(ops):
+            self.edit_attempts += 1
+            # Budget re-checked per index (plan Step 2): successful ops
+            # never charge, so overage mid-batch comes from accumulated
+            # failures; the remaining entries stop un-attempted with a
+            # factual note — never a stop-order tone, and the applied
+            # rows above stay committed.
+            if self._over_thrash_budget() is not None:
+                for rest in range(idx, len(ops)):
+                    results.append({
+                        "idx": rest, "op": ops[rest].get("op", ""),
+                        "section": str(ops[rest].get("section", "")),
+                        "ok": False,
+                        "error": "not attempted — this request's waste "
+                                 "budget is spent; rework the approach "
+                                 "before re-sending"})
+                break
+            sub_file = str(sub.get("file") or file_default)
+            if not sub_file:
+                self.thrash_units += 1
+                self.write_failures += 1
+                self.last_write_outcome = "correctable"
+                results.append({"idx": idx, "op": sub.get("op", ""), "ok": False,
+                                "error": "missing file — pass file= on the "
+                                         "call or on the entry"})
+                continue
+            sub = dict(sub)
+            sub["file"] = sub_file
+            dup = self._duplicate_of_committed(sub, up_to=dup_boundary)
+            if dup is not None:
+                # Per-index duplicate: this entry's target was already
+                # committed — skip it (the OTHER entries are independent).
+                prev = dup.get("result", {})
+                results.append({"idx": idx, "op": sub.get("op", ""),
+                                "section": str(sub.get("section", "")),
+                                "ok": False,
+                                "error": f"target already applied and staged "
+                                         f"in this request "
+                                         f"({prev.get('summary', 'previous change')})"})
+                continue
+            new_state, result = cur.apply(baseline, sub)
+            if result["status"] == "error":
+                self.thrash_units += 1
+                self.write_failures += 1
+                self.last_write_outcome = "correctable"
+                count = self._note_failure(name, {"i": idx, **sub})
+                hint = _lean_error_content(name, result).splitlines()
+                err = (hint[0][len(f"{name} FAILED: "):] if hint[0].startswith(f"{name} FAILED: ")
+                       else hint[0]) if hint else "failed"
+                if count >= 2:
+                    err += " (this exact entry already failed — do not re-send it unchanged)"
+                results.append({"idx": idx, "op": sub.get("op", ""),
+                                "section": str(sub.get("section", "")),
+                                "ok": False, "error": err})
+                continue
+            kick = self._registry_kickback(name, sub, result)
+            if kick is not None:
+                # Unknown gcode entry: NOT staged, NOT charged (the
+                # deliberate re-send is the plugin claim — same rule as
+                # the single path). The correction round is re-sending
+                # that entry.
+                self.last_write_outcome = "correctable"
+                lines = [l for l in kick.splitlines() if l.startswith("- ")]
+                results.append({"idx": idx, "op": sub.get("op", ""),
+                                "section": str(sub.get("section", "")),
+                                "ok": False,
+                                "error": "introduces gcode the command "
+                                         "registry does not recognize: "
+                                         + "; ".join(
+                                             l[2:].strip() for l in lines[:2])})
+                continue
+            cur = new_state
+            last_result = result
+            if commit:
+                self.commit(new_state, name, result, raw_op=sub)
+            results.append({"idx": idx, "op": sub.get("op", ""),
+                            "section": str(sub.get("section", "")),
+                            "ok": True})
+        return results, cur, last_result
+
+    def _check_batch_call(self, name: str, args: dict) -> str | None:
+        """Per-CALL checks for the batch shape (both paths, same call):
+        whole-batch identical-retry ladder (the per-INDEX ladder lives in
+        _batch_engine) + the pathological-size guard. Returns the kickback
+        text or None. A rejected call is charged once as waste."""
+        blocked = self._repetition_blocked(name, args)
+        if blocked is not None:
+            self.last_write_outcome = "correctable"
+            self.thrash_units += 1
+            self.write_failures += 1
+            return blocked
+        ops_arg = parse_maybe_stringified(args.get("ops"))
+        ops = ops_arg if isinstance(ops_arg, list) else []
+        if len(ops) > MAX_OPS_PER_CALL:
+            # Generation-limit insurance for small models, NOT a work
+            # budget (see MAX_OPS_PER_CALL). Charged as a failure (waste).
+            # (tool_call_to_op already rejected a non-list/empty ops
+            # before this check runs; empty never reaches here.)
+            self.edit_attempts += 1
+            self.thrash_units += 1
+            self.write_failures += 1
+            self.last_write_outcome = "correctable"
+            return (f"{name} FAILED: this call carries {len(ops)} "
+                    f"ops — the limit is {MAX_OPS_PER_CALL} per call; "
+                    "split the work across several calls.")
+        return None
+
+    def _execute_batch(self, name: str, batch: dict, args: dict) -> tuple[str, dict | None]:
+        """Run one ops[] batch call (auto-approve path): per-call checks,
+        then the shared engine with commit=True. Sequential, continue-on-
+        failure, per-index feedback — see _batch_engine."""
+        kickback = self._check_batch_call(name, args)
+        if kickback is not None:
+            return kickback, None
+        results, _cur, last_result = self._batch_engine(name, batch, commit=True)
+        # Live-staging details: commit() already advanced session state,
+        # so the details for the LAST touched file carry the CUMULATIVE
+        # net text — exactly what the editor pane consumes mid-request.
+        details = (self._details_for(name, last_result)
+                   if last_result is not None else None)
+        return _ops_result_content(name, results), details
+
+    def _prepare_batch(self, name: str, batch: dict, args: dict):
+        """Gate-mode batch: the SAME engine as execute() with
+        commit=False — the session is untouched until the user decides.
+
+        A FULLY applied batch hands an aggregated result + the preview
+        state to the approval machinery (one card, one decision, one
+        commit of the whole batch). A PARTIALLY applied batch does NOT
+        open a card: committing "the batch" would double-apply the
+        already-previewed half, so the honest kickback lists the failed
+        indices and the model re-sends only those ops. The dormant-gate
+        contract holds: the card is the single commit point and never
+        opens over work the user has not seen whole.
+        Returns ``(content, result, preview_state)`` like prepare()."""
+        kickback = self._check_batch_call(name, args)
+        if kickback is not None:
+            return kickback, None, None
+        results, cur, last_result = self._batch_engine(name, batch, commit=False)
+        failed = [r for r in results if not r.get("ok")]
+        applied = [r for r in results if r.get("ok")]
+        if not applied or last_result is None:
+            # Nothing applied: pure per-index kickback, no card.
+            return _ops_result_content(name, results), None, None
+        if failed:
+            # Mixed batch in gate mode: NO card over partially applied
+            # work (see docstring). Nothing staged; fix and re-send the
+            # failed indices only.
+            return (_ops_result_content(name, results)
+                    + "\nNo card opened — fix the failed ops and re-send "
+                      "a batch of ONLY those ops (nothing was staged)."), None, None
+        # Fully applied batch: one aggregated card result + preview.
+        touched = last_result.get("file", "")
+        agg_result = {
+            "status": last_result.get("status", "applied"),
+            "file": touched,
+            "op": "batch",
+            "summary": f"batch: {len(applied)} changes to {touched}",
+            "advisories": last_result.get("advisories", []),
+            # Cumulative net diff the user reviews: difflib over the
+            # whole batch's before/after — per-op diffs would each
+            # re-show shared context and mislead the review surface.
+            "diff": diff_text(
+                touched,
+                self.state.files.get(touched, ""),
+                cur.files.get(touched, "")),
+        }
+        return _ops_result_content(name, results), agg_result, cur
+
     def execute(self, tool_call: dict) -> tuple[str, dict | None]:
         """Run one write tool call (auto-approve path). Returns
         (lean content, details-or-None).
@@ -1143,16 +1464,30 @@ class EditSession:
         """
         name = tool_call.get("name", "")
         args = tool_call.get("arguments", {}) or {}
-        self.edit_attempts += 1
 
         budget = self._over_thrash_budget()
         if budget is not None:
+            self.edit_attempts += 1
             return budget, None
 
         op = self.tool_call_to_op(name, args)
         if op is None:
+            self.edit_attempts += 1
+            if "ops" in args:
+                # An ops arg arrived but mapped to nothing usable.
+                return (f"{name} FAILED: 'ops' must be a non-empty list of "
+                        "operation objects, e.g. "
+                        '[{"op": "set_param", "section": "printer", '
+                        '"key": "max_accel", "value": "3000"}]. Nothing '
+                        "was applied."), None
             return f"Unknown write tool: {name}", None
+        if op.get("batch"):
+            # Per-op accounting (plan Step 2): the batch engine increments
+            # edit_attempts per INDEX — a call-level increment on top of
+            # N index increments would miscount work.
+            return self._execute_batch(name, op, args)
 
+        self.edit_attempts += 1
         blocked = self._repetition_blocked(name, args)
         if blocked is not None:
             # A refused repeat is a wasted call — charge the waste.
@@ -1211,16 +1546,30 @@ class EditSession:
         """
         name = tool_call.get("name", "")
         args = tool_call.get("arguments", {}) or {}
-        self.edit_attempts += 1
 
         budget = self._over_thrash_budget()
         if budget is not None:
+            self.edit_attempts += 1
             return budget, None, None
 
         op = self.tool_call_to_op(name, args)
         if op is None:
+            self.edit_attempts += 1
+            if "ops" in args:
+                # An ops arg arrived but mapped to nothing usable — same
+                # kickback as execute() (paths must not drift).
+                return (f"{name} FAILED: 'ops' must be a non-empty list of "
+                        "operation objects, e.g. "
+                        '[{"op": "set_param", "section": "printer", '
+                        '"key": "max_accel", "value": "3000"}]. Nothing '
+                        "was applied."), None, None
             return f"Unknown write tool: {name}", None, None
+        if op.get("batch"):
+            # Per-op accounting (see execute()): batch increments
+            # edit_attempts per INDEX, never a call-level +1 on top.
+            return self._prepare_batch(name, op, args)
 
+        self.edit_attempts += 1
         # Review fix 2026-09-26: execute() refuses an identical call that
         # already failed 3+ times; prepare() (the product/approval path)
         # was missing the same guard, so a looping model reached the
@@ -1318,6 +1667,63 @@ class EditSession:
         ``invalidated`` so the card re-renders honestly.
         """
         name = "config_write" if op.get("op") == "new_file" else "config_edit"
+
+        if op.get("batch"):
+            # Batch envelope approve (prepare()/card path): the card was
+            # built over a fully-applied PREVIEW; the decision commits
+            # the SUB-OPS one per change-set row (never the envelope —
+            # committed_ops shape is row-per-op for replay/undo, PR #36
+            # ghost family). Re-validate each sub-op sequentially
+            # against the replayed state, exactly as the engine did at
+            # prepare time; any sub-op that no longer applies after the
+            # user's manual edits invalidates the whole card honestly
+            # (partial approve of a batch the user reviewed as ONE diff
+            # would strand half a preview).
+            subs = [dict(s) for s in (op.get("ops") or [])]
+            file_default = str(op.get("file", "") or "")
+            for sub in subs:
+                sub.setdefault("file", file_default)
+            if context_files:
+                try:
+                    replay = ProjectState.from_context_files(context_files)
+                except Exception as exc:
+                    return {"status": "error",
+                            "error": f"Invalid context refresh: {exc}"}
+                replay_baseline = replay.validate()
+                for prior in self.committed_ops:
+                    replay, prior_result = replay.apply(replay_baseline,
+                                                        prior["raw_op"])
+                    if prior_result["status"] == "error":
+                        return {
+                            "status": "error",
+                            "error": (
+                                "config changed since this proposal — an "
+                                "earlier approved edit no longer applies "
+                                f"({prior_result.get('error', 'anchor lost')})"
+                            ),
+                            "newErrors": prior_result.get("newErrors", []),
+                        }
+            else:
+                replay, replay_baseline = self.state, self.baseline
+            cur = replay
+            staged_results: list[tuple[dict, "ProjectState", dict]] = []
+            for sub in subs:
+                nxt, res = cur.apply(replay_baseline, sub)
+                if res["status"] == "error":
+                    res.setdefault(
+                        "error", "config changed since this proposal")
+                    return res
+                cur = nxt
+                staged_results.append((sub, nxt, res))
+            # All sub-ops re-validated: commit each as its own row.
+            for sub, nxt, res in staged_results:
+                self.commit(nxt, name, res, raw_op=sub)
+            last_res = staged_results[-1][2]
+            last_res["details"] = self._details_for(name, last_res)
+            last_res["summary"] = (f"batch: {len(subs)} changes to "
+                                   f"{last_res.get('file', '')}")
+            return last_res
+
         if not context_files:
             # No refresh info: validate against the current session state.
             new_state, result = self.state.apply(self.baseline, op)
