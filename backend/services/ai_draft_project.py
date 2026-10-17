@@ -690,7 +690,8 @@ class ProjectState:
         # for the chat layer's post-rename directive (see _op_rename_section).
         # needs_include carries through the same way for the post-create
         # include directive (see _op_new_file, 2026-10-12).
-        for k in ('renamed_from', 'renamed_to', 'needs_include'):
+        for k in ('renamed_from', 'renamed_to', 'needs_include',
+                  'resolvedSection'):
             if k in outcome:
                 result[k] = outcome[k]
         if result['status'] == 'error':
@@ -741,12 +742,25 @@ class ProjectState:
                 "patch_section, comment_section, uncomment_section, "
                 "delete_file, add_include, remove_include, comment_include "
                 "— use exactly one of these, one op per call.")
+        resolved_op = self._resolve_op_section(op)
         try:
-            return handler(self._resolve_op_section(op))
+            outcome = handler(resolved_op)
         except _OpError as exc:  # precondition failure — structured, no raise
             return exc.to_result()
         except KeyError as exc:  # missing required arg — structured, no raise
             return _state_error(f"Missing required argument for {kind}: {exc.args[0]}")
+        # Carry the CANONICAL resolved header through the result (BULK-02
+        # bank run 2026-10-17): the change-set recorder resolved the raw op
+        # against the POST-apply state, where a just-commented
+        # '[gcode_macro M109]' is invisible to the resolver — the row was
+        # recorded as bare 'M109' and the prefix-filtered coverage criterion
+        # saw 2 of 15 commented macros. The pre-apply resolution is the
+        # only place the canonical name still exists.
+        if (isinstance(outcome, dict) and outcome.get('status') == 'ok'
+                and str(resolved_op.get('section') or '')):
+            outcome['resolvedSection'] = (
+                str(resolved_op.get('section')).strip().strip('[]'))
+        return outcome
 
     def _resolve_op_section(self, op: dict) -> dict:
         """Rewrite op['section'] / op['file'] to the real header and key
@@ -1014,13 +1028,38 @@ class ProjectState:
             scan -= 1
         inner_end = scan
         body_stripped = body.strip('\n')
-        for line in body_stripped.split('\n'):
+        # Header guard (BULK bank run 2026-10-17): ANY header line in the
+        # body corrupts the file. A FOREIGN header nests a new section
+        # inside this one; a repeat of the section's OWN header splits it
+        # in two, and both raw parsers merge the halves last-wins
+        # (Klipper is strict=False) — so the damaged file can even
+        # validate clean while silently re-ordering definitions (BULK-01
+        # staged 6 duplicated [header] lines this way, e.g.
+        # text='# purpose\n[printer]\nkinematics:...' whose second
+        # '[printer]' survived because only the FIRST line is stripped).
+        # The own-header exemption below therefore applies ONLY to the
+        # leading line.
+        body_lines_pre = body_stripped.split('\n')
+        for pos, line in enumerate(body_lines_pre):
             match = RE_SECTION_HEADER.match(line)
-            if match and match.group(1).strip() != header:
-                return _state_error(
-                    f"Argument text must contain only the body of [{header}] "
-                    f"(found foreign header '[{match.group(1).strip()}]')."
-                )
+            if not match:
+                continue
+            found_hdr = match.group(1).strip()
+            if found_hdr == header and pos == 0:
+                continue  # leading own header: stripped below, as models habitually send it
+            return _state_error(
+                f"Argument text must contain only the body of [{header}] "
+                f"(found header line '[{found_hdr}]' at body line {pos + 1}"
+                + (f" — a repeated '[{header}]' makes both parsers MERGE the two "
+                   f"halves and the first one's params are silently shadowed. "
+                   f"Send the body exactly ONCE with NO header line (a purpose "
+                   f"comment as the first body line is fine); "
+                   f"op='add_section' creates new sections, not "
+                   f"replace_section."
+                   if found_hdr == header else
+                   f"). op='add_section' creates new sections — never embed "
+                   f"a '[...]' header inside another section's body.")
+            )
         # A text that OPENS with the section's own header (models habitually
         # include it) is the body-plus-header shape, not body-only. Strip
         # one leading header line -- without this, keeping the header in the
@@ -1392,6 +1431,21 @@ class ProjectState:
             return _state_error('Missing required argument: old_text (quote lines exactly as read returned them)')
         if not isinstance(new_text, str):
             return _state_error('Missing required argument: new_text')
+        # Header guard (BULK-04 bank run 2026-10-17): new_text smuggled
+        # SIX new '[stepper_x]...[tmc2209 stepper_z]' sections inside
+        # [printer]'s body and the op reported success. A raw column-0
+        # '[...]' line can never legally exist inside a section's body
+        # scope (the parser would have ended the section there), so any
+        # header line in new_text is corruption by construction.
+        for line in new_text.split('\n'):
+            m_hdr = RE_SECTION_HEADER.match(line)
+            if m_hdr:
+                return _state_error(
+                    f"new_text must not contain a section header "
+                    f"('[{m_hdr.group(1).strip()}]') — patch_section edits "
+                    f"INSIDE [{header}] only. To create a new section use "
+                    f"op='add_section' (one per section, or list them in one "
+                    f"ops=[...] batch).")
 
         lines = _split_lines(self.files[filename])
         found = _find_section(lines, header)

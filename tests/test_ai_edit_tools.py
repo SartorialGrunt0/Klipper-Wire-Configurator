@@ -2787,6 +2787,37 @@ def test_batch_replay_undo_per_row():
     assert 'max_velocity: 300' not in text
 
 
+def test_comment_section_row_carries_canonical_header():
+    """BULK-02 bank run (2026-10-17): commenting '[gcode_macro PRINT_START]'
+    via the BARE macro name recorded the changeSet row as bare
+    'PRINT_START' — the recorder re-resolved the raw op against the
+    POST-apply state, where the header it just '#'ed is invisible. The
+    engine now carries the pre-apply canonical header through the result;
+    the row must show the FULL header (coverage criteria prefix-filter on
+    'gcode_macro')."""
+    session = EditSession(_ctx())
+    content, details = session.execute({
+        'name': 'config_edit',
+        'arguments': {'file': 'printer.cfg', 'op': 'comment_section',
+                      'section': 'PRINT_START'},
+    })
+    assert details is not None
+    rows = session.change_set_payload()['edits']
+    assert rows[-1]['op'] == 'comment_section'
+    assert rows[-1]['section'] == 'gcode_macro PRINT_START'
+    assert rows[-1]['superseded'] is False
+    # A follow-up uncomment of the SAME bare name supersedes the comment
+    # row (canonical identity), never a case/name-variant double row.
+    session.execute({
+        'name': 'config_edit',
+        'arguments': {'file': 'printer.cfg', 'op': 'uncomment_section',
+                      'section': 'PRINT_START'},
+    })
+    rows = session.change_set_payload()['edits']
+    ops = [(r['op'], r['section'], r['superseded']) for r in rows]
+    assert ('comment_section', 'gcode_macro PRINT_START', False) in ops
+
+
 def test_batch_surfaces_parity():
     """The batching law reaches ALL FOUR model-facing surfaces (plan):
     schema, tool snippet, both nudges, protocol prompt."""

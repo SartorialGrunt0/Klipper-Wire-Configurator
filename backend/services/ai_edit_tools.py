@@ -1996,6 +1996,15 @@ class EditSession:
             resolved = op
         file_name = result.get("file", "")
         section = str(resolved.get("section", "") or "").strip().strip("[]")
+        # Canonical header from the PRE-apply resolution (BULK-02 bank run
+        # 2026-10-17): for comment_section the post-apply state can no
+        # longer see the header it just '#'ed, so re-resolving the raw op
+        # here loses the 'gcode_macro ' prefix. The engine's resolvedSection
+        # is authoritative when present.
+        canonical = str(result.get("resolvedSection") or "").strip().strip("[]")
+        if canonical:
+            section = canonical
+            resolved = {**resolved, "section": canonical}
         key = (str(resolved.get("key", "") or "")
                if resolved.get("op") == "set_param" else "")
         diff = result.get("diff") or {}

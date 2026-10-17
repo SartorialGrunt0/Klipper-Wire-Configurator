@@ -503,7 +503,45 @@ def test_replace_section_and_foreign_header_refused():
     assert 'G28' not in st1.files['printer.cfg']
     _, r2 = st.apply(base, {'op': 'replace_section', 'file': 'printer.cfg',
                             'section': 'bed_mesh', 'text': 'speed: 1\n[extruder]\nx: 1'})
-    assert r2['status'] == 'error' and 'foreign header' in r2['error']
+    assert r2['status'] == 'error' and 'header line' in r2['error']
+
+
+def test_replace_section_repeated_own_header_refused():
+    """BULK-01 bank run (2026-10-17): text='# purpose\\n[printer]\\n...'
+    kept its SECOND '[printer]' (only the leading line is stripped), so
+    the staged file carried a duplicated header that the strict=False
+    parser silently merges. Only a leading own-header line is tolerated."""
+    st, base = _state()
+    _, r = st.apply(base, {'op': 'replace_section', 'file': 'printer.cfg',
+                           'section': 'printer',
+                           'text': '# purpose\n[printer]\nkinematics: corexy\n'
+                                   'max_velocity: 200\nmax_accel: 1000\n'
+                                   'max_z_velocity: 5\nmax_z_accel: 100'})
+    assert r['status'] == 'error'
+    assert "repeated '[printer]'" in r['error']
+    # a body whose ONLY header is the leading own-header still strips clean
+    st1, r2 = st.apply(base, {'op': 'replace_section', 'file': 'printer.cfg',
+                              'section': 'printer',
+                              'text': '[printer]\nkinematics: corexy\n'
+                                      'max_velocity: 200\nmax_accel: 1000\n'
+                                      'max_z_velocity: 5\nmax_z_accel: 100'})
+    assert r2['status'] == 'applied'
+    assert st1.files['printer.cfg'].count('[printer]') == 1
+
+
+def test_patch_section_new_text_with_header_refused():
+    """BULK-04 bank run (2026-10-17): new_text smuggled six '[...]'
+    sections inside [printer]'s body and reported success — a raw header
+    line can never live inside another section's scope."""
+    st, base = _state()
+    _, r = st.apply(base, {'op': 'patch_section', 'file': 'printer.cfg',
+                           'section': 'printer',
+                           'old_text': 'kinematics: corexy',
+                           'new_text': 'kinematics: corexy\n\n'
+                                       '[stepper_x]\nstep_pin: PF0'})
+    assert r['status'] == 'error'
+    assert 'must not contain a section header' in r['error']
+    assert 'add_section' in r['error']
 
 
 def test_replace_section_header_prefixed_body_is_stripped():
