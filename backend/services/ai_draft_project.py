@@ -341,6 +341,19 @@ def _resolve_section_ref(requested: str, lines: list[str]) -> str:
         return distinct_ci[0]
     if ' ' in requested:  # full-header form that simply isn't there
         return requested
+    # A bare request that is itself a complete Klipper section TYPE
+    # ('stepper_x' is a top-level section per the schema) must NEVER be
+    # hijacked onto a family header whose name part merely coincides
+    # ('[tmc2209 stepper_x]'). BULK-04 bank re-run (2026-10-17): every
+    # fix attempt for the missing [stepper_x] landed on the DRIVER
+    # section — 'already exists [tmc2209 stepper_x]', unknown-param
+    # kickbacks for step_pin on [tmc2209] — 51 failed ops of flail. The
+    # replace_section hijack was caught only by post-merge validation;
+    # had that missed, the driver body would have been overwritten with
+    # stepper params. The fallback exists for names that are NOT types
+    # themselves ('Level_Bed' -> [gcode_macro Level_Bed]).
+    if get_section_def(wanted) is not None:
+        return requested
     matches = [h for h in headers if ' ' in h
                and _header_name_part(h).casefold() == wanted]
     distinct = list(dict.fromkeys(matches))
@@ -377,7 +390,13 @@ def _ambiguous_section_hint(requested: str, lines: list[str]) -> str:
             if header.casefold() == wanted:
                 matches.append(header)
         elif ' ' in header and _header_name_part(header).casefold() == wanted:
-            matches.append(header)
+            # Same type-name guard as _resolve_section_ref (BULK-04): a
+            # request that IS a complete section type has nothing to
+            # disambiguate — a coinciding family name part ('[tmc2209
+            # stepper_x]' for 'stepper_x') is a sibling, not a candidate.
+            # Offering it would steer the model onto the driver section.
+            if get_section_def(wanted) is None:
+                matches.append(header)
     if len(matches) < 2:
         return ''
     return (f" Multiple sections match '{requested}' — pass one of these "

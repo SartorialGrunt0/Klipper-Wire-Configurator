@@ -1467,11 +1467,11 @@ class EditSession:
                 # batch stays lean.
                 sub_errs = (result.get("newErrors") or [])[:3]
                 if sub_errs:
-                    err += "".join(
-                        f"\n  - [{e.get('section', '')}] "
+                    err += "\n" + "\n".join(
+                        f"  - [{e.get('section', '')}] "
                         f"{e.get('param', '')}: {e.get('message', '')}"
-                        .rstrip() + "\n"
-                        for e in sub_errs).rstrip("\n")
+                        .rstrip()
+                        for e in sub_errs)
                 self.note_failure(
                     f"op[{idx}] {sub.get('op', '')}"
                     + (f"@{sub.get('section')}" if sub.get("section") else ""),

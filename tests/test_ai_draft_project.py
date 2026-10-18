@@ -1290,6 +1290,59 @@ def test_bare_name_add_section_duplicate_guard_resolves():
     assert '\n[Level_Bed]' not in st.files['printer.cfg']
 
 
+def test_bare_section_type_never_hijacks_coincident_family_name():
+    """BULK-04 bank re-run (2026-10-17): '[tmc2209 stepper_x]' made a bare
+    'stepper_x' request resolve onto the DRIVER section — the fallback
+    matched the family header's name part without checking that the
+    request is itself a complete section TYPE. Every fix attempt for the
+    missing [stepper_x] bounced off the driver ('already exists
+    [tmc2209 stepper_x]', unknown-param step_pin on [tmc2209]) and
+    add_section was BLOCKED from creating the real stepper. A complete
+    type name must resolve to NOTHING when absent."""
+    cfg = ("[printer]\nkinematics: corexy\n"
+           "\n"
+           "[tmc2209 stepper_x]\nuart_pin: PC1\nrun_current: 0.80\n")
+    st = ProjectState.from_context_files({'printer.cfg': {'content': cfg}})
+    base = st.validate()
+    # edits do NOT touch the driver
+    for op in ({'op': 'set_param', 'file': 'printer.cfg',
+                'section': 'stepper_x', 'key': 'step_pin', 'value': 'PF0'},
+               {'op': 'replace_section', 'file': 'printer.cfg',
+                'section': 'stepper_x', 'text': 'rotation_distance: 40'}):
+        _, r = st.apply(base, op)
+        assert r['status'] == 'error' and 'not found' in r['error'], r
+        assert '[tmc2209 stepper_x]' in st.files['printer.cfg']
+        assert 'uart_pin: PC1' in st.files['printer.cfg']  # driver intact
+    # the full driver header still resolves/edits normally
+    st1, r1 = st.apply(base, {'op': 'set_param', 'file': 'printer.cfg',
+                              'section': 'tmc2209 stepper_x',
+                              'key': 'run_current', 'value': '0.7'})
+    assert r1['status'] in ('applied', 'applied_with_advisory'), r1
+    # add_section stepper_x CREATES the real section — no duplicate guard
+    # hit against the coinciding driver name
+    st2, r2 = st.apply(base, {'op': 'add_section', 'file': 'printer.cfg',
+                              'section': 'stepper_x',
+                              'text': 'step_pin: PF0\ndir_pin: PF1\n'
+                                      'enable_pin: !PD7\n'
+                                      'rotation_distance: 40\n'
+                                      'microsteps: 16'})
+    assert r2['status'] == 'applied', r2
+    assert '[stepper_x]' in st2.files['printer.cfg']
+
+
+def test_bare_family_name_still_resolves_when_not_a_type():
+    # The fallback's ORIGINAL job: 'Level' is not a section type, so a
+    # unique '[gcode_macro Level]' name-part match must still resolve.
+    st = ProjectState.from_context_files({
+        'printer.cfg': {'content': '[gcode_macro Level]\ngcode:\n    G28\n'}})
+    st1, r = st.apply(st.validate(),
+                      {'op': 'set_param', 'file': 'printer.cfg',
+                       'section': 'Level', 'key': 'description',
+                       'value': 'probe level'})
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    assert 'gcode_macro Level' in r['summary']
+
+
 def test_missing_section_wrong_file_resolves_bare_name():
     # Cross-file hint is resolution-aware: bare name in the wrong file
     # names the other file AND the full header to pass.
