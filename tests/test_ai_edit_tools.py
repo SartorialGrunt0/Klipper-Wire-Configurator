@@ -2594,6 +2594,23 @@ def test_batch_per_index_feedback_format():
     assert details is not None  # partial commit still stages details
 
 
+def test_batch_validation_kickback_names_the_findings():
+    """BULK-04 bank re-run (2026-10-17): a failed batch entry said only
+    'failed validation after merging' — the concrete newErrors
+    ('Unknown parameter uart_pins…') surfaced ONLY on the single-op
+    path. Gemma re-sent the invented params 50+ times (the fix loop had
+    nothing to read) and burned the waste budget. The per-index kickback
+    must carry the findings."""
+    session = EditSession(_ctx())
+    content, _ = session.execute(_batch_args([
+        {'op': 'add_section', 'section': 'tmc2209 stepper_x',
+         'text': 'uart_pins: PC1\nrun_current: 0.8\ndriver_mod: td2_mod'},
+    ]))
+    assert 'op[0]' in content
+    assert 'uart_pin' in content          # the required-param finding
+    assert 'Unknown parameter' in content  # the unknown-param finding
+
+
 def test_batch_continue_on_failure_rows_land_per_op():
     """3 entries, middle one bad: rows land for the good ones only, one
     change-set row PER SUB-OP (never an envelope row)."""

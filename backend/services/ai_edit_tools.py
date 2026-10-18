@@ -1456,6 +1456,22 @@ class EditSession:
                 hint = _lean_error_content(name, result).splitlines()
                 err = (hint[0][len(f"{name} FAILED: "):] if hint[0].startswith(f"{name} FAILED: ")
                        else hint[0]) if hint else "failed"
+                # Per-index validation detail (BULK-04 bank re-run
+                # 2026-10-17): the single-op path surfaces the concrete
+                # newErrors ('Unknown parameter uart_pins — Klipper
+                # reads no such option'), but the batch shape stripped
+                # them to 'failed validation after merging' — gemma
+                # re-sent the same invented params 50+ times and burned
+                # the whole waste budget. A model cannot fix a finding
+                # it cannot see; cap at 3 per entry so a 10-failure
+                # batch stays lean.
+                sub_errs = (result.get("newErrors") or [])[:3]
+                if sub_errs:
+                    err += "".join(
+                        f"\n  - [{e.get('section', '')}] "
+                        f"{e.get('param', '')}: {e.get('message', '')}"
+                        .rstrip() + "\n"
+                        for e in sub_errs).rstrip("\n")
                 self.note_failure(
                     f"op[{idx}] {sub.get('op', '')}"
                     + (f"@{sub.get('section')}" if sub.get("section") else ""),
