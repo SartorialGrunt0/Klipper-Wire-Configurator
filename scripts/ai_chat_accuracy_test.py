@@ -3691,6 +3691,15 @@ def chat_request(base_url: str, question: TestQuestion, settings: dict,
     # harness field (ChatRequest.editSkill).
     if settings.get("force_skill_active") and effective_edit:
         payload["editSkill"] = True
+    # Completion-kickback override (ChatRequest.completionCheck): run-
+    # level only (no per-question override — the kick is a loop-seam
+    # behavior, not a question property). Default 'off' sends False so
+    # the bank measures the raw loop; 'auto' sends nothing (server
+    # default = armed). Sent only when the write tools are armed: with
+    # no edit session the kick can never fire anyway.
+    cc = settings.get("completion_check")
+    if cc is not None and effective_edit:
+        payload["completionCheck"] = cc
     url = base_url.rstrip("/") + "/ai/chat"
     try:
         return http_post_json(url, payload, timeout), ""
@@ -3993,9 +4002,20 @@ def resolve_settings(args: argparse.Namespace) -> dict:
         "tool_protocol": args.tool_protocol or "auto",
         "merge_system_messages": args.merge_system_messages,
         "edit_tools": edit_tools_setting(args),
+        "completion_check": completion_check_setting(args),
         "force_skill_active": bool(getattr(args, "force_skill_active", False)),
         "base_url": base_url,
     }
+
+
+def completion_check_setting(args: argparse.Namespace) -> bool | None:
+    """--completion-check on/off/auto. DEFAULT 'off' (Sir 2026-10-18):
+    bank runs measure the raw loop — no completion kickback, no
+    reclose echo — so R-phase diffs aren't polluted by the kick arm.
+    'auto' returns None (nothing sent; server default = armed), 'on'
+    forces True explicitly."""
+    value = getattr(args, "completion_check", "off")
+    return {"on": True, "off": False}.get(value, None)
 
 
 def edit_tools_setting(args: argparse.Namespace) -> bool | None:
@@ -4137,6 +4157,16 @@ def main() -> int:
                              "default (write tools ON — product behavior), "
                              "'off' forces the read-only arm (no write tools "
                              "advertised)")
+    parser.add_argument("--completion-check", default="off",
+                        choices=["auto", "on", "off"],
+                        dest="completion_check",
+                        help="Loop-exit completion kickback for bank runs "
+                             "(ChatRequest.completionCheck): 'off' (DEFAULT) "
+                             "disables it so bank numbers measure the raw "
+                             "loop with no re-query/reclose echo; 'auto' "
+                             "follows the server default (armed); 'on' "
+                             "forces it armed explicitly. A/B evidence for "
+                             "the completion-judge plan 2026-10-18.")
     parser.add_argument("--force-skill-active", action="store_true",
                         help="Skill-gate A/B arm: send editSkill=true so the "
                              "write tools are advertised immediately (edit law "

@@ -254,6 +254,40 @@ def test_completion_check_fires_once_after_staged_edit(blank_memory, monkeypatch
     assert len(scripted.payloads) == 3
 
 
+def test_completion_check_harness_override_disarms(blank_memory, monkeypatch):
+    # ChatRequest.completionCheck=False (harness default for bank runs,
+    # 2026-10-18): the same edit-intent confident-prose close that earns
+    # a kick by default must close raw — no re-query, no echo, kicks 0.
+    body, scripted = _chat(
+        {'requestId': 'cc-off-1', 'completionCheck': False},
+        [
+            _edit_call(),
+            {'choices': [{'message': {'content': 'All done — max_accel is 4000.'}}]},
+        ],
+        monkeypatch,
+    )
+    assert body['usage']['completionKicks'] == 0
+    # The edit turn still runs; only the kick re-query is gone.
+    assert len(scripted.payloads) == 2
+
+
+def test_completion_check_harness_override_none_keeps_product_default(
+        blank_memory, monkeypatch):
+    # completionCheck omitted (frontend behavior) must be byte-identical
+    # to the armed default — the override only disarms on explicit False.
+    body, scripted = _chat(
+        {'requestId': 'cc-none-1'},
+        [
+            _edit_call(),
+            {'choices': [{'message': {'content': 'All done — max_accel is 4000.'}}]},
+            {'choices': [{'message': {'content': 'Confirmed: the request is fully resolved.'}}]},
+        ],
+        monkeypatch,
+    )
+    assert body['usage']['completionKicks'] == 1
+    assert len(scripted.payloads) == 3
+
+
 def test_completion_check_fires_advice_only_edit_request(blank_memory, monkeypatch):
     # The advice-only hole: edit request, ZERO writes, confident prose.
     # Today no guard fires; the completion check must.

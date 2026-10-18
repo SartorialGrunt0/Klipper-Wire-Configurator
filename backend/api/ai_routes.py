@@ -354,6 +354,15 @@ class ChatRequest(BaseModel):
     # None/False = the model must call load_skill to unlock the write
     # tools.
     editSkill: bool | None = None
+    # Completion-check override (harness A/B runs ONLY; the frontend
+    # never sends it). None = server behavior (kickback armed — product
+    # default). False disables the loop-exit completion kickback for
+    # this request: the bank measures the raw loop with no re-query and
+    # no reclose echo (Sir 2026-10-18, pre-R1 bank work — every bank
+    # number should say whether the kick was in the loop at all).
+    # Mirrors the editTools/editSkill harness-override precedent, so
+    # A/B runs need no backend restart.
+    completionCheck: bool | None = None
     # Approval-gate override (harness A/B runs ONLY; the frontend never
     # sends it). INERT since the post-hoc review change (2026-10-02):
     # nothing in the edit path suspends, so there is no wait to skip and
@@ -4004,6 +4013,12 @@ async def chat_proxy(req: ChatRequest):
                     # a steer clears the counter.
                     if (completion_kicks < COMPLETION_KICKBACK_LIMIT
                             and edit_session is not None
+                            # Harness override (see ChatRequest.
+                            # completionCheck): only an explicit False
+                            # disarms; None keeps the product default
+                            # (same "explicit override wins" shape as
+                            # editTools).
+                            and req.completionCheck is not False
                             and current_content.strip()
                             # Refusal/budget shield (same discipline as
                             # the edit-prose nudge): after a user_gated
