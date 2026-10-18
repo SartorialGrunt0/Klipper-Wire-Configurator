@@ -160,6 +160,15 @@ model can self-correct on the next call:
   applied, so a macro commented via its bare name records as
   `gcode_macro M109`, not `M109` — the review pane and trace-based
   grading see the same truth.
+- **TMC driver refs are validated across every file in the session, not
+  just printer.cfg's include closure** (validator F25). A staged
+  `[tmc2209 x]` next to an unrelated `printer.cfg` used to validate clean
+  because the edited file sat outside the closure — Klipper would hard-
+  fail the boot (`Could not find config section '[x]' required by tmc
+  driver`) the moment the file is included. Editor-carried files are the
+  user's intended config, so binding checks and their reference
+  resolution span all of them; the delta gate cancels pre-existing
+  findings, so only a new write can trigger the kickback.
 
 ## Stopping, retrying, and resuming
 
