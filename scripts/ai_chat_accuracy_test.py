@@ -2051,8 +2051,8 @@ _BULK_PINS_CFG = """\
 #   stepper_x:  step PF0  dir PF1  enable !PD7  endstop ^PE5
 #   stepper_y:  step PF6  dir PF7  enable !PF2  endstop ^PJ1
 #   stepper_z:  step PL3  dir PL1  enable !PK0  endstop ^PD3
-#   drivers:    TMC2209 UART, uart pins PC1 (x), PC3 (y), PL4 (z),
-#               run currents 0.8 / 0.8 / 0.65
+#   drivers:    TMC2209 UART, uart pins PC1 (stepper_x), PC3 (stepper_y),
+#               PL4 (stepper_z), run currents 0.8 / 0.8 / 0.65
 [printer]
 kinematics: corexy
 max_velocity: 300
