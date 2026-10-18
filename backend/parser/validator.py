@@ -1946,19 +1946,25 @@ def _check_tmc_stepper_references(
          "Could not find config section '[<stepper>]' required by tmc driver";
       2. that stepper's microsteps must be a TMC mres value
          (1/2/4/8/16/32/64/128/256) via getchoice — any other int hard-fails.
-    Both are config-load hard-fails, so both are errors here. The reference is
-    resolved against the ACTIVE project (the stepper may be in an included
-    file), mirroring how Klipper loads all includes into one namespace.
+    Both are config-load hard-fails, so both are errors here.
+
+    Scope is EVERY file in the project dict, not just the include closure
+    (BULK-04 bank leak 2026-10-17): files the editor session carries
+    alongside printer.cfg (contextFiles, unsaved tabs, not-yet-included
+    files) are the user's intended config — the moment they are included,
+    Klipper resolves driver refs against the union namespace. Gating on
+    the closure let a staged '[tmc2209 x]' validate clean in a live AI-edit
+    session and apply. Resolution likewise spans all files: a stepper in
+    any file satisfies a driver in any file. `active_files` is accepted
+    for call-site symmetry; the check deliberately ignores it.
     """
-    # Map referenced section name (lowercased) -> first active ConfigSection.
+    # Map referenced section name (lowercased) -> first ConfigSection.
     # Keyed by FULL HEADER: klippy joins every word after the driver type
     # (" ".join(config.get_name().split()[1:])) and calls has_section on the
     # result, so [tmc2208 manual_stepper gear_stepper] resolves to the FULL
     # header [manual_stepper gear_stepper], not the bare type 'manual_stepper'.
     referenced_sections: dict[str, tuple[str, ConfigSection]] = {}
     for filename, config in configs.items():
-        if filename not in active_files:
-            continue
         for section in config.sections:
             if section.section_type == "include" or section.is_commented_out:
                 continue
@@ -1967,8 +1973,6 @@ def _check_tmc_stepper_references(
                 referenced_sections[key] = (filename, section)
 
     for filename, config in configs.items():
-        if filename not in active_files:
-            continue
         for section in config.sections:
             if section.section_type not in TMC_STEPPER_DRIVER_TYPES:
                 continue

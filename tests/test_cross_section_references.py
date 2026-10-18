@@ -159,3 +159,48 @@ def test_single_file_tmc_microstep_out_of_set_errors():
     })
     errs = [e for e in _tmc_stepper_errors(results) if "microsteps" in e.message]
     assert errs, "single-file TMC microsteps 3 (not a TMC mres value) must error"
+
+
+# ── files OUTSIDE the main include closure (BULK-04 bank leak 2026-10-17) ─
+#
+# The live AI-edit session was seeded with the user's real printer.cfg PLUS
+# an unrelated pins.cfg that printer.cfg does not include. Both F25 loops
+# skipped every file not in the include closure, so a staged
+# '[tmc2209 x]' (reference '[x]' does not exist) validated CLEAN and was
+# applied — Klipper would refuse to boot the moment pins.cfg is included.
+# Editor files are the user's intended config; F25 must check ALL of them
+# and resolve references across all of them.
+
+_PINS_TMC_ORPHAN = "[tmc2209 x]\nuart_pin: PC1\nrun_current: 0.8\n"
+
+
+def test_tmc_in_unincluded_file_still_checked():
+    # printer.cfg exists and does NOT include pins.cfg — pins.cfg is
+    # outside the active closure, yet its broken driver ref must error.
+    results = _project({
+        "printer.cfg": "[mcu]\n[printer]\nkinematics: cartesian\n" + STEPPER_X,
+        "pins.cfg": _PINS_TMC_ORPHAN,
+    })
+    errs = [e for e in results["pins.cfg"].errors
+            if "required by tmc driver" in e.message]
+    assert errs, ("driver in a file outside the include closure must still "
+                  "be F25-checked (BULK-04 leak)")
+    assert "x" in errs[0].message
+
+
+def test_tmc_and_stepper_both_in_unincluded_file_pass():
+    results = _project({
+        "printer.cfg": "[mcu]\n",
+        "pins.cfg": STEPPER_X + "[tmc2209 stepper_x]\nuart_pin: PC1\n",
+    })
+    assert not _tmc_stepper_errors(results)
+
+
+def test_microsteps_checked_in_unincluded_file():
+    results = _project({
+        "printer.cfg": "[mcu]\n",
+        "pins.cfg": (STEPPER_X.replace("microsteps: 16", "microsteps: 3")
+                     + "[tmc2209 stepper_x]\nuart_pin: PC1\n"),
+    })
+    errs = [e for e in _tmc_stepper_errors(results) if "microsteps" in e.message]
+    assert errs, "microsteps mres check must apply to unincluded files too"
