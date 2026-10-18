@@ -991,12 +991,31 @@ class ProjectState:
                 f"Section '[{header}]' already exists in {filename}. "
                 "Use replace_section or set_param to change it."
             )
-        # Reject a header line duplicated inside the model-authored body.
+        # Header-line guard (BULK-04 bank re-run 2026-10-17, same law as
+        # replace_section/patch_section): the 'text' of add_section is the
+        # BODY of exactly ONE section. A header line inside it — whether
+        # the section's own header re-pasted (old duplicate check) or a
+        # FOREIGN one — makes Klipper's parser split the file there.
+        # Gemma crammed each '[tmc2209 stepper_X]' inside its stepper's
+        # 'text': the file survived (Klipper splits on any header), but
+        # the changeSet recorded 3 rows for 6 sections, the review pane
+        # attributed drivers to steppers, and the honest trace-based
+        # coverage criterion counted 3 of 6. One op, one section: extra
+        # sections belong in their own ops[] entry.
         for line in body.split('\n'):
             match = RE_SECTION_HEADER.match(line)
-            if match and match.group(1).strip() == header:
+            if match:
+                found = match.group(1).strip()
+                if found == header:
+                    return _state_error(
+                        f"Argument text must be the section BODY only "
+                        f"(no '[{header}]' header line)."
+                    )
                 return _state_error(
-                    f"Argument text must be the section BODY only (no '[{header}]' header line)."
+                    f"Argument text must be the body of [{header}] only — "
+                    f"it contains a section header line '[{found}]'. "
+                    "To add several sections, send one add_section op per "
+                    "section in the ops array."
                 )
         # New-section TYPE token gate (bug 2026-10-07: an op created
         # '[bed_mesh_calibrate]' — a gcode COMMAND name used as a section

@@ -1290,6 +1290,36 @@ def test_bare_name_add_section_duplicate_guard_resolves():
     assert '\n[Level_Bed]' not in st.files['printer.cfg']
 
 
+def test_add_section_rejects_foreign_header_in_body():
+    """BULK-04 bank re-run (2026-10-17): 'text' carried the driver section
+    too ('stepper_x…\\n[tmc2209 stepper_x]…'). Klipper's parser splits on
+    ANY header line so the file survived, but the changeSet recorded 3
+    rows for 6 sections and the review pane attributed drivers to
+    steppers. One op, one section — the kickback must say so."""
+    st, base = _state()
+    _, r = st.apply(base, {'op': 'add_section', 'file': 'printer.cfg',
+                           'section': 'verify_heater hotend',
+                           'text': 'max_error: 120\n'
+                                   '[verify_heater heater_bed]\n'
+                                   'max_error: 120'})
+    assert r['status'] == 'error'
+    assert 'verify_heater heater_bed' in r['error']
+    assert 'one add_section op per section' in r['error']
+    assert '[verify_heater heater_bed]' not in st.files['printer.cfg']
+    # the section's OWN header re-pasted keeps its existing message
+    _, r2 = st.apply(base, {'op': 'add_section', 'file': 'printer.cfg',
+                            'section': 'verify_heater extruder',
+                            'text': '[verify_heater extruder]\nmax_error: 60'})
+    assert r2['status'] == 'error'
+    assert 'BODY only' in r2['error']
+    # a '#' comment mentioning a header stays legal (not a header line
+    # per RE_SECTION_HEADER's line-anchored match — leading '# ' protects)
+    _, r3 = st.apply(base, {'op': 'add_section', 'file': 'printer.cfg',
+                            'section': 'verify_heater extruder',
+                            'text': '# like [printer] but for heat\nmax_error: 60'})
+    assert r3['status'] == 'applied', r3
+
+
 def test_bare_section_type_never_hijacks_coincident_family_name():
     """BULK-04 bank re-run (2026-10-17): '[tmc2209 stepper_x]' made a bare
     'stepper_x' request resolve onto the DRIVER section — the fallback
