@@ -123,6 +123,44 @@ rework fixed the machinery that manufactured that symptom:
   `completionKicks`. The reply is now also stamped with a failed-call note
   when the loop gave up on any call, so "all done" cannot ride over errors.
 
+### Engine invariants (2026-10-17, from the BULK bank autopsies)
+
+The BULK family's first live runs traced every corruption path a small
+model can drive through the draft engine. Each is now a hard rule inside
+the engine (not prompt advice), and each kickback names the fix so the
+model can self-correct on the next call:
+
+- **One op, one section: no header lines in body text.** `replace_section`,
+  `patch_section`, and `add_section` refuse any `[header]` line inside the
+  text they write — the section's own header re-pasted *or* a foreign one.
+  Klipper splits files on header lines, so a smuggled header nests or
+  splices sections while per-op validation still passes; the staged file
+  then refuses to load. Multiple new sections go in as separate `ops[]`
+  entries.
+- **A bare section TYPE never resolves onto a coincident family name.**
+  The bare-name convenience (`Level_Bed` → `[gcode_macro Level_Bed]`) skips
+  requests that are themselves complete section types: with
+  `[tmc2209 stepper_x]` present, `section='stepper_x'` no longer lands on
+  the driver section (it reports *not found* + `add_section`, instead of
+  hijacking the driver or blocking the real stepper with a phantom
+  "already exists").
+- **Batch kickbacks carry the concrete findings.** A failed `ops[]` entry
+  bounces back with its actual `newErrors` (up to 3, same lean shape as
+  single-op feedback) — "failed validation" alone sent a model re-sending
+  invented params for 50 rounds.
+- **`add_section` accepts the header under `new_section` too** — the
+  key rename ops use — because small models mix the two; the value lands
+  verbatim and an explicit `section` still wins.
+- **`list_hardware` overflow never truncates the member list.** With 30+
+  matches, bodies are trimmed but EVERY `[header] in file` line is listed
+  — the class-sweep law ("cover every listed member") is only honest if
+  the enumeration is complete (a truncated page hid a macro from an
+  otherwise-complete sweep).
+- **changeSet rows carry the canonical header** resolved *before* the op
+  applied, so a macro commented via its bare name records as
+  `gcode_macro M109`, not `M109` — the review pane and trace-based
+  grading see the same truth.
+
 ## Stopping, retrying, and resuming
 
 - **Stop** — while the assistant is processing, the Send button becomes Stop. Pressing it cancels the request immediately.
