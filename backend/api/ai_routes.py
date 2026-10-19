@@ -41,6 +41,16 @@ from services.ai_edit_tools import (
     resolve_change_chain,
     was_decided,
 )
+from services.ai_completion_judge import (
+    COMPLETION_VERDICT_LIMIT,
+    JUDGE_SYSTEM,
+    completion_guard_mode,
+    continue_directive_text,
+    flag_footer_text,
+    judge_user_payload,
+    ledger_fingerprint,
+    parse_verdict,
+)
 
 router = APIRouter()
 
@@ -363,6 +373,15 @@ class ChatRequest(BaseModel):
     # Mirrors the editTools/editSkill harness-override precedent, so
     # A/B runs need no backend restart.
     completionCheck: bool | None = None
+    # Completion-guard choice (harness A/B runs ONLY; the frontend never
+    # sends it). 'kickback' (default) = the shipped echo re-query.
+    # 'judge' = fresh-context auditor: an independent model call grades
+    # the close against the USER request + staged ledger only (no worker
+    # transcript), bounded verdict loop, no echo at all (plan 2026-10-18
+    # Phase 2 dev slice). completionCheck=False outranks this: fully off.
+    # Same harness-override precedent as completionCheck/editTools, so
+    # A/B runs need no backend restart.
+    completionGuard: str | None = None
     # Approval-gate override (harness A/B runs ONLY; the frontend never
     # sends it). INERT since the post-hoc review change (2026-10-02):
     # nothing in the edit path suspends, so there is no wait to skip and
@@ -3469,6 +3488,43 @@ def _mirror_user_config_files() -> dict[str, dict]:
     return files
 
 
+async def _ask_completion_judge(client, req, headers, goal: str,
+                                edit_session, local: bool,
+                                stop_event=None):
+    """One fresh-context auditor call (dev A/B arm, plan 2026-10-18).
+
+    Returns a validated verdict dict (fail-open 'done') or None on
+    transport failure — a broken judge must never break the worker
+    loop. Model = KWC_JUDGE_MODEL override or the worker's model on the
+    same endpoint; temperature pinned 0; no tools; NO worker transcript
+    (the persuasion channel the echo arm is weak against).
+    """
+    judge_model = os.environ.get("KWC_JUDGE_MODEL", "").strip() or req.model
+    # Local reasoning builds can spend a small max_tokens entirely on
+    # hidden tokens (same law as EMPTY_REPROMPT_MAX_TOKENS).
+    max_tokens = max(EMPTY_REPROMPT_MAX_TOKENS, 1024) if local else 1024
+    payload = {
+        "model": judge_model,
+        "messages": [
+            {"role": "system", "content": JUDGE_SYSTEM},
+            {"role": "user",
+             "content": judge_user_payload(goal, edit_session)},
+        ],
+        "max_tokens": max_tokens,
+        "temperature": 0,
+    }
+    try:
+        raw, data = await _query_provider(
+            client, req.apiUrl, headers, payload, req.apiProvider,
+            logger_context="completion-judge", stop_event=stop_event)
+    except ChatStoppedError:
+        raise  # the user's stop outranks the auditor, always
+    except Exception as exc:  # noqa: BLE001 — fail-open by contract
+        logger.warning("Completion judge call failed | %s", exc)
+        return {"verdict": "done"}, None
+    return parse_verdict(raw or "", goal), data
+
+
 @router.post("/ai/chat")
 async def chat_proxy(req: ChatRequest):
     """Proxy chat messages to the user's configured API provider."""
@@ -3665,6 +3721,21 @@ async def chat_proxy(req: ChatRequest):
             # deserves its own check).
             completion_kicks = 0
 
+            # Fresh-context judge arm (dev A/B, plan 2026-10-18 Phase 2
+            # slice): same trigger as the echo kickback, different
+            # mechanism — an independent auditor call grades the close
+            # against the user request + staged ledger only; the worker
+            # transcript never re-answers itself. Per-request state; a
+            # steer clears it like the echo counter.
+            _completion_guard = (getattr(req, "completionGuard", None)
+                                 or completion_guard_mode())
+            if _completion_guard not in ("kickback", "judge"):
+                _completion_guard = "kickback"
+            judge_verdicts: list[str] = []
+            judge_flagged: list[dict] = []
+            _judge_last_remaining: list[dict] = []
+            _judge_fp_at_continue: str | None = None
+
             def _emit_progress(tool_names: list[str], narration: str) -> None:
                 """Publish mid-loop progress for the poller (Phase 6.5.1).
 
@@ -3737,6 +3808,10 @@ async def chat_proxy(req: ChatRequest):
                     # the wrong way.
                     tool_turns = 0
                     completion_kicks = 0
+                    judge_verdicts.clear()
+                    judge_flagged.clear()
+                    _judge_last_remaining.clear()
+                    _judge_fp_at_continue = None
                     steers_applied += len(_steers)
                     _progress_entry = _chat_progress.get(req.requestId)
                     if _progress_entry is not None:
@@ -4011,8 +4086,7 @@ async def chat_proxy(req: ChatRequest):
                     # discipline as the ack guard — an honest clarify is
                     # never gaslit). Second prose exit closes normally;
                     # a steer clears the counter.
-                    if (completion_kicks < COMPLETION_KICKBACK_LIMIT
-                            and edit_session is not None
+                    if (edit_session is not None
                             # Harness override (see ChatRequest.
                             # completionCheck): only an explicit False
                             # disarms; None keeps the product default
@@ -4039,50 +4113,157 @@ async def chat_proxy(req: ChatRequest):
                                 " ".join(
                                     ln for ln in current_content.splitlines()
                                     if ln.strip())[-400:])):
-                        completion_kicks += 1
                         _cc_prompt = ""
                         for _cc_msg in reversed(req.messages):
                             if _cc_msg.get("role") == "user" and str(
                                     _cc_msg.get("content", "")).strip():
                                 _cc_prompt = str(_cc_msg["content"]).strip()
                                 break
-                        logger.info(
-                            "Completion check | edit-intent prose close | "
-                            "attempts=%d staged=%d failures=%d kick=%d "
-                            "turn=%d preview=%s",
-                            edit_session.edit_attempts,
-                            len(edit_session.pending_edits),
-                            edit_session.write_failures,
-                            completion_kicks, tool_turns,
-                            current_content[:120].replace("\n", " "),
-                        )
-                        clean_prior = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
-                        if clean_prior:
-                            current_messages.append(
-                                {"role": "assistant", "content": clean_prior})
-                        current_messages.append({
-                            "role": "user",
-                            "content": completion_kickback_directive(
-                                _cc_prompt, edit_session),
-                        })
-                        cc_payload = _build_provider_payload(
-                            req.apiProvider, current_messages, req.model,
-                            max_tokens=req.maxTokens,
-                            temperature=req.temperature,
-                            tools=native_tools,
-                            merge_system=req.mergeSystemMessages,
-                        )
-                        current_content, current_data = await _query_provider(
-                            client, req.apiUrl, headers, cc_payload,
-                            req.apiProvider,
-                            logger_context=f"completion-check-{completion_kicks}",
-                            stop_event=stop_event,
-                        )
-                        cc_usage = _extract_usage_info(current_data)
-                        if cc_usage:
-                            cc_usage["context"] = f"completion-check-{completion_kicks}"
-                            usage_events.append(cc_usage)
-                        continue
+                        if _completion_guard == "judge":
+                            # ── Fresh-context auditor arm (dev A/B) ──
+                            # Every path ends the request (deliver) or
+                            # sends the WORKER back to work with a
+                            # SYSTEM directive carrying the judge's
+                            # verbatim quotes. The worker never re-grades
+                            # its own answer (the echo's weakness).
+                            _fp_now = ledger_fingerprint(edit_session)
+                            if (_judge_fp_at_continue is not None
+                                    and _fp_now == _judge_fp_at_continue):
+                                # Nothing was staged since the continue
+                                # verdict — re-grading a snapshot the
+                                # judge already rejected is pure
+                                # latency. Deliver + flag.
+                                judge_flagged = list(_judge_last_remaining)
+                                current_content += flag_footer_text(
+                                    judge_flagged)
+                                logger.info(
+                                    "Completion judge | fingerprint "
+                                    "unchanged at re-close -> deliver+flag "
+                                    "items=%d", len(judge_flagged))
+                                break
+                            if (len(judge_verdicts)
+                                    >= COMPLETION_VERDICT_LIMIT):
+                                judge_flagged = list(_judge_last_remaining)
+                                current_content += flag_footer_text(
+                                    judge_flagged)
+                                break
+                            verdict, jdata = await _ask_completion_judge(
+                                client, req, headers, _cc_prompt,
+                                edit_session,
+                                _is_local_provider(req.apiProvider,
+                                                   req.apiUrl),
+                                stop_event=stop_event)
+                            judge_verdicts.append(verdict["verdict"])
+                            judge_usage = _extract_usage_info(jdata) \
+                                if jdata else None
+                            if judge_usage:
+                                judge_usage["context"] = (
+                                    f"completion-judge-{len(judge_verdicts)}")
+                                usage_events.append(judge_usage)
+                            logger.info(
+                                "Completion judge | verdict=%s | staged=%d "
+                                "failures=%d call=%d turn=%d preview=%s",
+                                verdict["verdict"],
+                                len(edit_session.pending_edits),
+                                edit_session.write_failures,
+                                len(judge_verdicts), tool_turns,
+                                current_content[:120].replace("\n", " "),
+                            )
+                            if verdict["verdict"] == "needs_user":
+                                current_content = verdict["question"]
+                                break
+                            if verdict["verdict"] == "continue":
+                                _judge_last_remaining = list(
+                                    verdict.get("remaining", []))
+                                _judge_fp_at_continue = _fp_now
+                                if (len(judge_verdicts)
+                                        >= COMPLETION_VERDICT_LIMIT):
+                                    # Verdict budget spent with items
+                                    # still open: deliver + flag (plan
+                                    # 2.3 — no third round).
+                                    judge_flagged = list(
+                                        _judge_last_remaining)
+                                    current_content += flag_footer_text(
+                                        judge_flagged)
+                                    break
+                                clean_prior = MCP_TOOL_BLOCK_RE.sub(
+                                    "", current_content).strip()
+                                if clean_prior:
+                                    current_messages.append(
+                                        {"role": "assistant",
+                                         "content": clean_prior})
+                                current_messages.append({
+                                    "role": "system",
+                                    "content": continue_directive_text(
+                                        _judge_last_remaining),
+                                })
+                                # Same law as every other guard arm: the
+                                # loop top re-inspects — a continue MUST
+                                # re-query the worker and reassign the
+                                # close, or the stale close is re graded.
+                                cj_work_payload = _build_provider_payload(
+                                    req.apiProvider, current_messages,
+                                    req.model, max_tokens=req.maxTokens,
+                                    temperature=req.temperature,
+                                    tools=native_tools,
+                                    merge_system=req.mergeSystemMessages,
+                                )
+                                current_content, current_data = await _query_provider(
+                                    client, req.apiUrl, headers,
+                                    cj_work_payload, req.apiProvider,
+                                    logger_context=(
+                                        "completion-judge-work-"
+                                        f"{len(judge_verdicts)}"),
+                                    stop_event=stop_event,
+                                )
+                                cj_work_usage = _extract_usage_info(current_data)
+                                if cj_work_usage:
+                                    cj_work_usage["context"] = (
+                                        "completion-judge-work-"
+                                        f"{len(judge_verdicts)}")
+                                    usage_events.append(cj_work_usage)
+                                continue
+                            # done (or fail-open): deliver untouched.
+                            break
+                        elif completion_kicks < COMPLETION_KICKBACK_LIMIT:
+                            completion_kicks += 1
+                            logger.info(
+                                "Completion check | edit-intent prose "
+                                "close | attempts=%d staged=%d failures=%d "
+                                "kick=%d turn=%d preview=%s",
+                                edit_session.edit_attempts,
+                                len(edit_session.pending_edits),
+                                edit_session.write_failures,
+                                completion_kicks, tool_turns,
+                                current_content[:120].replace("\n", " "),
+                            )
+                            clean_prior = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
+                            if clean_prior:
+                                current_messages.append(
+                                    {"role": "assistant", "content": clean_prior})
+                            current_messages.append({
+                                "role": "user",
+                                "content": completion_kickback_directive(
+                                    _cc_prompt, edit_session),
+                            })
+                            cc_payload = _build_provider_payload(
+                                req.apiProvider, current_messages, req.model,
+                                max_tokens=req.maxTokens,
+                                temperature=req.temperature,
+                                tools=native_tools,
+                                merge_system=req.mergeSystemMessages,
+                            )
+                            current_content, current_data = await _query_provider(
+                                client, req.apiUrl, headers, cc_payload,
+                                req.apiProvider,
+                                logger_context=f"completion-check-{completion_kicks}",
+                                stop_event=stop_event,
+                            )
+                            cc_usage = _extract_usage_info(current_data)
+                            if cc_usage:
+                                cc_usage["context"] = f"completion-check-{completion_kicks}"
+                                usage_events.append(cc_usage)
+                            continue
                     if tool_turns > 0:
                         logger.info("Tool call loop done | turns=%d final_chars=%d", tool_turns, len(current_content))
                     break
@@ -4696,6 +4877,14 @@ async def chat_proxy(req: ChatRequest):
                     # trace ledger. The harness counts kicks separately
                     # from ackReprompts (different guard, different fix).
                     "completionKicks": completion_kicks,
+                    # Fresh-context judge arm (dev A/B): present only
+                    # when the judge ran. Verdict sequence + whatever
+                    # items the footer flagged at budget/fingerprint end.
+                    **({"completionJudge": {
+                           "calls": len(judge_verdicts),
+                           "verdicts": list(judge_verdicts),
+                           "flagged": list(judge_flagged),
+                       }} if judge_verdicts else {}),
                     "events": usage_events,
                     "truncated": any(
                         (e.get("finishReason") or "") == "length" for e in usage_events

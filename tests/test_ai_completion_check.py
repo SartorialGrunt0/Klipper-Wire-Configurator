@@ -115,14 +115,14 @@ def _chat(payload_over, replies, monkeypatch):
     return response.json(), scripted
 
 
-def _edit_call(value='4000', section='printer'):
+def _edit_call(value='4000', section='printer', key='max_accel'):
     return {'choices': [{'message': {
         'content': 'Applying now.',
         'tool_calls': [{
             'type': 'function', 'id': 'c1',
             'function': {'name': 'config_edit', 'arguments': json.dumps({
                 'file': 'printer.cfg', 'op': 'set_param', 'section': section,
-                'key': 'max_accel', 'value': value})},
+                'key': key, 'value': value})},
         }],
     }}]}
 
@@ -479,3 +479,239 @@ def test_steer_re_arms_completion_check(blank_memory, monkeypatch):
     assert len(injections) == 2
     assert body['usage']['completionKicks'] == 1
     assert body['steers'] == [{'turn': 1, 'text': 'actually use 3000'}]
+
+
+# ── fresh-context completion judge (dev A/B, plan 2026-10-18 Phase 2 slice) ──
+
+from services.ai_completion_judge import (  # noqa: E402
+    JUDGE_SYSTEM,
+    completion_guard_mode,
+    continue_directive_text,
+    ledger_fingerprint,
+    parse_verdict,
+)
+
+
+def test_guard_mode_default_and_env():
+    assert completion_guard_mode() == 'kickback'
+    import os
+    old = os.environ.get('KWC_COMPLETION_GUARD')
+    try:
+        os.environ['KWC_COMPLETION_GUARD'] = 'judge'
+        assert completion_guard_mode() == 'judge'
+        os.environ['KWC_COMPLETION_GUARD'] = 'garbage'
+        assert completion_guard_mode() == 'kickback'
+    finally:
+        if old is None:
+            del os.environ['KWC_COMPLETION_GUARD']
+        else:
+            os.environ['KWC_COMPLETION_GUARD'] = old
+
+
+def test_parse_verdict_plain_done():
+    v = parse_verdict('{"verdict": "done"}', 'change max_accel')
+    assert v['verdict'] == 'done'
+
+
+def test_parse_verdict_fenced_json():
+    v = parse_verdict('```json\n{"verdict": "done"}\n```', 'x')
+    assert v['verdict'] == 'done'
+
+
+def test_parse_verdict_garbage_fails_open_to_done():
+    assert parse_verdict('not json at all', 'x')['verdict'] == 'done'
+    assert parse_verdict('', 'x')['verdict'] == 'done'
+    assert parse_verdict('{"verdict": "explode"}', 'x')['verdict'] == 'done'
+
+
+def test_parse_verdict_continue_requires_verbatim_quote():
+    goal = 'Change my max_accel to 4000 in printer.cfg'
+    good = ('{"verdict": "continue", "remaining": [{"quote": '
+            '"max_accel to 4000", "why": "not staged"}]}')
+    v = parse_verdict(good, goal)
+    assert v['verdict'] == 'continue'
+    assert v['remaining'][0]['quote'] == 'max_accel to 4000'
+    # continue WITHOUT a quote -> fail open (anti loop-extension)
+    bad = '{"verdict": "continue", "remaining": [{"why": "vibes"}]}'
+    assert parse_verdict(bad, goal)['verdict'] == 'done'
+    # quote not present in the user's request -> not established
+    fake = ('{"verdict": "continue", "remaining": [{"quote": '
+            '"add a filament sensor", "why": "x"}]}')
+    assert parse_verdict(fake, goal)['verdict'] == 'done'
+
+
+def test_parse_verdict_needs_user():
+    v = parse_verdict('{"verdict": "needs_user", "question": "Which file?"}', 'x')
+    assert v['verdict'] == 'needs_user'
+    assert v['question'] == 'Which file?'
+
+
+def test_ledger_fingerprint_tracks_state():
+    s = _session()
+    fp0 = ledger_fingerprint(s)
+    assert ledger_fingerprint(s) == fp0  # stable
+    s2 = _session(records=[_rec('printer.cfg', 'printer', key='max_accel')])
+    assert ledger_fingerprint(s2) != fp0
+    s3 = _session(records=[_rec('printer.cfg', 'printer', key='max_accel')],
+                  failures=1)
+    assert ledger_fingerprint(s3) != ledger_fingerprint(s2)
+
+
+def test_continue_directive_carries_quotes():
+    text = continue_directive_text([{'quote': 'all six sections',
+                                     'why': 'only 4 staged'}])
+    assert 'all six sections' in text and 'only 4 staged' in text
+
+
+# ── judge-wired loop (integration) ──────────────────────────────────────
+
+GOAL = 'Change my max_accel to 4000 in printer.cfg'
+JUDGE_DONE = {'choices': [{'message': {'content': '{"verdict": "done"}'}}]}
+JUDGE_CONTINUE = {'choices': [{'message': {'content':
+    '{"verdict": "continue", "remaining": [{"quote": "max_accel to 4000", '
+    '"why": "not staged"}]}'}}]}
+JUDGE_NEEDS_USER = {'choices': [{'message': {'content':
+    '{"verdict": "needs_user", "question": '
+    '"Which of the two printers should get it?"}'}}]}
+
+
+def _judge_over(**extra):
+    over = {'requestId': 'cj-1', 'completionCheck': True,
+            'completionGuard': 'judge'}
+    over.update(extra)
+    return over
+
+
+def test_judge_done_delivers_close_untouched(blank_memory, monkeypatch):
+    body, scripted = _chat(
+        _judge_over(requestId='cj-done-1'),
+        [
+            _edit_call(),
+            {'choices': [{'message': {'content': 'All done — max_accel is 4000.'}}]},
+            JUDGE_DONE,
+        ],
+        monkeypatch,
+    )
+    assert 'All done — max_accel is 4000.' in body['content']
+    cj = body['usage']['completionJudge']
+    assert cj['calls'] == 1 and cj['verdicts'] == ['done']
+    # fresh context: the judge payload carries NO worker transcript
+    jp = scripted.payloads[2]
+    joined = json.dumps(jp['messages'])
+    assert 'Applying now.' not in joined and 'COMPLETION CHECK' not in joined
+    assert JUDGE_SYSTEM[:40] in json.dumps(jp['messages'][0])
+    assert 'max_accel' in joined  # ledger brief rides
+    assert jp.get('temperature') == 0
+    assert 'tools' not in jp or not jp['tools']
+    assert len(scripted.payloads) == 3  # no worker re-query on done
+
+
+def test_judge_continue_injects_system_directive_then_rejudges(
+        blank_memory, monkeypatch):
+    # Realistic shape: worker staged the WRONG thing first (max_velocity),
+    # the auditor quotes the unmet ask, the worker stages the real target
+    # (a NEW key — the same-request duplicate guard would block a
+    # same-key rewrite), then re-close gets grade #2.
+    body, scripted = _chat(
+        _judge_over(requestId='cj-cont-1'),
+        [
+            _edit_call(section='printer', key='max_velocity', value='300'),
+            {'choices': [{'message': {'content': 'All done.'}}]},
+            JUDGE_CONTINUE,
+            _edit_call(section='printer', key='max_accel', value='4000'),
+            {'choices': [{'message': {'content': 'Now everything is set.'}}]},
+            JUDGE_DONE,
+        ],
+        monkeypatch,
+    )
+    assert body['usage']['completionJudge']['calls'] == 2
+    assert body['usage']['completionJudge']['verdicts'] == ['continue', 'done']
+    worker_after = scripted.payloads[3]['messages']
+    assert any(m['role'] == 'system' and 'max_accel to 4000' in m['content']
+               for m in worker_after)
+    assert 'Now everything is set.' in body['content']
+
+
+def test_judge_needs_user_delivers_question(blank_memory, monkeypatch):
+    body, scripted = _chat(
+        _judge_over(requestId='cj-need-1'),
+        [
+            _edit_call(),
+            {'choices': [{'message': {'content': 'All done.'}}]},
+            JUDGE_NEEDS_USER,
+        ],
+        monkeypatch,
+    )
+    assert 'Which of the two printers' in body['content']
+    assert body['usage']['completionJudge']['verdicts'] == ['needs_user']
+    assert len(scripted.payloads) == 3
+
+
+def test_judge_second_continue_delivers_with_footer_flag(
+        blank_memory, monkeypatch):
+    body, scripted = _chat(
+        _judge_over(requestId='cj-cap-1'),
+        [
+            _edit_call(section='printer', key='max_velocity', value='300'),
+            {'choices': [{'message': {'content': 'All done.'}}]},
+            JUDGE_CONTINUE,
+            _edit_call(section='printer', key='max_accel', value='4000'),
+            {'choices': [{'message': {'content': 'Now everything is set.'}}]},
+            JUDGE_CONTINUE,
+        ],
+        monkeypatch,
+    )
+    cj = body['usage']['completionJudge']
+    assert cj['calls'] == 2  # verdict cap: no third grade, no third worker call
+    assert 'max_accel to 4000' in body['content']  # footer flag
+    assert len(scripted.payloads) == 6
+
+
+def test_judge_fingerprint_unchanged_skips_regrade(blank_memory, monkeypatch):
+    # After a continue verdict, a re-close with NO new ledger movement is
+    # delivered + flagged immediately — re-grading a rejected snapshot is
+    # pure latency.
+    body, scripted = _chat(
+        _judge_over(requestId='cj-fp-1'),
+        [
+            _edit_call(),
+            {'choices': [{'message': {'content': 'All done.'}}]},
+            JUDGE_CONTINUE,
+            {'choices': [{'message': {'content': 'Yes, fully resolved.'}}]},
+        ],
+        monkeypatch,
+    )
+    cj = body['usage']['completionJudge']
+    assert cj['calls'] == 1
+    assert cj['flagged']  # footer items present
+    assert len(scripted.payloads) == 4  # no second judge call
+
+
+def test_judge_respects_check_off(blank_memory, monkeypatch):
+    # completionCheck=False outranks the guard choice: fully off.
+    body, scripted = _chat(
+        {'requestId': 'cj-off-1', 'completionCheck': False,
+         'completionGuard': 'judge'},
+        [
+            _edit_call(),
+            {'choices': [{'message': {'content': 'All done.'}}]},
+        ],
+        monkeypatch,
+    )
+    assert len(scripted.payloads) == 2
+    assert 'completionJudge' not in body['usage']
+
+
+def test_judge_mode_keeps_kickback_counter_separate(blank_memory, monkeypatch):
+    # Judge verdicts are NOT completionKicks (the harness counts the two
+    # guards apart; the echo path must stay measurable on its own).
+    body, scripted = _chat(
+        _judge_over(requestId='cj-sep-1'),
+        [
+            _edit_call(),
+            {'choices': [{'message': {'content': 'All done.'}}]},
+            JUDGE_DONE,
+        ],
+        monkeypatch,
+    )
+    assert body['usage']['completionKicks'] == 0

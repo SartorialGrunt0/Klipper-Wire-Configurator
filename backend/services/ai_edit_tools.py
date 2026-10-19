@@ -638,6 +638,50 @@ def completion_check_mode() -> str:
     return COMPLETION_CHECK_MODE_DEFAULT
 
 
+def ledger_facts_line(edit_session) -> str:
+    """Pure facts sentence of the ledger brief: staged counts per file
+    with sampled section labels, plus the failed-call line. Shared by
+    completion_kickback_directive (worker-facing) and the fresh-context
+    judge (auditor-facing) so the two arms never see different facts.
+    No framing prose — callers add their own. Emitting the lowercase
+    "staged N edit(s): …" fragment lets completion_kickback_directive
+    compose its "So far this request …" sentence byte-identically."""
+    records = [r for r in getattr(edit_session, "edit_records", [])
+               if not r.get("superseded")]
+    if records:
+        parts = []
+        for fname in dict.fromkeys(r.get("file", "") for r in records):
+            recs = [r for r in records if r.get("file") == fname]
+            verbs = sorted({str(r.get("op", "edit")) for r in recs})
+            names: list[str] = []
+            for r in recs:
+                label = str(r.get("section", "") or "")
+                if r.get("key"):
+                    label = f"{label}.{r['key']}" if label else str(r["key"])
+                if label and label not in names:
+                    names.append(label)
+            shown = names[:COMPLETION_LEDGER_SECTION_CAP]
+            extra = (f" +{len(names) - len(shown)} more"
+                     if len(names) > len(shown) else "")
+            parts.append(f"{fname} — {'/'.join(verbs)}: "
+                         f"{', '.join(shown)}{extra}"
+                         if shown else
+                         f"{fname} — {'/'.join(verbs)}")
+        text = (f"staged {len(records)} edit{'s' if len(records) != 1 else ''}: "
+                + " · ".join(parts))
+    else:
+        text = "staged 0 edits."
+    failures = int(getattr(edit_session, "write_failures", 0) or 0)
+    if failures:
+        notes = list(getattr(edit_session, "failure_notes", [])
+                     or [])[:COMPLETION_LEDGER_FAILURE_CAP]
+        text += (f" · failed calls: {failures}"
+                 + (f" ({'; '.join(notes)})" if notes else ""))
+        if failures > len(notes):
+            text += f" +{failures - len(notes)} more"
+    return text
+
+
 def completion_kickback_directive(user_prompt: str, edit_session, *,
                                   mode: str | None = None) -> str:
     """Model-facing re-prompt for the loop-exit completion check.
@@ -656,40 +700,7 @@ def completion_kickback_directive(user_prompt: str, edit_session, *,
     text = (f'COMPLETION CHECK — Your request: "{user_prompt}". Is it '
             "entirely resolved with the edits made?")
     if mode == "ledger":
-        records = [r for r in getattr(edit_session, "edit_records", [])
-                   if not r.get("superseded")]
-        failures = int(getattr(edit_session, "write_failures", 0) or 0)
-        if records:
-            parts = []
-            for fname in dict.fromkeys(r.get("file", "") for r in records):
-                recs = [r for r in records if r.get("file") == fname]
-                verbs = sorted({str(r.get("op", "edit")) for r in recs})
-                names: list[str] = []
-                for r in recs:
-                    label = str(r.get("section", "") or "")
-                    if r.get("key"):
-                        label = f"{label}.{r['key']}" if label else str(r["key"])
-                    if label and label not in names:
-                        names.append(label)
-                shown = names[:COMPLETION_LEDGER_SECTION_CAP]
-                extra = (f" +{len(names) - len(shown)} more"
-                         if len(names) > len(shown) else "")
-                parts.append(f"{fname} — {'/'.join(verbs)}: "
-                             f"{', '.join(shown)}{extra}"
-                             if shown else
-                             f"{fname} — {'/'.join(verbs)}")
-            text += (f" So far this request staged {len(records)} "
-                     f"edit{'s' if len(records) != 1 else ''}: "
-                     + " · ".join(parts))
-        else:
-            text += " So far this request staged 0 edits."
-        if failures:
-            notes = list(getattr(edit_session, "failure_notes", [])
-                          or [])[:COMPLETION_LEDGER_FAILURE_CAP]
-            text += (f" · failed calls: {failures}"
-                     + (f" ({'; '.join(notes)})" if notes else ""))
-            if failures > len(notes):
-                text += f" +{failures - len(notes)} more"
+        text += f" So far this request {ledger_facts_line(edit_session)}"
         text += (" Is the request entirely resolved? If work remains, "
                  "continue with the edit tools now. If you deliberately "
                  "skipped items, name them in your reply.")
