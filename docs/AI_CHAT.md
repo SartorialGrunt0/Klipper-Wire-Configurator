@@ -326,6 +326,44 @@ default per plan 2.4's gate, but only after the next bank round or a
 repeat confirms it. Judge model = worker model here (gemma grading
 gemma); `KWC_JUDGE_MODEL` targeting a stronger auditor is untested.
 
+### Judge payload A/B: labels vs dump (2026-10-19, gemma-4-12b)
+
+`completionJudgePayload: dump` adds the deterministic facts the labels
+arm lacked: PROJECT INVENTORY (live section headers per file) + CURRENT
+TEXT OF EDITED FILES (post-edit state, caps). Same trigger, same rules.
+`reports/ai-chat-accuracy/{guard-judge-ab, judge-dump-ab}/`.
+
+| Arm | PASS | fixed | regressed | judge fires | continue | flagged |
+| --- | --- | --- | --- | --- | --- | --- |
+| labels (`guard-judge-ab`) | 105/111 | — | — | 34 | 18 | 17 |
+| dump (`judge-dump-ab`) | **106/111** | `COMMENT-04` `MACRO-02` | `TRIDENT-03` | 33 | **9** | 8 |
+
+Net +1 against labels; mechanism matters more than the count. **More
+evidence made the judge more confident, not more trigger-happy**: `done`
+16→24 while `continue` fell 18→9. The labels arm's over-strict class
+(invisible reads graded as skipped work, e.g. Q16's "no docs search
+staged") largely disappears when the auditor sees current file text.
+The 9 remaining continues are now *factual* gaps (staged 0 edits vs a
+delete ask — TRIDENT-03's quote names the instructed shape the ledger
+contradicts).
+
+`TRIDENT-03` (the regression) is instructive: dump judge said
+`continue` (deletion asked, ledger shows 0 edits); the worker's reclose
+still didn't stage the delete → delivered flagged → FAIL on
+`staged_section_absent`. The labels arm got PASS by never judging.
+That's honest under-delivery, flagged — the guard did its job; the
+worker's reclose didn't.
+
+Cost: dump judge payloads avg 8.4 KB (5.4–11 KB observed) vs ~1.2 KB
+labels, on ~1/3 of questions — invisible against worker context.
+`COMMENT-04` fixing itself is the thesis in one qid: `rename_existing`
+is content, and content is exactly what the dump made gradeable.
+
+Single runs; the net-1 stays noise-adjacent — but the verdict-mix shift
+(done↑ continue↓ flagged 17→8, no ping-pong) is mechanism evidence in
+the same direction as the guard A/B. Dump mode is the sharper, calmer
+auditor. Next lever unchanged: `KWC_JUDGE_MODEL` on a stronger auditor.
+
 ### Family detail (baseline run, pre-fix)
 
 | Model | Q | MACRO | TRIDENT | HARNESS | MINIDIFF | AMBI | SETUP | LIVE | EDIT | RENAME | COMMENT | SKILL | SKILL-N | TOOL | ACK | ACK-N |
