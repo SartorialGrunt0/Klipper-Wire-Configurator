@@ -294,6 +294,38 @@ diff let the model close gaps the intent summary hid. Context cost +6%
 avg completion tokens, turns flat. Single-run evidence; BULK-04 still
 fails in both arms (known pin-map construction issue, tracked separately).
 
+### Guard A/B: echo kickback vs fresh-context judge (2026-10-19, gemma-4-12b)
+
+Both arms on the SAME tip (`58c416f`), guard ARMED both arms, only the
+mechanism differs: echo = the shipped kickback (worker re-answers its
+own close against the ledger); judge = independent fresh-context audit
+(request + ledger, no worker transcript, quote-validated `continue`,
+verdict cap 2, fingerprint-unchanged skip). Harness-only selector
+`completionGuard`; product default remains kickback.
+`reports/ai-chat-accuracy/{guard-echo-ab, guard-judge-ab}/`.
+
+| Arm | PASS | fixed | regressed | avg turns | avg tok | wall |
+| --- | --- | --- | --- | --- | --- | --- |
+| echo | 103/111 | — | — | 3.38 | 1297 | 1469 s |
+| judge | 105/111 | `BULK-01` `BULK-05` `MACRO-07` | `COMMENT-04` | 3.15 | 1225 | 1540 s |
+
+Mechanics: the judge graded 34 closes (16 `done`, 18 `continue`); the
+echo kicked 30. Every continue ended at grade #1 (the cap / fingerprint
+skip fired — no ping-pong seen). `BULK-01` passed after a continue +
+fingerprint-flag close. Turns flat-to-down (3.38→3.15): the judge
+replaces the transcript-heavy worker reclose with a ~1 KB fresh call,
+so measured tokens are down ~6% while wall time is up ~5% (one extra
+round on 18 continues). The lone regression (`COMMENT-04`,
+rename_existing uncomment) is the bank's known ±1 single-run shape.
+
+Caveats before crediting: single run each, same-day host; judge verdicts
+that fired on eventually-PASS questions prove co-occurrence, not
+causation, per-fire. The direction is right (bulk families 2/5→4/5,
+zero ping-pong, cost neutral) — this is the evidence to flip the product
+default per plan 2.4's gate, but only after the next bank round or a
+repeat confirms it. Judge model = worker model here (gemma grading
+gemma); `KWC_JUDGE_MODEL` targeting a stronger auditor is untested.
+
 ### Family detail (baseline run, pre-fix)
 
 | Model | Q | MACRO | TRIDENT | HARNESS | MINIDIFF | AMBI | SETUP | LIVE | EDIT | RENAME | COMMENT | SKILL | SKILL-N | TOOL | ACK | ACK-N |
