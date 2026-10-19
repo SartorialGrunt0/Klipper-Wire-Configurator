@@ -59,6 +59,103 @@ def completion_guard_mode() -> str:
     return COMPLETION_GUARD_DEFAULT
 
 
+# Judge payload enrichment modes (dev A/B 2026-10-19). 'labels' = the
+# shipped judge arm: request + ledger line only. 'dump' adds the two
+# deterministic context blocks Sir scoped: the project section inventory
+# (so "did it get ALL the steppers" is judgeable) and the CURRENT text of
+# every file the request edited (post-edit server state — the facts the
+# worker claims to have produced). No tools either way.
+JUDGE_PAYLOAD_DEFAULT = "labels"
+JUDGE_PAYLOAD_CHOICES = ("labels", "dump")
+DUMP_FILE_CAP = 16000  # chars per edited file before section fallback
+DUMP_TOTAL_CAP = 40000  # whole dump block, hard stop
+
+
+def judge_payload_mode() -> str:
+    raw = _os.environ.get("KWC_COMPLETION_JUDGE_PAYLOAD", "").strip().lower()
+    if raw in JUDGE_PAYLOAD_CHOICES:
+        return raw
+    return JUDGE_PAYLOAD_DEFAULT
+
+
+def project_inventory(edit_session) -> str:
+    """`file: [section], [section], …` per project file, live staged state.
+
+    Header-detection mirrors the engine's own ([ at col 0, not a
+    comment). Files with no sections still list (top-level keys live
+    under a file's first implicit section; an empty list is honest)."""
+    lines_out = []
+    for name in sorted(getattr(edit_session.state, "files", {})):
+        text = edit_session.state.files[name]
+        headers = [ln.strip() for ln in text.splitlines()
+                   if ln.startswith("[") and ln.rstrip().endswith("]")]
+        lines_out.append(f"{name}: " + (", ".join(headers) if headers
+                                         else "(no sections)"))
+    return "\n".join(lines_out)
+
+
+def _file_dump(name: str, text: str, edited_sections: set) -> str:
+    """Current file text, capped. Under cap: verbatim. Over cap: every
+    EDITED section verbatim + the rest as section headers with line
+    counts — the judge sees the changed truth plus the shape of what it
+    did not get."""
+    if len(text) <= DUMP_FILE_CAP:
+        return text
+    kept = [f"[truncated {name}: over {DUMP_FILE_CAP} chars; edited "
+            f"sections verbatim, remainder as inventory]"]
+    current = None
+    buf = []
+    remainder_headers = []
+    for ln in text.splitlines():
+        is_header = ln.startswith("[") and ln.rstrip().endswith("]")
+        if is_header and current is not None:
+            if current in edited_sections:
+                kept.append("\n".join([current] + buf))
+            else:
+                remainder_headers.append(f"{current} ({len(buf)} lines)")
+            buf = []
+        if is_header:
+            current = ln.rstrip()
+        else:
+            buf.append(ln)
+    if current is not None:
+        if current in edited_sections:
+            kept.append("\n".join([current] + buf))
+        else:
+            remainder_headers.append(f"{current} ({len(buf)} lines)")
+    kept.append("[other sections] " + ", ".join(remainder_headers))
+    out = "\n\n".join(kept)
+    return out[:DUMP_FILE_CAP]
+
+
+def edited_file_dumps(edit_session) -> str:
+    """CURRENT text of every file with a non-superseded staged edit.
+
+    This is post-edit server state (EditSession.state is mutated as ops
+    stage), NOT the worker's re-telling — same trust law as the ledger.
+    Edited sections (from edit_records) drive the over-cap fallback."""
+    records = [r for r in getattr(edit_session, "edit_records", [])
+               if not r.get("superseded")]
+    by_file: dict[str, set] = {}
+    for r in records:
+        by_file.setdefault(r.get("file", ""), set()).add(
+            f"[{r.get('section', '')}]" if r.get("section") else "")
+    out = []
+    used = 0
+    for name in sorted(by_file):
+        text = getattr(edit_session.state, "files", {}).get(name)
+        if text is None:
+            continue
+        dump = _file_dump(name, text, by_file[name])
+        block = f"--- {name} ---\n{dump}"
+        if used + len(block) > DUMP_TOTAL_CAP:
+            out.append(f"--- {name} --- [omitted: dump total cap]")
+            break
+        out.append(block)
+        used += len(block)
+    return "\n".join(out)
+
+
 def _extract_json(text: str) -> dict | None:
     """First JSON object in `text`, tolerating ``` fences and chatter."""
     if not text:
@@ -143,18 +240,31 @@ def ledger_fingerprint(edit_session) -> str:
     return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
-def judge_user_payload(user_request: str, edit_session) -> str:
-    """The judge's ONLY input beyond the system rules: request + ledger.
+def judge_user_payload(user_request: str, edit_session, *,
+                       mode: str | None = None) -> str:
+    """The judge's ONLY input beyond the system rules: request + ledger
+    (+ inventory + edited-file dumps in 'dump' mode).
 
     Facts come from ledger_facts_line — the same builder the kickback
     uses, so both arms see identical staged/failed facts. Worker prose
-    never enters this payload (the persuasion channel is cut).
+    never enters this payload (the persuasion channel is cut). In dump
+    mode the judge additionally sees the project's section inventory
+    (completeness is then a completable judgment) and the CURRENT
+    server-side text of every touched file (what is true now, not what
+    the worker claims).
     """
     from services.ai_edit_tools import ledger_facts_line
-    return (f"USER REQUEST:\n{user_request}\n\n"
-            f"EDITOR LEDGER (server-staged facts, not the worker's "
-            f"claims):\n{ledger_facts_line(edit_session)}\n\n"
-            "Judge now. JSON only.")
+    if mode is None:
+        mode = judge_payload_mode()
+    out = (f"USER REQUEST:\n{user_request}\n\n"
+           f"EDITOR LEDGER (server-staged facts, not the worker's "
+           f"claims):\n{ledger_facts_line(edit_session)}\n")
+    if mode == "dump":
+        out += ("\nPROJECT INVENTORY (live sections per file):\n"
+                f"{project_inventory(edit_session)}\n\n"
+                "CURRENT TEXT OF EDITED FILES (server state after the "
+                f"staged edits):\n{edited_file_dumps(edit_session)}\n")
+    return out + "\nJudge now. JSON only."
 
 
 def continue_directive_text(remaining: list[dict]) -> str:

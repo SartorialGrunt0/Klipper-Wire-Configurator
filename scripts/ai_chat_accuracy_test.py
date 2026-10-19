@@ -3708,6 +3708,9 @@ def chat_request(base_url: str, question: TestQuestion, settings: dict,
     if (settings.get("completion_guard") == "judge" and effective_edit
             and cc is not False):
         payload["completionGuard"] = "judge"
+        # Payload-size override: only meaningful next to the judge arm.
+        if settings.get("completion_judge_payload") == "dump":
+            payload["completionJudgePayload"] = "dump"
     url = base_url.rstrip("/") + "/ai/chat"
     try:
         return http_post_json(url, payload, timeout), ""
@@ -4019,6 +4022,8 @@ def resolve_settings(args: argparse.Namespace) -> dict:
         "edit_tools": edit_tools_setting(args),
         "completion_check": completion_check_setting(args),
         "completion_guard": getattr(args, "completion_guard", "kickback"),
+        "completion_judge_payload": getattr(args, "completion_judge_payload",
+                                            "labels"),
         "force_skill_active": bool(getattr(args, "force_skill_active", False)),
         "base_url": base_url,
     }
@@ -4202,6 +4207,18 @@ def main() -> int:
                              "verdict loop). Requires the guard to be "
                              "armed (--completion-check on/auto). Judge "
                              "stats land in usage.completionJudge.")
+    parser.add_argument("--completion-judge-payload", default="labels",
+                        choices=["labels", "dump"],
+                        dest="completion_judge_payload",
+                        help="Judge payload size (ChatRequest."
+                             "completionJudgePayload): 'labels' (DEFAULT) "
+                             "= ledger facts only; 'dump' = adds the "
+                             "project section inventory + CURRENT text "
+                             "of every file the request edited (server "
+                             "state, capped) so the auditor can verify "
+                             "content and completeness, not just which "
+                             "sections were touched. Only sent with "
+                             "--completion-guard judge.")
     parser.add_argument("--force-skill-active", action="store_true",
                         help="Skill-gate A/B arm: send editSkill=true so the "
                              "write tools are advertised immediately (edit law "

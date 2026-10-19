@@ -43,10 +43,13 @@ from services.ai_edit_tools import (
 )
 from services.ai_completion_judge import (
     COMPLETION_VERDICT_LIMIT,
+    JUDGE_PAYLOAD_CHOICES,
+    JUDGE_PAYLOAD_DEFAULT,
     JUDGE_SYSTEM,
     completion_guard_mode,
     continue_directive_text,
     flag_footer_text,
+    judge_payload_mode,
     judge_user_payload,
     ledger_fingerprint,
     parse_verdict,
@@ -382,6 +385,11 @@ class ChatRequest(BaseModel):
     # Same harness-override precedent as completionCheck/editTools, so
     # A/B runs need no backend restart.
     completionGuard: str | None = None
+    # Judge payload size (harness A/B runs ONLY; the frontend never
+    # sends it). 'labels' (default — ledger only) or 'dump' (adds the
+    # project section inventory + current server text of every edited
+    # file). Only meaningful with completionGuard='judge'.
+    completionJudgePayload: str | None = None
     # Approval-gate override (harness A/B runs ONLY; the frontend never
     # sends it). INERT since the post-hoc review change (2026-10-02):
     # nothing in the edit path suspends, so there is no wait to skip and
@@ -3500,6 +3508,10 @@ async def _ask_completion_judge(client, req, headers, goal: str,
     (the persuasion channel the echo arm is weak against).
     """
     judge_model = os.environ.get("KWC_JUDGE_MODEL", "").strip() or req.model
+    payload_mode = (getattr(req, "completionJudgePayload", None)
+                    or judge_payload_mode())
+    if payload_mode not in JUDGE_PAYLOAD_CHOICES:
+        payload_mode = JUDGE_PAYLOAD_DEFAULT
     # Local reasoning builds can spend a small max_tokens entirely on
     # hidden tokens (same law as EMPTY_REPROMPT_MAX_TOKENS).
     max_tokens = max(EMPTY_REPROMPT_MAX_TOKENS, 1024) if local else 1024
@@ -3508,7 +3520,8 @@ async def _ask_completion_judge(client, req, headers, goal: str,
         "messages": [
             {"role": "system", "content": JUDGE_SYSTEM},
             {"role": "user",
-             "content": judge_user_payload(goal, edit_session)},
+             "content": judge_user_payload(goal, edit_session,
+                                           mode=payload_mode)},
         ],
         "max_tokens": max_tokens,
         "temperature": 0,

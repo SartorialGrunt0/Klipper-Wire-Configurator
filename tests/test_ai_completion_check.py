@@ -715,3 +715,132 @@ def test_judge_mode_keeps_kickback_counter_separate(blank_memory, monkeypatch):
         monkeypatch,
     )
     assert body['usage']['completionKicks'] == 0
+
+
+# ── judge payload enrichment: inventory + edited-file dumps (2026-10-19) ──
+
+from services.ai_completion_judge import (
+    judge_payload_mode,
+    judge_user_payload,
+    project_inventory,
+    edited_file_dumps,
+)
+
+MICROSTEPS_CFG = """\
+[printer]
+kinematics: corexy
+max_velocity: 300
+
+[stepper_x]
+step_pin: x
+microsteps: 32
+
+[stepper_y]
+step_pin: y
+microsteps: 32
+
+[stepper_z]
+step_pin: z
+microsteps: 16
+"""
+
+
+def test_inventory_lists_sections_per_file():
+    text = MICROSTEPS_CFG
+    s = EditSession({'printer.cfg': {'content': text}})
+    inv = project_inventory(s)
+    assert 'printer.cfg' in inv
+    assert '[stepper_z]' in inv
+    # commented-out headers are NOT inventory (they are not live sections)
+    s2 = EditSession({'a.cfg': {'content': text + '\n#[gcode_macro T3]\n#gcode:\n'}})
+    assert '[gcode_macro T3]' not in project_inventory(s2)
+
+
+def test_dump_mode_includes_edited_file_text_only():
+    s = EditSession({'printer.cfg': {'content': MICROSTEPS_CFG},
+                     'macros.cfg': {'content': '[gcode_macro A]\ngcode:\n    G28\n'}})
+    # stage one edit on printer.cfg only
+    s.execute({'name': 'config_edit', 'arguments': {
+        'file': 'printer.cfg', 'op': 'set_param', 'section': 'stepper_z',
+        'key': 'microsteps', 'value': '32'}})
+    dump = edited_file_dumps(s)
+    assert '[stepper_z]' in dump and 'microsteps: 32' in dump
+    # unedited macros.cfg must NOT be dumped
+    assert 'gcode_macro A' not in dump
+    payload = judge_user_payload('set all stepper microsteps to 32', s, mode='dump')
+    assert 'PROJECT INVENTORY' in payload
+    assert 'CURRENT TEXT OF EDITED FILES' in payload
+    assert '[stepper_z]' in payload
+    assert 'microsteps: 32' in payload
+
+
+def test_dump_mode_labels_unchanged():
+    s = EditSession({'printer.cfg': {'content': MICROSTEPS_CFG}})
+    s.execute({'name': 'config_edit', 'arguments': {
+        'file': 'printer.cfg', 'op': 'set_param', 'section': 'stepper_z',
+        'key': 'microsteps', 'value': '32'}})
+    labels = judge_user_payload('set all stepper microsteps to 32', s, mode='labels')
+    assert 'PROJECT INVENTORY' not in labels
+    assert 'CURRENT TEXT OF EDITED FILES' not in labels
+    assert 'staged 1 edit' in labels  # ledger line still rides
+
+
+def test_dump_caps_oversized_files_with_section_fallback():
+    body = '\n'.join(f'    step_{i}: {i}' for i in range(2000))
+    big = f'[gcode_macro BIG]\ngcode:\n{body}\n\n[gcode_macro EDITED]\ngcode:\n    G91\n'
+    s = EditSession({'printer.cfg': {'content': big}})
+    s.execute({'name': 'config_edit', 'arguments': {
+        'file': 'printer.cfg', 'op': 'patch_section',
+        'section': 'gcode_macro EDITED', 'old_text': 'G91', 'new_text': 'G90'}})
+    dump = edited_file_dumps(s)
+    assert len(dump) <= 16000 + 2000  # per-file cap + framing slack
+    assert 'G90' in dump  # the EDITED section survived truncation
+    assert 'step_1999' not in dump  # the giant untouched section did not
+
+
+def test_judge_payload_mode_matrix(monkeypatch):
+    monkeypatch.delenv('KWC_COMPLETION_JUDGE_PAYLOAD', raising=False)
+    assert judge_payload_mode() == 'labels'
+    monkeypatch.setenv('KWC_COMPLETION_JUDGE_PAYLOAD', 'dump')
+    assert judge_payload_mode() == 'dump'
+    monkeypatch.setenv('KWC_COMPLETION_JUDGE_PAYLOAD', 'garbage')
+    assert judge_payload_mode() == 'labels'
+
+
+def test_judge_dump_payload_mode_reaches_the_call(blank_memory, monkeypatch):
+    # End-to-end pin for ChatRequest.completionJudgePayload: with 'dump',
+    # the judge call's user message carries the inventory AND the CURRENT
+    # staged file text (the edit's effect visible in it).
+    body, scripted = _chat(
+        _judge_over(requestId='cj-dump-1', completionJudgePayload='dump'),
+        [
+            _edit_call(),
+            {'choices': [{'message': {'content': 'All done.'}}]},
+            JUDGE_DONE,
+        ],
+        monkeypatch,
+    )
+    assert body['usage']['completionJudge']['calls'] == 1
+    judge_msg = scripted.payloads[2]['messages'][1]['content']
+    assert 'PROJECT INVENTORY' in judge_msg
+    assert 'CURRENT TEXT OF EDITED FILES' in judge_msg
+    assert 'max_accel: 4000' in judge_msg  # the staged truth, verbatim
+    assert '[printer]' in judge_msg
+
+
+def test_judge_labels_payload_default_no_dump(blank_memory, monkeypatch):
+    body, scripted = _chat(
+        _judge_over(requestId='cj-dump0-1'),
+        [
+            _edit_call(),
+            {'choices': [{'message': {'content': 'All done.'}}]},
+            JUDGE_DONE,
+        ],
+        monkeypatch,
+    )
+    assert body['usage']['completionJudge']['calls'] == 1
+    judge_msg = scripted.payloads[2]['messages'][1]['content']
+    assert 'PROJECT INVENTORY' not in judge_msg
+    assert 'CURRENT TEXT OF EDITED FILES' not in judge_msg
+    # The ledger line still rides (labels mode == shipped first-slice).
+    assert 'staged 1 edit' in judge_msg
