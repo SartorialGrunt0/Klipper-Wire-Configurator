@@ -7,8 +7,10 @@ Parses the harness per-question result lines: "  QID STATUS  tools=[...] tok=N  
 import re
 import sys
 
-LINE = re.compile(r"^\s{2}(\S+)\s+(PASS|FAIL|ERROR|CONDITIONAL)\b")
+LINE = re.compile(r"^\s*(?:[-*]\s+)?([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*)\s+(PASS|FAIL|ERROR|CONDITIONAL)\b")
 SUMMARY = re.compile(r"^SUMMARY — (\d+)/(\d+) passed")
+# Current harness block: "Total: 111  Passed: 105  Failed: 5  Errors: 0"
+SUMMARY2 = re.compile(r"^Total:\s*(\d+)\s+Passed:\s*(\d+)")
 
 
 def parse(path):
@@ -18,6 +20,10 @@ def parse(path):
             m = SUMMARY.match(line)
             if m:
                 summary = (int(m.group(1)), int(m.group(2)))
+                continue
+            m = SUMMARY2.match(line)
+            if m:
+                summary = (int(m.group(2)), int(m.group(1)))
                 continue
             m = LINE.match(line)
             if m and m.group(1) not in per:

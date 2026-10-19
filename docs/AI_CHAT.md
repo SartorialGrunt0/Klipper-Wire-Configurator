@@ -266,6 +266,34 @@ Per-defect flips across all seven models: `COMMENT-03` +5, `SETUP-05` +5,
 `±1` on a single run is noise on this bank — only consistent, directional
 movement is evidence.
 
+### R1: realized-change reporting (2026-10-18, 111-qid bank, gemma-4-12b)
+
+Success results now report the REALIZED change, not the intended one
+(`feat(ai-edit) 1774bac`): ≤12 changed lines show a mini-diff under the
+summary; larger ops collapse to `+A/−R` counts with removed lines verbatim;
+deletes name lines without re-shipping the block; clean batch ops stay lean
+(failed-then-retried ops show their diff). Both arms run with the
+loop-exit kickback DISARMED (`--completion-check off`, the new harness
+default for bank runs).
+
+Arms: baseline = `3ead333` worktree (pre-R1), R1 = tip `1774bac`;
+`reports/ai-chat-accuracy/{r1base-bank111, r1-bank111}/`.
+
+| Arm | PASS | fixed | regressed | avg turns | avg tok |
+| --- | --- | --- | --- | --- | --- |
+| baseline `3ead333` | 103/111 | — | — | 3.15 | 1004 |
+| R1 tip | 105/111 | `BULK-02` `Q14` `Q16` `TRIDENT-15` | `AMBI-02` `MACRO-03` | 3.18 | 1066 |
+
+Net +2 on the 110-qid overlap. The two regressions are the SAME two qids
+this doc already flags as gemma's run-to-run variance (`MACRO-03` stages
+into a third file; `AMBI-02` registry-kickback refusal shape) — single-run
+±1 noise by the rule above, not R1-attributable. The four fixes are all
+staged-content misses (a swept LED line, two staged-section gaps, BULK-02
+coverage) consistent with the recognition-gap thesis: seeing the realized
+diff let the model close gaps the intent summary hid. Context cost +6%
+avg completion tokens, turns flat. Single-run evidence; BULK-04 still
+fails in both arms (known pin-map construction issue, tracked separately).
+
 ### Family detail (baseline run, pre-fix)
 
 | Model | Q | MACRO | TRIDENT | HARNESS | MINIDIFF | AMBI | SETUP | LIVE | EDIT | RENAME | COMMENT | SKILL | SKILL-N | TOOL | ACK | ACK-N |
