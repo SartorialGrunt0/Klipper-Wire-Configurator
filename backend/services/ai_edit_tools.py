@@ -362,6 +362,18 @@ def _ops_result_content(name: str, results: list[dict]) -> str:
     head = (f"{name} applied {len(applied)} of {n} ops — "
             f"{'all ops committed' if not failed else 'applied ops are committed; failed ops are not'}")
     head += "\nChanges are STAGED for the user's review (not saved)."
+    # R1 context economy: a clean 26-edit batch stays lean — only ops the
+    # model had to FIX (failed-then-retried) carry their realized diff,
+    # so a swallowed line shows exactly where a retry already happened
+    # (the engine tags those entries' 'diff'; see _batch_engine).
+    for r in applied:
+        block = _realized_change_block(r.get("op", ""), r.get("diff"))
+        if block:
+            head += (f"\nRealized for op[{r.get('idx', '?')}] "
+                     f"{r.get('op', '')}"
+                     + (f" [{r.get('section')}]" if r.get('section') else "")
+                     + " (an op of this kind failed earlier this request):"
+                     + block)
     if failed:
         head += "\nFailed ops (fix ONLY these and re-send them):"
         for r in failed[:10]:
@@ -387,6 +399,10 @@ def _advisory_lines(advisories: list) -> str:
 def _lean_success_content(name: str, result: dict) -> str:
     status = result.get("status", "applied")
     head = f"{name} applied — {result.get('summary', '')}"
+    # R1: the summary is what the model ASKED for; the realized block is
+    # what the engine DID. Eaten comment blocks and absorbed blanks hide
+    # here (recognition gap) — show the diff, not the intent.
+    head += _realized_change_block(result.get("op", ""), result.get("diff"))
     advisories = result.get("advisories") or []
     runtime = _runtime_section_directive(result)
     if status == "applied_with_advisory" and advisories:
@@ -721,6 +737,81 @@ def diff_text(file_name: str, before: str, after: str) -> str:
     return "\n".join(_unified_diff_lines(file_name, before, after))
 
 
+# ── realized-change reporting (R1, plan 2026-10-18) ─────────────────────
+# Success results reported INTENT ("applied — {summary}") while the
+# realized per-line truth rode only on the UI details record ("never
+# sent to the model", _details_for). Collateral the span semantics
+# produce — a swallowed trailing comment block, absorbed blanks, an
+# eaten neighbour line — was invisible: recognition gap, not attention
+# gap (live reports 2026-10-15). Principle: ops report the REALIZED
+# change, not the intended change. Small diffs ride in full (n=1
+# context); big ones collapse to counts + the removed lines verbatim,
+# because the removed side is exactly where collateral hides.
+REALIZED_DIFF_MAX_LINES = 12   # changed lines <= this -> full mini-diff
+REALIZED_DIFF_MAX_BYTES = 2048  # appended diff bytes per call (context
+                                # economy on 26-edit requests)
+_REALIZED_LINE_WIDTH = 80
+
+
+def _realized_change_block(op_kind: str, diff: dict | None) -> str:
+    """Model-facing 'what actually happened' block for a SUCCESSFUL op.
+
+    ``{delete_section, delete_file}`` never dump the whole block: header
+    + first/last removed line + count. Anything within
+    REALIZED_DIFF_MAX_LINES changed lines shows the mini-diff; larger
+    changes collapse to ``+A/−R`` counts + removed lines verbatim,
+    truncated to REALIZED_DIFF_MAX_BYTES. Returns '' when there is
+    nothing to report (no diff record, or a no-change apply).
+    """
+    if not isinstance(diff, dict):
+        return ""
+    before = str(diff.get("before", ""))
+    after = str(diff.get("after", ""))
+    if before == after:
+        return ""
+    added, removed = diff_counts(before, after)
+    if not (added or removed):
+        return ""
+    removed_lines = [ln[1:] for ln in _unified_diff_lines("", before, after)
+                     if ln.startswith("-") and not ln.startswith("---")]
+    if op_kind in ("delete_section", "delete_file"):
+        # Small delete: every removed line verbatim (a swallowed
+        # trailing comment/blank must be NAMEABLE, not just counted).
+        # Large delete: header + boundary lines + count — never re-ship
+        # a whole deleted body.
+        if removed_lines and len(removed_lines) <= REALIZED_DIFF_MAX_LINES:
+            shown = ", ".join(_truncate_realized(q) for q in removed_lines)
+        else:
+            edges = removed_lines[:1] + removed_lines[-1:]
+            shown = ", ".join(_truncate_realized(q) for q in edges)
+        return (f"\nRealized: −{removed} removed, +{added} added — "
+                f"lines: {shown}")
+    if added + removed <= REALIZED_DIFF_MAX_LINES:
+        mini = difflib.unified_diff(before.splitlines(), after.splitlines(),
+                                    n=1, lineterm="")
+        body = "\n".join(mini)
+        if body and len(body.encode("utf-8")) <= REALIZED_DIFF_MAX_BYTES:
+            return f"\nRealized change:\n---\n{body}\n---"
+    # Collapse: the counts plus EVERY removed line the byte budget fits.
+    parts: list[str] = []
+    used = 0
+    for line in removed_lines:
+        q = _truncate_realized(line)
+        if parts and used + len(q) + 2 > REALIZED_DIFF_MAX_BYTES:
+            break
+        parts.append(q)
+        used += len(q) + 2
+    shown = ", ".join(parts) if parts else "(over byte cap)"
+    return (f"\nRealized: +{added} added, −{removed} removed — "
+            f"removed lines: {shown}")
+
+
+def _truncate_realized(line: str) -> str:
+    line = line if len(line) <= _REALIZED_LINE_WIDTH else \
+        line[:_REALIZED_LINE_WIDTH - 1] + "…"
+    return f"'{line}'"
+
+
 def resolve_change_chain(chain, context_files: dict | None = None,
                          update_pushed: bool = True) -> dict:
     """Replay the KEPT ops of a whole CHAIN of requests, oldest first.
@@ -937,6 +1028,11 @@ class EditSession:
         # FAILURE_NOTE_CAP — the ledger shows these under "failed calls".
         # Cleared by apply_steer like the other deterministic ledgers.
         self.failure_notes: list[str] = []
+        # R1 batch tagging: targets (op+file+section) that FAILED earlier
+        # this request. A batch entry succeeding one of these is a
+        # failed-then-retried op — the one batch shape whose realized
+        # diff rides (plan: clean batch ops stay lean).
+        self._failed_targets: set[tuple] = set()
         # Classification of the most recent write-tool outcome:
         #   None         — no write call yet this request
         #   'success'    — staged (partial success counts; see 'correctable')
@@ -1141,6 +1237,7 @@ class EditSession:
         self.read_calls = 0
         self.write_failures = 0
         self.failure_notes.clear()
+        self._failed_targets.clear()
         self._last_file = None
 
     @staticmethod
@@ -1153,11 +1250,27 @@ class EditSession:
 
     def _note_failure(self, name: str, args: dict) -> int:
         """Count a FAILED call; returns how many times THIS exact call
-        has now failed (1 = first)."""
+        has now failed (1 = first). Also tags the target as
+        failed-earlier (R1): a later batch entry landing the same
+        (op, file, section) is a retried op and shows its realized diff."""
         key = self._call_key(name, args)
         self._identical_failures[key] = \
             self._identical_failures.get(key, 0) + 1
+        if isinstance(args, dict):
+            self._note_failed_target(args)
         return self._identical_failures[key]
+
+    @staticmethod
+    def _realized_target_key(op: dict) -> tuple:
+        """(op, file, section) identity for the R1 failed-then-retried
+        tag. Casefolded like the duplicate guard; no resolve step —
+        false-positives here only cost one extra diff block."""
+        return (str(op.get("op", "")).casefold(),
+                str(op.get("file", "")).casefold(),
+                str(op.get("section", "")).strip().strip("[]").casefold())
+
+    def _note_failed_target(self, op: dict) -> None:
+        self._failed_targets.add(self._realized_target_key(op))
 
     def _repeat_directive(self, name: str, count: int) -> str:
         if count == 1:
@@ -1502,9 +1615,15 @@ class EditSession:
             last_result = result
             if commit:
                 self.commit(new_state, name, result, raw_op=sub)
-            results.append({"idx": idx, "op": sub.get("op", ""),
-                            "section": str(sub.get("section", "")),
-                            "ok": True})
+            entry = {"idx": idx, "op": sub.get("op", ""),
+                     "section": str(sub.get("section", "")),
+                     "ok": True}
+            # R1: this entry fixed an earlier failure on the SAME target
+            # — show what it actually changed (clean entries stay lean).
+            if self._realized_target_key(sub) in self._failed_targets:
+                entry["diff"] = result.get("diff")
+                self._failed_targets.discard(self._realized_target_key(sub))
+            results.append(entry)
         return results, cur, last_result
 
     def _check_batch_call(self, name: str, args: dict) -> str | None:
@@ -2456,6 +2575,11 @@ def format_approval_result(name: str, decision: dict) -> tuple[str, dict | None]
         # STAGED/APPROVED sentence differs, so the two write paths cannot
         # drift again.
         content = f"{name} applied — {decision.get('summary', '')}"
+        # R1: same realized-change block as _lean_success_content — the
+        # gate path is the PRODUCT path, so a swallowed line must be as
+        # visible after approval as it is on auto-approve (drift law).
+        content += _realized_change_block(
+            (details or {}).get("op", ""), (details or {}).get("diff"))
         runtime = _runtime_section_directive({"advisories": advisories},
                                              approved=True)
         if advisories:

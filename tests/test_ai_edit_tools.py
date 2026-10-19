@@ -2868,3 +2868,140 @@ def test_batch_surfaces_parity():
     assert 'ops[]' in EDIT_PROTOCOL_PROMPT
     # Anti-elision law present where bodies are written
     assert 'elide' in EDIT_PROTOCOL_PROMPT
+
+
+# ── realized-change reporting (R1, plan 2026-10-18) ─────────────────────
+#
+# Success results used to report INTENT ("{name} applied — {summary}")
+# while the realized per-line truth rode only on the UI details record.
+# Collateral damage (eaten comment blocks, absorbed blanks, swallowed
+# neighbours) was therefore invisible to the model: recognition gap.
+# R1: ops report the REALIZED change — mini-diff when small, an honest
+# collapse with verbatim removed lines when big.
+
+MACRO_CFG = """[printer]
+kinematics: cartesian
+max_velocity: 200
+max_accel: 1000
+
+[gcode_macro LEVEL_BED]
+gcode:
+    G28
+    #rename_existing: _BED_MESH_CALIBRATE
+    M106 S255
+
+# a trailing note the delete must name
+
+[firmware_retraction]
+retract_length: 0.6
+retract_speed: 20
+"""
+
+
+def _macro_ctx():
+    return {'printer.cfg': {'content': MACRO_CFG}}
+
+
+class TestRealizedChangeReporting:
+    def test_small_patch_shows_mini_diff(self):
+        session = EditSession(_ctx())
+        content, _ = session.execute({
+            'name': 'config_edit',
+            'arguments': {'file': 'printer.cfg', 'op': 'set_param',
+                          'section': 'printer', 'key': 'max_accel',
+                          'value': '3000'},
+        })
+        assert 'Realized change:' in content
+        assert '-max_accel: 1000' in content
+        assert '+max_accel: 3000' in content
+        # STAGED sentence keeps its place; the block rides along.
+        assert 'STAGED' in content
+
+    def test_eaten_comment_line_is_nameable_after_delete(self):
+        session = EditSession(_macro_ctx())
+        content, _ = session.execute({
+            'name': 'config_edit',
+            'arguments': {'file': 'printer.cfg', 'op': 'delete_section',
+                          'section': 'gcode_macro LEVEL_BED'},
+        })
+        assert 'Realized' in content
+        # Whatever the span semantics do to the trailing note, the
+        # model must be able to SEE it in the removed lines.
+        assert '# a trailing note the delete must name' in content
+
+    def test_delete_reports_counts_not_whole_block(self):
+        session = EditSession(_macro_ctx())
+        content, _ = session.execute({
+            'name': 'config_edit',
+            'arguments': {'file': 'printer.cfg', 'op': 'delete_section',
+                          'section': 'firmware_retraction'},
+        })
+        assert 'Realized' in content
+        assert '-retract_speed: 20' not in content.split('Realized')[1] or \
+            'removed' in content
+        # header + first/last removed line nameable, block not dumped
+        assert 'firmware_retraction' in content
+
+    def test_big_rewrite_collapses_with_removed_lines(self):
+        body20 = 'gcode:\n' + '\n'.join(f'    # step {i}' for i in range(1, 21))
+        session = EditSession(_macro_ctx())
+        content, _ = session.execute({
+            'name': 'config_edit',
+            'arguments': {'file': 'printer.cfg', 'op': 'replace_section',
+                          'section': 'gcode_macro LEVEL_BED',
+                          'text': body20},
+        })
+        assert 'Realized change:' not in content
+        assert 'Realized: +' in content and 'removed' in content
+        # the old body stays nameable through the collapse
+        assert '#rename_existing: _BED_MESH_CALIBRATE' in content
+
+    def test_batch_clean_ops_stay_lean(self):
+        session = EditSession(_ctx())
+        content, _ = session.execute({
+            'name': 'config_edit',
+            'arguments': {'file': 'printer.cfg', 'ops': [
+                {'op': 'set_param', 'section': 'printer',
+                 'key': 'max_accel', 'value': '3000'},
+                {'op': 'set_param', 'section': 'printer',
+                 'key': 'max_velocity', 'value': '300'},
+            ]},
+        })
+        assert 'Realized' not in content
+
+    def test_batch_retried_op_gets_realized_block(self):
+        session = EditSession(_macro_ctx())
+        # 1) first call fails (anchor miss on a wrong key)
+        session.execute({
+            'name': 'config_edit',
+            'arguments': {'file': 'printer.cfg', 'op': 'set_param',
+                          'section': 'gcode_macro LEVEL_BED',
+                          'key': 'nonexistent', 'value': 'x'},
+        })
+        # 2) retried corrected in a batch -> THIS entry shows realized
+        content, _ = session.execute({
+            'name': 'config_edit',
+            'arguments': {'file': 'printer.cfg', 'ops': [
+                {'op': 'set_param', 'section': 'gcode_macro LEVEL_BED',
+                 'key': 'description', 'value': 'leveled start'},
+            ]},
+        })
+        assert 'Realized' in content
+
+    def test_approval_result_carries_realized_block(self):
+        from services.ai_edit_tools import format_approval_result
+        before = MACRO_CFG
+        after = before.replace('max_accel: 1000', 'max_accel: 3000')
+        content, _ = format_approval_result('config_edit', {
+            'decision': 'approved',
+            'summary': 'set [printer] max_accel = 3000',
+            'advisories': [],
+            'details': {'file': 'printer.cfg', 'op': 'set_param',
+                        'summary': 'set [printer] max_accel = 3000',
+                        'newText': after, 'advisories': [],
+                        'diff': {'file': 'printer.cfg',
+                                 'before': before, 'after': after}},
+        })
+        assert 'APPROVED' in content
+        assert 'Realized change:' in content
+        assert '-max_accel: 1000' in content

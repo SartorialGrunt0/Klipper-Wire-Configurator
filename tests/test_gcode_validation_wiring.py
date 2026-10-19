@@ -248,4 +248,8 @@ def test_edit_session_baseline_unknowns_do_not_rewarn():
                       'section': 'gcode_macro OLD', 'key': 'variable_a',
                       'value': '1'}})
     assert details is not None
-    assert 'SET_LED_COLOR' not in content
+    # The contract is "not blamed": no advisory, no directive. (R1's
+    # realized mini-diff shows the section's CONTEXT lines, which may
+    # include the pre-existing command — presence is not blame.)
+    assert details['advisories'] == []
+    assert 'advisory' not in content
