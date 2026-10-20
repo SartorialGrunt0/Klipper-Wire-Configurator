@@ -487,6 +487,7 @@ from services.ai_completion_judge import (  # noqa: E402
     JUDGE_SYSTEM,
     completion_guard_mode,
     continue_directive_text,
+    flag_footer_text,
     ledger_fingerprint,
     parse_verdict,
 )
@@ -643,6 +644,22 @@ def test_parse_verdict_actions_without_text_falls_back_to_quote():
     v = parse_verdict(raw, goal)
     assert v['verdict'] == 'continue'
     assert v['remaining'][0]['text'] == 'every reference to level_bed'
+
+
+def test_flag_footer_renders_actions_not_repeated_quotes():
+    # Full-bank 2026-10-19 (AMBI-02): five actions sharing one request
+    # quote rendered the same quoted sentence FIVE times in the
+    # user-visible footer. Footer now shows deduped action text.
+    items = [{'text': f'remove gcode_macro M{i} from printer.cfg',
+              'quote': 'move all my gcode macros out of my printer.cfg'}
+             for i in range(5)]
+    text = flag_footer_text(items)
+    assert 'remove gcode_macro M0 from printer.cfg' in text
+    assert text.count('move all my gcode macros') == 0
+    assert len(items) == 5  # data untouched — dedupe is render-side
+    # legacy quote-only items still render
+    assert 'all six sections' in flag_footer_text(
+        [{'quote': 'all six sections'}])
 
 
 # ── judge-wired loop (integration) ──────────────────────────────────────

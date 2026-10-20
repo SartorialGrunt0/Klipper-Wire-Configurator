@@ -413,6 +413,52 @@ never checked). Candidate: let the judge arm grade continue-intent
 closes too — the fresh-context auditor doesn't need the echo's
 exemption. Awaiting Sir's call.
 
+### Full bank, actions-contract judge (2026-10-19, gemma-4-12b)
+
+First full-bank run of the assertive actions contract (`b18f254`),
+`reports/ai-chat-accuracy/judge-actions-full/`. Arm identical to
+`judge-dump-ab` except the verdict/directive shape.
+
+| Arm | PASS | fixed | regressed | fires | done/continue | flagged |
+| --- | --- | --- | --- | --- | --- | --- |
+| dump (`judge-dump-ab`) | 106/111 | — | — | 33 | 24/9 | 8 |
+| actions (`judge-actions-full`) | 103/111 | `BULK-02` `COMMENT-06` `SKILL-N04` `TRIDENT-03` | 7 (below) | 34 | 22/12 | 10 |
+
+−3 sits AT the ±3 single-run noise bound for this bank/model, and the
+regressions do NOT attribute to the judge: **5 of 7 fired no judge at
+all** (`SKILL-N01` `TRIDENT-15` `TRIDENT-16` `AMBI-07` `BULK-04`) —
+pure worker variance closing through the known exemptions (TRIDENT-15
+= documented model variance; TRIDENT-16/15 closes landed on ```cfg
+fences = inert-draft-territory exemption; AMBI-07/BULK-04 closes ended
+on clarify tails). `MACRO-02` = the documented decision-stall family
+(offer-two-options-and-ask close). Only `AMBI-02` is judge-adjacent:
+judge said continue (correctly — move asked, macros still in place),
+the worker re-answered verbatim, fingerprint short-circuit delivered
+flagged — honest under-delivery, same shape as the dump arm's
+TRIDENT-03, which THIS run fixed. No ping-pong (every continue closed
+at cap/fingerprint), cost +7% tok, one ERROR row = `ACK-N01`
+PASS_NO_TOOL bookkeeping, same in both arms.
+
+Mechanism read: the actions shape did NOT make the auditor twitchy in
+the dangerous direction (continues 12-vs-9 lands inside noise; 10 of
+12 continues rode on eventually-PASS questions), but it also did not
+yet demonstrate worker OBEDIENCE — most continues still ended
+fingerprint-unchanged (worker repeats verbatim). The assertive nudge's
+value prop is currently the flag honesty, not reclose conversion;
+per-fire causation stays unclaimed per the standing caveat.
+
+Product bug found + fixed same day (AMBI-02 footer): the flag footer
+rendered the shared request-QUOTE per action — five macros sharing one
+quote printed the same sentence 5× to the USER. `flag_footer_text` now
+renders deduped ACTION texts (imperative, what the worker failed to
+do), falling back to quote for legacy items. Test:
+`test_flag_footer_renders_actions_not_repeated_quotes`.
+
+Repeat-sample note (standing law): one run each — before crediting or
+blaming the contract vs the labels-quote dump arm, re-run or use the
+continue-intent exemption fix (now backed by 5 regressed closes that
+escaped through exactly that hole) as the next lever.
+
 ### Family detail (baseline run, pre-fix)
 
 | Model | Q | MACRO | TRIDENT | HARNESS | MINIDIFF | AMBI | SETUP | LIVE | EDIT | RENAME | COMMENT | SKILL | SKILL-N | TOOL | ACK | ACK-N |

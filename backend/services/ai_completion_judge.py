@@ -329,7 +329,16 @@ def continue_directive_text(remaining: list[dict],
 def flag_footer_text(remaining: list[dict]) -> str:
     """User-visible footer when the verdict budget is spent with items
     still open: advisory wording, never a validator-error tone (the
-    edits are staged and user-gated anyway)."""
-    items = "; ".join(f'"{it["quote"]}"' for it in remaining)
+    edits are staged and user-gated anyway). Renders the ACTION text
+    (imperative, what the worker failed to do) falling back to the
+    quote; dedupes — several actions can share one request-quote, and
+    the old quote-only render printed the same sentence five times
+    (AMBI-02, full bank 2026-10-19)."""
+    items = []
+    for it in remaining:
+        label = (str(it.get("text") or "").strip()
+                 or str(it.get("quote") or "").strip())
+        if label and label not in items:
+            items.append(label)
     return ("\n\n---\n*Completion check flagged as possibly unresolved: "
-            f"{items}. Review the staged changes above.*")
+            + "; ".join(items) + ". Review the staged changes above.*")
