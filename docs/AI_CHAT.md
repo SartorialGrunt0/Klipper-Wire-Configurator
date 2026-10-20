@@ -364,6 +364,55 @@ Single runs; the net-1 stays noise-adjacent — but the verdict-mix shift
 the same direction as the guard A/B. Dump mode is the sharper, calmer
 auditor. Next lever unchanged: `KWC_JUDGE_MODEL` on a stronger auditor.
 
+### Judge outbound contract: assertive actions list (2026-10-19)
+
+The continue nudge is now an instruction, not a quotation. Judge schema:
+`actions: [{text, file, quote, evidence}]` — `text` is ONE imperative
+(<20 words, names file/section/key), `quote` (verbatim from the USER
+request) stays the anti-loop-extension law, `evidence` (verbatim from
+the dump) is new and log-only. `parse_verdict` normalizes both shapes
+(legacy `remaining` still accepted); a `text`-less action falls back to
+its quote. `continue_directive_text` renders the worker-facing block
+with NO judge voice and NO justification:
+
+```
+Verdict: needs work
+
+Complete these actions now. Do not continue, re-answer, or declare
+done without addressing each one:
+
+Actions:
+- add a purpose comment as the first line inside [pause_resume] [bulk.cfg]
+```
+
+Action-text dedupe (`_judge_injected`): a repeat verdict re-listing an
+already-injected action cannot re-extend the loop with an identical
+instruction. Live gemma emits explicit JSON nulls for unused fields —
+parse uses `or ""` everywhere (a `needs_user` + `question: null` would
+previously have delivered the literal string "None" to the user).
+
+Smoke (`reports/ai-chat-accuracy/judge-actions-smoke/`, gemma worker +
+gemma judge, dump mode): BULK-03 5/5 PASS — 3 graded `done` in ~7s on
+the correct sweep close, 2 slipped via continue-intent tails. Live
+`continue`s captured on Q16/MACRO-11/BULK-05: judge actions are
+imperative and file-named ("add a purpose comment as the first line
+inside [pause_resume] in bulk.cfg", evidence `[pause_resume]` copied
+from the dump) — the contract works end-to-end. Both continues ended
+fingerprint-unchanged (worker re-answered verbatim, delivered+flagged):
+the nudge is assertive but a worker that ignores it still lands on the
+flag path, unchanged law.
+
+**Gap found (open, not fixed):** a close ending on a continue-intent
+tail ("I will now check Knomi.cfg…") is exempted from the completion
+check by `_ends_with_continue_intent` (the ack guard's case), but the
+ack guard requires NO write tool fired — so a partial sweep that wrote
+printer.cfg and promises the other files next falls through every
+guard, judge included. 2 of 5 BULK-03 closes took exactly that exit
+(they still passed the criteria; the promise was a lie the harness
+never checked). Candidate: let the judge arm grade continue-intent
+closes too — the fresh-context auditor doesn't need the echo's
+exemption. Awaiting Sir's call.
+
 ### Family detail (baseline run, pre-fix)
 
 | Model | Q | MACRO | TRIDENT | HARNESS | MINIDIFF | AMBI | SETUP | LIVE | EDIT | RENAME | COMMENT | SKILL | SKILL-N | TOOL | ACK | ACK-N |

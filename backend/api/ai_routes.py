@@ -3748,6 +3748,10 @@ async def chat_proxy(req: ChatRequest):
             judge_flagged: list[dict] = []
             _judge_last_remaining: list[dict] = []
             _judge_fp_at_continue: str | None = None
+            # Action texts already injected into the worker: a repeat
+            # verdict re-listing the same action must not re-extend the
+            # loop with an identical instruction.
+            _judge_injected: set[str] = set()
 
             def _emit_progress(tool_names: list[str], narration: str) -> None:
                 """Publish mid-loop progress for the poller (Phase 6.5.1).
@@ -3825,6 +3829,7 @@ async def chat_proxy(req: ChatRequest):
                     judge_flagged.clear()
                     _judge_last_remaining.clear()
                     _judge_fp_at_continue = None
+                    _judge_injected.clear()
                     steers_applied += len(_steers)
                     _progress_entry = _chat_progress.get(req.requestId)
                     if _progress_entry is not None:
@@ -4205,10 +4210,18 @@ async def chat_proxy(req: ChatRequest):
                                     current_messages.append(
                                         {"role": "assistant",
                                          "content": clean_prior})
+                                _directive = continue_directive_text(
+                                    _judge_last_remaining,
+                                    prior_texts=_judge_injected)
+                                for _a in _judge_last_remaining:
+                                    _t = str(_a.get("text")
+                                             or _a.get("quote")
+                                             or "").strip()
+                                    if _t:
+                                        _judge_injected.add(_t.casefold())
                                 current_messages.append({
                                     "role": "system",
-                                    "content": continue_directive_text(
-                                        _judge_last_remaining),
+                                    "content": _directive,
                                 })
                                 # Same law as every other guard arm: the
                                 # loop top re-inspects — a continue MUST

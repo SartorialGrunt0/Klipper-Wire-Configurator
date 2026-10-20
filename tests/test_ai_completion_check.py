@@ -546,6 +546,27 @@ def test_parse_verdict_needs_user():
     assert v['question'] == 'Which file?'
 
 
+def test_parse_verdict_explicit_json_nulls():
+    # Live gemma judges emit explicit nulls for unused fields
+    # ({"verdict": "done", "actions": [], "question": null}). A bare
+    # .get(key, "") returns None for an EXPLICIT null — str(None) would
+    # leak the literal "None": needs_user+null-question must fail open
+    # to done, never deliver "None" as a question (2026-10-19 smoke).
+    v = parse_verdict('{"verdict": "done", "actions": [], '
+                      '"question": null}', 'x')
+    assert v['verdict'] == 'done'
+    v = parse_verdict('{"verdict": "needs_user", "question": null}', 'x')
+    assert v['verdict'] == 'done'
+    v = parse_verdict('{"verdict": "continue", "actions": '
+                      '[{"text": null, "file": null, "quote": null}]}', 'x')
+    assert v['verdict'] == 'done'
+    # A null `text` with a real quote still yields the quote as action.
+    v = parse_verdict('{"verdict": "continue", "actions": [{"text": null, '
+                      '"quote": "delete the macro"}]}', 'delete the macro')
+    assert v['remaining'][0]['text'] == 'delete the macro'
+    assert v['remaining'][0]['file'] == ''
+
+
 def test_ledger_fingerprint_tracks_state():
     s = _session()
     fp0 = ledger_fingerprint(s)
@@ -557,10 +578,71 @@ def test_ledger_fingerprint_tracks_state():
     assert ledger_fingerprint(s3) != ledger_fingerprint(s2)
 
 
-def test_continue_directive_carries_quotes():
-    text = continue_directive_text([{'quote': 'all six sections',
-                                     'why': 'only 4 staged'}])
-    assert 'all six sections' in text and 'only 4 staged' in text
+def test_continue_directive_is_assertive_actions_list():
+    items = [{'text': 'rename existing gcode_macro _bed_mesh_calibrate to '
+                      'bed_mesh_calibrate',
+              'file': 'printer.cfg',
+              'quote': 'rename _bed_mesh_calibrate',
+              'evidence': '# [gcode_macro _bed_mesh_calibrate]',
+              'why': 'still commented out'}]
+    text = continue_directive_text(items)
+    assert text.startswith('Verdict: needs work')
+    assert 'rename existing gcode_macro _bed_mesh_calibrate to ' \
+           'bed_mesh_calibrate [printer.cfg]' in text
+    assert 'Actions:' in text and 'Do not continue' in text
+    # Justification/evidence are log-only: never outbound to the worker.
+    assert 'still commented out' not in text
+    assert '# [gcode_macro _bed_mesh_calibrate]' not in text
+
+
+def test_continue_directive_falls_back_to_quote_and_dedupes():
+    # Legacy quote-only items still render (text := quote).
+    legacy = [{'quote': 'all six sections', 'why': 'only 4 staged'}]
+    text = continue_directive_text(legacy)
+    assert '- all six sections' in text
+    assert 'only 4 staged' not in text
+    # Repeated action texts are dropped when prior_texts is supplied.
+    once = continue_directive_text(legacy)
+    again = continue_directive_text(
+        legacy, prior_texts={'all six sections'})
+    assert 'Verdict: needs work' in again  # header survives
+    assert again.count('- all six sections') == 0
+    mixed = continue_directive_text(
+        legacy + [{'text': 'stage the delete', 'quote': 'delete x'}],
+        prior_texts={'all six sections'})
+    assert '- all six sections' not in mixed
+    assert '- stage the delete' in mixed
+
+
+def test_parse_verdict_actions_shape_normalizes():
+    goal = ('Rename Level_Bed to bed_mesh_calibrate and update every '
+            'reference')
+    raw = ('{"verdict": "continue", "actions": ['
+           '{"text": "rename gcode_macro Level_Bed to bed_mesh_calibrate",'
+           ' "file": "printer.cfg", "quote": "Rename Level_Bed to '
+           'bed_mesh_calibrate", "evidence": "[gcode_macro Level_Bed]",'
+           ' "why": "header not renamed"},'
+           '{"text": "invented work", "quote": "add a filament sensor",'
+           ' "why": "not in the request"}]}')
+    v = parse_verdict(raw, goal)
+    assert v['verdict'] == 'continue'
+    # Unquoted (not-established) action dropped; established one kept
+    # with full normalization.
+    assert len(v['remaining']) == 1
+    a = v['remaining'][0]
+    assert a['text'] == 'rename gcode_macro Level_Bed to bed_mesh_calibrate'
+    assert a['file'] == 'printer.cfg'
+    assert a['evidence'] == '[gcode_macro Level_Bed]'
+    assert a['quote'] == 'Rename Level_Bed to bed_mesh_calibrate'
+
+
+def test_parse_verdict_actions_without_text_falls_back_to_quote():
+    goal = 'update every reference to level_bed'
+    raw = ('{"verdict": "continue", "actions": ['
+           '{"quote": "every reference to level_bed"}]}')
+    v = parse_verdict(raw, goal)
+    assert v['verdict'] == 'continue'
+    assert v['remaining'][0]['text'] == 'every reference to level_bed'
 
 
 # ── judge-wired loop (integration) ──────────────────────────────────────

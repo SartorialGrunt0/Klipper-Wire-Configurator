@@ -33,16 +33,30 @@ JUDGE_SYSTEM = (
     "You are a completion auditor for a Klipper config editor. You are "
     "NOT the assistant that made the edits and you have no conversation "
     "history: judge ONLY the facts given. Given the user's request and "
-    "the editor's staged-change ledger, decide whether the request is "
-    "entirely resolved. Return JSON only, no prose:\n"
+    "the editor's staged-change ledger (plus the current text of edited "
+    "files when provided), decide whether the request is entirely "
+    "resolved. Return JSON only, no prose:\n"
     '{"verdict": "done|continue|needs_user",\n'
-    ' "remaining": [{"quote": "...", "why": "..."}],\n'
+    ' "actions": [{"text": "...", "file": "...", "quote": "...", '
+    '"evidence": "..."}],\n'
     ' "question": "..."}\n'
     "Rules:\n"
-    "- A `continue` verdict MUST include `remaining` items, each with a "
-    "`quote`: verbatim text copied from the USER'S REQUEST naming the "
-    "unmet obligation. If you cannot quote it, the obligation is not "
-    'established -> verdict `done`.\n'
+    "- `continue` means work remains and MUST list `actions`. Each "
+    "action `text` is ONE imperative instruction for the editor model, "
+    "under 20 words, naming the exact file/section/macro/key and what to "
+    "do to it, e.g. \"rename existing gcode_macro _bed_mesh_calibrate to "
+    "bed_mesh_calibrate in printer.cfg\" or \"[gcode_macro PRINT_START] "
+    "still references level_bed — update that reference\". No "
+    "justification prose, no hedging, only the action.\n"
+    "- `file` names the file the action targets when known.\n"
+    "- Every action MUST carry a `quote`: verbatim text copied from the "
+    "USER'S REQUEST naming the obligation. If you cannot quote it, the "
+    "obligation is not established -> drop the action; if no actions "
+    "remain, verdict `done`.\n"
+    "- When CURRENT TEXT OF EDITED FILES is provided, `evidence` MUST be "
+    "a verbatim snippet copied from that text showing the action is "
+    "still needed (e.g. the line that still names the old macro). "
+    "Omit `evidence` when unsure — never invent it.\n"
     "- If the request itself is ambiguous about what remains, verdict "
     "`needs_user` with a short `question`.\n"
     "- The ledger lists staged ops and failed calls. Staged ops matching "
@@ -191,31 +205,47 @@ def parse_verdict(raw: str, user_request: str) -> dict:
     """Validate a judge reply against the schema; FAIL-OPEN to done.
 
     - unparseable / unknown verdict / empty -> done
-    - continue with no remaining item carrying a verbatim-established
-      quote -> done (anti loop-extension: no quote, no obligation)
+    - continue with no action carrying a verbatim-established `quote`
+      -> done (anti loop-extension: no quote, no obligation)
     - needs_user without a question -> done
+
+    Actions normalize to {text, file, quote, evidence, why}: `text` is
+    the imperative for the worker; `evidence`/`why` are log-only. A
+    judge that returns the legacy `remaining` shape (quote-only items)
+    is still accepted — the quote law applies identically.
     """
     data = _extract_json(raw)
     if not data:
         return {"verdict": "done"}
     verdict = str(data.get("verdict", "")).strip().lower()
     if verdict == "needs_user":
-        q = str(data.get("question", "")).strip()
+        # `or ''`: live judges emit explicit JSON nulls ("question":
+        # null) — str(None) would leak the literal "None" downstream.
+        q = str(data.get("question") or "").strip()
         if q:
             return {"verdict": "needs_user", "question": q}
         return {"verdict": "done"}
     if verdict == "continue":
-        items = data.get("remaining")
+        items = data.get("actions")
+        if not isinstance(items, list):
+            items = data.get("remaining")
         if not isinstance(items, list):
             return {"verdict": "done"}
         established = []
         for it in items:
             if not isinstance(it, dict):
                 continue
-            quote = str(it.get("quote", "")).strip()
-            if quote and _quote_established(quote, user_request):
-                established.append({"quote": quote,
-                                    "why": str(it.get("why", "")).strip()})
+            quote = str(it.get("quote") or "").strip()
+            if not quote or not _quote_established(quote, user_request):
+                continue
+            text = str(it.get("text") or "").strip() or quote
+            established.append({
+                "text": text,
+                "file": str(it.get("file") or "").strip(),
+                "quote": quote,
+                "evidence": str(it.get("evidence") or "").strip(),
+                "why": str(it.get("why") or "").strip(),
+            })
         if established:
             return {"verdict": "continue", "remaining": established}
         return {"verdict": "done"}
@@ -267,17 +297,33 @@ def judge_user_payload(user_request: str, edit_session, *,
     return out + "\nJudge now. JSON only."
 
 
-def continue_directive_text(remaining: list[dict]) -> str:
+def continue_directive_text(remaining: list[dict],
+                            prior_texts: set | None = None) -> str:
     """SYSTEM-role directive injected into the WORKER loop after a
-    `continue` verdict — quotes only, no judge voice, no user role (the
-    user said nothing new; impersonating them is the echo's original sin)."""
-    items = "; ".join(f'"{it["quote"]}" ({it["why"]})' if it.get("why")
-                      else f'"{it["quote"]}"' for it in remaining)
-    return ("COMPLETION AUDIT — an independent review of the staged "
-            "ledger against the user's request found these requested "
-            f"items not yet staged: {items}. Continue with the edit "
-            "tools NOW and stage them, or state concretely why each is "
-            "not applicable. Do not just re-answer 'done'.")
+    `continue` verdict — pure imperative, no judge voice, no user role
+    (the user said nothing new; impersonating them is the echo's
+    original sin), and NO justification: evidence/why stay in the logs
+    for forensics. The worker's only job on receiving this is to obey
+    each action line.
+
+    `prior_texts` (action texts already injected this request) are
+    dropped so a repeated verdict cannot re-extend the loop with the
+    same instruction; if everything repeats we still emit the header —
+    an empty directive is worse than a redundant one.
+    """
+    items = []
+    for it in remaining:
+        text = str(it.get("text") or it.get("quote") or "").strip()
+        if not text:
+            continue
+        if prior_texts is not None and text.casefold() in prior_texts:
+            continue
+        file = str(it.get("file") or "").strip()
+        items.append(f"- {text}" + (f" [{file}]" if file else ""))
+    return ("Verdict: needs work\n\n"
+            "Complete these actions now. Do not continue, re-answer, or "
+            "declare done without addressing each one:\n\n"
+            "Actions:\n" + "\n".join(items))
 
 
 def flag_footer_text(remaining: list[dict]) -> str:
