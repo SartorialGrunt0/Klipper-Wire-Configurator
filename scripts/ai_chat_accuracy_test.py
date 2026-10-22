@@ -423,6 +423,15 @@ def build_questions() -> list[TestQuestion]:
             title="Macros: PRINT_START template",
             text="Generate a PRINT_START macro template for me, including bed mesh "
                  "calibration.",
+            # 2026-10-21: run against a BARE project. The attached printer.cfg
+            # shadows the Trident one through the chat working overlay
+            # (read_user_config/search prefer working text), so the model
+            # sees no existing PRINT_START. Before this, qwen3.8-27b found
+            # the real Voron macro (which already runs Level_Bed +
+            # BED_MESH_PROFILE) and correctly refused to overwrite it —
+            # twice — so the criterion graded a destructive overwrite
+            # nobody had asked for instead of template generation.
+            context_files=_bare_project(),
             require_tool=False,
             criteria=(),
             # Edit-tools-ON arm: score the staged artifact, not prose
@@ -471,6 +480,13 @@ def build_questions() -> list[TestQuestion]:
                  "kinematics: cartesian\n"
                  "max_velocity: 300\n"
                  "max_accel: 3000\n",
+            # 2026-10-21: bare project (same class as Q14/MACRO-02). The
+            # inline snippet is "my printer config", but the attached
+            # Trident config already has a 7x7 [bed_mesh] with different
+            # probe offsets, so qwen3.8-27b correctly refused to add a
+            # conflicting section. Bare project + [probe] makes the prompt
+            # true; the criterion still grades the generated 5x5 mesh.
+            context_files=_bare_project(with_probe=True),
             expected_tools=(),
             require_tool=False,
             criteria=(),
@@ -515,12 +531,17 @@ def build_questions() -> list[TestQuestion]:
         TestQuestion(
             qid="Q20",
             title="Docs: SAVE_CONFIG command",
-            text="Which Klipper command saves calibration results into the config file, "
-                 "and what section does it create?",
+            # 2026-10-20: dropped the "what section does it create" half.
+            # The bundled G-Codes.md only says SAVE_CONFIG "will overwrite
+            # the main printer config file and restart the host software" —
+            # the `#*#` appended block is undocumented, so that half was
+            # unanswerable from the corpus and all three qwen sizes answered
+            # it wrongly (each graded PASS by a `section`-matching regex).
+            text="Which Klipper command saves calibration results into the "
+                 "config file?",
             expected_tools=("search_klipper_docs", "get_config_reference_section"),
             criteria=(
                 ("contains", "SAVE_CONFIG"),
-                ("regex", r"append|to the end|section"),
             ),
         ),
     ]
@@ -535,7 +556,8 @@ def build_macro_questions() -> list[TestQuestion]:
             title="Macros: create from scratch",
             text=("Write a NEW Klipper gcode_macro from scratch named PARK_HEAD that: "
                   "parks the toolhead at X0 Y0 with a 10mm Z lift, turns off the part "
-                  "cooling fan (M106 S0), and includes a short description line. "
+                  "cooling fan (M106 S0), and includes a short `description:` "
+                  "parameter line (Klipper's macro description field, not a comment). "
                   "Return it as a cfg block."),
             expected_tools=("validate_macro",),
             require_tool=False,
@@ -548,7 +570,12 @@ def build_macro_questions() -> list[TestQuestion]:
                 # emitted a textbook-correct `G0 X0 Y0 Z10 F6000` park.
                 ("regex", r"G[01]\b[^\n]*X0|G28"),
                 ("regex", r"M106[^\n]*S0"),
-                ("regex", r"```(?:cfg|ini|conf|klipper)"),
+                # 2026-10-21: a bare ``` fence around a real [gcode_macro]
+                # block IS a cfg block — qwen3.8-27b's PARK_HEAD was correct
+                # in every other arm and failed only the language tag. Grade
+                # the artifact (a fence whose body opens the section), not
+                # the tag the model happened to type.
+                ("regex", r"```[A-Za-z]*\s*\n+\s*\[gcode_macro\s+PARK_HEAD\b"),
             ),
         ),
         TestQuestion(
@@ -566,6 +593,14 @@ def build_macro_questions() -> list[TestQuestion]:
                   "```\n\n"
                   "Modify it to heat the bed to 60C (M140 S60) and run BED_MESH_CALIBRATE "
                   "before the G1 move. Return the full updated macro as a cfg block."),
+            # 2026-10-21: bare project, same reason as Q14. The prompt says
+            # "here is my current PRINT_START" but the Trident printer.cfg
+            # holds a much larger Voron macro, so the request contradicted
+            # the attached config and qwen3.8-27b stopped to ask which one
+            # to change (twice, correctly). The quoted macro is the subject;
+            # the shadowed printer.cfg makes that true instead of
+            # ambiguous.
+            context_files=_bare_project(),
             expected_tools=("validate_macro", "get_config_reference_section"),
             require_tool=False,
             criteria=(),
@@ -678,11 +713,22 @@ def build_macro_questions() -> list[TestQuestion]:
             require_tool=True,
             criteria=(
                 ("contains", "M104"),
+                # 2026-10-20 widening (qwen3.8-27b judge run): the model's
+                # answer was correct but phrased as "has no temperature
+                # value" / "no `S=` parameter" / "won't reliably heat" —
+                # every arm below missed on wording, not substance. The
+                # added arms still all require the MISSING S/temperature
+                # to be named (a "looks fine" answer cannot match).
                 ("regex", r"without\s+'?S'?|without.{0,40}['`]?S|"
                           r"requires?\s+an?\s+[`']?S|missing.{0,20}temp|"
                           r"must\s+be\s+followed\s+by\s+[`']?S|requires?\s+a\s+temperature|"
                           r"no\s+[`']?S[`']?(?:\s|,|\.|\))|no\s+temperature\s+target|"
-                          r"won'?t\s+heat|no\s+target"),
+                          r"won'?t\s+heat|no\s+target|"
+                          r"no\s+[`']?S[`']?\s*[=:]|"
+                          r"(?:needs?|requires?|missing|lacks?|absent)"
+                          r"\s+(?:a\s+|an\s+|the\s+)?temperature"
+                          r"\s+(?:value|target|argument|parameter)|"
+                          r"won'?t\s+(?:reliably\s+|properly\s+)?heat"),
             ),
         ),
         TestQuestion(
@@ -762,6 +808,45 @@ def _cfg_context(*filenames: str) -> tuple[tuple[str, str, str], ...]:
     return tuple(
         (name, TRIDENT_FILE_LABEL, _load_trident_config(name)) for name in filenames
     )
+
+
+# ── bare-project isolation (2026-10-21) ────────────────────────────────
+# The user-config tools read the backend's disk project (backend/
+# user_configs), which on both dev hosts is a full Trident config. A
+# question that should exercise a GENERATOR against an empty project
+# (Q14 "generate a PRINT_START template", MACRO-02 "here is my current
+# macro") instead saw the real Voron macro and made a defensible judgment
+# call the criterion scored as a miss — qwen3.8-27b refused to overwrite a
+# richer PRINT_START, twice.
+#
+# There is no harness-wide project switch, and swapping backend/
+# user_configs per question would put the dev project at risk. The chat
+# working-state overlay is the lever that already exists: a question's
+# context_files seed the session, and read_user_config / search_user_configs
+# prefer working text over disk (mcp_server._overlay_content, 2026-09-27),
+# while list_user_configs de-dupes by relative filename. Attaching a bare
+# printer.cfg therefore SHADOWS the disk copy for these questions without
+# touching it or hiding the other files from tool calls that need them.
+_BARE_PRINTER_CFG = """[printer]
+kinematics: cartesian
+max_velocity: 200
+max_accel: 1000
+"""
+
+# Q17 needs a probe: its prompt states the probe offsets (x 0 / y 20) and
+# asks for a 5x5 [bed_mesh], so the bare project must be able to hold one.
+_BARE_PROBE = """
+[probe]
+pin: ^PE5
+x_offset: 0
+y_offset: 20
+z_offset: 2.0
+"""
+
+
+def _bare_project(with_probe: bool = False) -> tuple[tuple[str, str, str], ...]:
+    body = _BARE_PRINTER_CFG + (_BARE_PROBE if with_probe else "")
+    return (("printer.cfg", "printer.cfg (test project)", body),)
 
 
 def _load_m109_bugged_printer_cfg() -> str:
@@ -962,9 +1047,8 @@ def build_trident_questions() -> list[TestQuestion]:
             title="Real file: probe tolerance grounded in docs",
             text=("In printer.cfg the [probe] section sets samples_tolerance to "
                   "0.008. Look up what samples_tolerance does in the Klipper "
-                  "Config_Reference, then propose changing it to 0.005 in "
-                  "printer.cfg. Return the changed section in a fenced cfg code "
-                  "block with a '# file: printer.cfg' hint line and cite the doc."),
+                  "Config_Reference, then change it to 0.005 in printer.cfg and "
+                  "cite the doc."),
             context_files=printer_cfg,
             expected_tools=("get_config_reference_section", "search_klipper_docs"),
             require_tool=False,
@@ -973,6 +1057,18 @@ def build_trident_questions() -> list[TestQuestion]:
                 ("regex", r"\[probe\]"),
                 ("regex", r"samples_tolerance\s*:\s*0\.005"),
                 ("contains", "samples_tolerance"),
+            ),
+            # 2026-10-21 (r5): this is an EDIT of printer.cfg, so in the
+            # edit-tools-ON arm the edit law forbids the prose cfg block the
+            # text asks for — a correct run stages `samples_tolerance: 0.005`
+            # and cites the doc, then fails every prose arm. Graded on the
+            # artifact instead: the staged probe value, the concept, the
+            # citation. (The prose arms stay for the prose/read-only arm.)
+            edit_criteria=(
+                ("staged_section_regex",
+                 r"printer\.cfg::probe::samples_tolerance\s*:\s*0\.005"),
+                ("contains", "samples_tolerance"),
+                ("regex", r"Config_Reference|Config Reference"),
             ),
         ),
         TestQuestion(
@@ -1077,12 +1173,20 @@ def build_trident_questions() -> list[TestQuestion]:
         TestQuestion(
             qid="TRIDENT-13",
             title="Add + modify + delete in one file, preserve the rest",
+            # 2026-10-21: the delete target moved RESET_ACCEL -> M141.
+            # RESET_ACCEL is CALLED by PRINT_START and CLEAN_NOZZLE, so
+            # deleting it turns live calls into unknown gcode and the delta
+            # gate (correctly) refuses the op — a careful model must either
+            # refuse or do collateral edits the prompt forbids. Both
+            # outcomes are right and the question can only grade a fail.
+            # M141 has no callers anywhere in the fixture, so the three
+            # edits are all achievable in one request again.
             text=("In printer.cfg, perform all three of these edits and nothing "
                   "else: (1) add a new [gcode_macro PARK_HEAD] section that "
                   "homes the toolhead and parks it at X175 Y175 with a 20mm Z "
                   "lift, (2) change [bed_mesh] probe_count from 7,7 to 5,5, "
-                  "(3) delete the [gcode_macro RESET_ACCEL] section using "
-                  "'*[gcode_macro RESET_ACCEL]'. Return them in fenced cfg code "
+                  "(3) delete the [gcode_macro M141] section using "
+                  "'*[gcode_macro M141]'. Return them in fenced cfg code "
                   "blocks with '# file: printer.cfg' hint lines. Do not modify "
                   "any other content in the file."),
             context_files=printer_cfg,
@@ -1093,7 +1197,7 @@ def build_trident_questions() -> list[TestQuestion]:
             edit_criteria=(
                 ("staged_section_regex", r"printer\.cfg::gcode_macro PARK_HEAD::gcode"),
                 ("staged_section_regex", r"printer\.cfg::bed_mesh::probe_count\s*:\s*5,\s*5"),
-                ("staged_section_absent", "printer.cfg::gcode_macro RESET_ACCEL"),
+                ("staged_section_absent", "printer.cfg::gcode_macro M141"),
                 # Byte-stability: unrelated sections survive in the
                 # staged full file.
                 ("staged_regex", r"printer\.cfg::\[stepper_x\]"),
@@ -2053,6 +2157,9 @@ _BULK_PINS_CFG = """\
 #   stepper_z:  step PL3  dir PL1  enable !PK0  endstop ^PD3
 #   drivers:    TMC2209 UART, uart pins PC1 (stepper_x), PC3 (stepper_y),
 #               PL4 (stepper_z), run currents 0.8 / 0.8 / 0.65
+#   xy motion:  GT2 belt, 2 mm pitch, 20-tooth pulleys on X and Y
+#   z motion:   T8 lead screw, 8 mm lead (one revolution = 8 mm)
+#   microsteps: 16 on every axis
 [printer]
 kinematics: corexy
 max_velocity: 300
@@ -2218,7 +2325,9 @@ def build_bulk_questions() -> list[TestQuestion]:
             text=("My wiring sheet is at the top of pins.cfg. Add the three "
                   "steppers and their TMC2209 drivers as six new sections "
                   "directly in pins.cfg, exactly from that pin map — do "
-                  "not create a new file. All six sections, this one "
+                  "not create a new file. Work out rotation_distance from "
+                  "the motion details in the sheet (don't guess it) and "
+                  "set microsteps as listed. All six sections, this one "
                   "request."),
             context_files=(("pins.cfg", TRIDENT_FILE_LABEL, _BULK_PINS_CFG),),
             edit_tools=True,
@@ -2232,6 +2341,18 @@ def build_bulk_questions() -> list[TestQuestion]:
                 ("staged_header", "pins.cfg::tmc2209 stepper_x"),
                 ("staged_header", "pins.cfg::tmc2209 stepper_y"),
                 ("staged_header", "pins.cfg::tmc2209 stepper_z"),
+                # 2026-10-20: the sheet now carries the determinants, so the
+                # derived value is checkable — 2 mm pitch x 20 teeth = 40 on
+                # X/Y, T8 8 mm lead = 8 on Z. Without these arms a guess
+                # (gemma: hardcoded rotation_distance 40, microsteps 16)
+                # passed the old header-only checks.
+                # `(?![\d.])` so 40.5 / 8.5 / 400 cannot satisfy an arm.
+                ("staged_section_regex",
+                 r"pins\.cfg::stepper_x::rotation_distance\s*:\s*40(?:\.0+)?(?![\d.])"),
+                ("staged_section_regex",
+                 r"pins\.cfg::stepper_y::rotation_distance\s*:\s*40(?:\.0+)?(?![\d.])"),
+                ("staged_section_regex",
+                 r"pins\.cfg::stepper_z::rotation_distance\s*:\s*8(?:\.0+)?(?![\d.])"),
                 ("no_fence", ""),
             ),
         ),
@@ -2303,9 +2424,17 @@ def build_ambiguity_questions() -> list[TestQuestion]:
         ),
         TestQuestion(
             qid="AMBI-02",
-            title="Ambiguity: move all macros to a new file (no name given)",
-            text=("Can you move all my gcode macros out of my printer.cfg and "
-                  "put it in a new file?"),
+            title="Ambiguity: move all fans to a new file (no name given)",
+            # 2026-10-20 rework: the old "move ALL gcode macros" version was
+            # unsafe as stated — printer.cfg's PAUSE/RESUME/CANCEL_PRINT
+            # collide with mainsail.cfg's, M109/M190 with Knomi.cfg's, and
+            # all five sit in rename_existing chains. A model that obeyed
+            # literally changed live behavior; one that noticed and asked
+            # (qwen3.8-27b) scored FAIL. Fans have no include collisions:
+            # the five fan sections live only in printer.cfg, so "move them"
+            # is a genuine, safe, gradeable sweep while still omitting the
+            # destination filename (the ambiguity under test).
+            text="Move all my fans to a new file.",
             context_files=printer_cfg,
             require_tool=False,
             criteria=(),
@@ -2313,14 +2442,29 @@ def build_ambiguity_questions() -> list[TestQuestion]:
             # protocol (see TestQuestion.edit_criteria; approved 2026-09-14).
             edit_criteria=(
                 ("staged_new_file", ""),
-                # 2026-10-12: the include is IMPLIED by the request — a
-                # macros file nothing includes is silently dead, and the
-                # bank was PASSing exactly that (captured bank106-r1:
-                # gemma-4-12b + qwen3.5-9b staged macros.cfg with no
-                # [include], verdict PASS). Name-agnostic: the question
-                # deliberately gives no filename, so the kind checks
-                # every staged new_file is actively included somewhere.
+                # The include is IMPLIED by the request — a file nothing
+                # includes is silently dead (2026-10-12).
                 ("new_file_included", ""),
+                # The five fan sections must LAND in the new file …
+                ("staged_new_file_header", "temperature_fan _electronics_fan"),
+                ("staged_new_file_header", "controller_fan _stepper_fan"),
+                ("staged_new_file_header", "temperature_fan exhaust_fan"),
+                ("staged_new_file_header", "fan_generic _power_off"),
+                ("staged_new_file_header", "fan_generic _filter_fan"),
+                # … and be GONE from printer.cfg (a move, not a copy — the
+                # duplicate-section class Klipper rejects at load).
+                # 2026-10-20 (live probe): the engine SUPERSEDES per-file
+                # pendingEdits — a 6-op delete batch followed by
+                # add_include leaves ONE printer.cfg entry carrying the
+                # final text. So grade the final staged text (absent) plus
+                # the trace (coverage counts the 5 deleted sections), not
+                # the presence of delete_section entries.
+                ("staged_section_absent", "printer.cfg::temperature_fan _electronics_fan"),
+                ("staged_section_absent", "printer.cfg::controller_fan _stepper_fan"),
+                ("staged_section_absent", "printer.cfg::temperature_fan exhaust_fan"),
+                ("staged_section_absent", "printer.cfg::fan_generic _power_off"),
+                ("staged_section_absent", "printer.cfg::fan_generic _filter_fan"),
+                ("coverage", "printer.cfg::5"),
             ),
         ),
         TestQuestion(
@@ -3145,6 +3289,17 @@ def extract_printer_memory(content: str) -> tuple[str, dict | None]:
     return block, data
 
 
+def _entry_created(entry: dict) -> bool:
+    """Did this staged entry CREATE its file?
+
+    `created` is the engine's explicit flag (config_write, or a
+    move_section whose to_file did not exist). Op-name 'new_file' is the
+    pre-flag spelling kept for replaying captured runs — never a second
+    definition for live traffic.
+    """
+    return bool(entry.get("created")) or entry.get("op") == "new_file"
+
+
 def _staged_section_body(text: str, section: str) -> str | None:
     """Body of [section] in full-file text, up to the next [header] or EOF.
     Section name matched case-insensitively; brackets optional in `section`."""
@@ -3276,7 +3431,34 @@ def criterion_ok(kind: str, value: str, content: str,
         # irrelevant edit-law load (false-positive rate denominator).
         return not any(c.get("name") == "load_skill" for c in tool_calls or [])
     if kind == "staged_new_file":
-        return any(e.get("op") == "new_file" for e in pending_edits or [])
+        # `created` is the engine's own word (config_write, or a
+        # move_section whose to_file was new) — an op-name test misses the
+        # move path, and a move into an EXISTING file must not count as
+        # creating one. Captured runs from before the flag existed still
+        # carry op='new_file', so that spelling stays accepted (replay
+        # compatibility, not a second definition).
+        return any(_entry_created(e) for e in pending_edits or [])
+    if kind == "staged_new_file_header":
+        # "<header>" — some staged NEW FILE contains that section header.
+        # Name-agnostic sibling of staged_header, for questions that
+        # deliberately omit the target filename (AMBI-02 "move all my fans
+        # to a new file", 2026-10-20): the bank cannot name the file, so it
+        # asserts the header's home is a newly created file. Same casing law
+        # as staged_header — TYPE token exact, instance name casefolded.
+        token, _, name = value.strip().partition(" ")
+        for e in pending_edits or []:
+            if not _entry_created(e):
+                continue
+            for line in (e.get("newText") or "").splitlines():
+                match = re.match(r"^\s*\[([^\]]+)\]", line)
+                if not match:
+                    continue
+                got_token, _, got_name = match.group(1).strip().partition(" ")
+                if got_token != token:
+                    continue
+                if not name or got_name.casefold() == name.casefold():
+                    return True
+        return False
     if kind == "new_file_included":
         # Cross-file criterion (2026-10-12): every staged new_file must
         # be ACTIVELY included by some other staged file, or it is a
@@ -3289,7 +3471,7 @@ def criterion_ok(kind: str, value: str, content: str,
         # Commented includes are inactive and do NOT count.
         wanted = [value] if value else [
             e.get("file") for e in (pending_edits or [])
-            if e.get("op") == "new_file"]
+            if _entry_created(e)]
         if not wanted:
             return False
         include_re = re.compile(r"^\s*\[include\s+([^\]]+)\]\s*(?:#.*)?$")
@@ -3355,10 +3537,19 @@ def criterion_ok(kind: str, value: str, content: str,
         return False
     if kind == "staged_section_absent":
         filename, _, section = value.partition("::")
-        for e in pending_edits or []:
-            if e.get("file") == filename:
-                return _staged_section_body(e.get("newText") or "", section) is None
-        return False
+        entries = [e for e in pending_edits or [] if e.get("file") == filename]
+        if not entries:
+            return False
+        # 2026-10-20 (AMBI-02 move rework): a multi-section sweep stages one
+        # delete_section per section, and each entry carries the FULL file
+        # text at that moment — so the FIRST entry still shows the sections
+        # deleted later. Grade the LAST full-file entry (the final state)
+        # instead; fall back to the old first-entry read when the file only
+        # has section-scoped entries.
+        full = [e for e in entries
+                if e.get("op") in ("delete_section", "delete_file")]
+        target = full[-1] if full else entries[0]
+        return _staged_section_body(target.get("newText") or "", section) is None
     if kind == "staged_count":
         return len(pending_edits or []) == int(value)
     if kind == "not_staged":

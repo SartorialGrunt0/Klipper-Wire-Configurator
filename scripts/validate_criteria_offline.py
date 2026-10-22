@@ -56,7 +56,16 @@ def rescore(q, result) -> tuple[bool, list]:
         ok = H.criterion_ok(kind, value, result.get("response") or "",
                             memory=memory,
                             tool_calls=result.get("tool_calls") or [],
-                            pending_edits=result.get("pending_edits") or [])
+                            pending_edits=result.get("pending_edits") or [],
+                            # 2026-10-20: `coverage` (BULK family) and
+                            # `single_request` read the trace fields, not
+                            # prose. Passing them keeps replayed BULK rows
+                            # honest — without change_set every coverage arm
+                            # scored False and a stored PASS looked like a
+                            # flip.
+                            change_set=result.get("change_set") or {},
+                            tool_turns=result.get("tool_turns") or 0,
+                            edit_attempts=result.get("edit_attempts"))
         checks.append((kind, value, ok))
     return all(c[2] for c in checks), checks
 
@@ -211,6 +220,118 @@ NEGATIVE_CONTROLS += [
           {"name": "search_klipper_docs",
            "arguments": json.dumps({"query": "printer start"}),
            "output": "[gcode_macro PRINT_START] appears in example configs."}]}),
+]
+
+
+# Controls added 2026-10-20 for the qwen3.8-27b judge-run fixes:
+#  - MACRO-07: the widened phrasing arms must still demand that the MISSING
+#    S / temperature be named (a "looks fine" answer cannot pass).
+#  - BULK-04: the new rotation_distance arms must reject a GUESS (wrong Z
+#    value with all six headers present) while correct values still fail a
+#    prose-fence answer via no_fence.
+BULK04_SECTIONS = {
+    "stepper_x": ("PF0", "PF1", "!PD7", "^PE5", "40"),
+    "stepper_y": ("PF6", "PF7", "!PF2", "^PJ1", "40"),
+    "stepper_z": ("PL3", "PL1", "!PK0", "^PD3", "8"),
+}
+
+
+def _bulk04_payload(z_rd: str, response: str) -> dict:
+    edits, trace = [], []
+    for name, (step, dr, en, es, rd) in BULK04_SECTIONS.items():
+        rd = z_rd if name == "stepper_z" else rd
+        edits.append({"file": "pins.cfg", "op": "add_section",
+                      "summary": f"added section [{name}] to pins.cfg",
+                      "newText": (f"[{name}]\nstep_pin: {step}\ndir_pin: {dr}\n"
+                                  f"enable_pin: {en}\nendstop_pin: {es}\n"
+                                  f"rotation_distance: {rd}\nmicrosteps: 16\n")})
+        trace.append({"file": "pins.cfg", "section": name,
+                      "superseded": False})
+    for name, (rd_pin, cur) in {"stepper_x": ("PC1", "0.8"),
+                               "stepper_y": ("PC3", "0.8"),
+                               "stepper_z": ("PL4", "0.65")}.items():
+        edits.append({"file": "pins.cfg", "op": "add_section",
+                      "summary": f"added section [tmc2209 {name}]",
+                      "newText": (f"[tmc2209 {name}]\nuart_pin: {rd_pin}\n"
+                                  f"run_current: {cur}\n")})
+        trace.append({"file": "pins.cfg", "section": f"tmc2209 {name}",
+                      "superseded": False})
+    return {"response": response, "pending_edits": edits,
+            "tool_calls": [], "change_set": {"edits": trace}}
+
+
+FAN_SECTIONS = {
+    "temperature_fan _electronics_fan":
+        "[temperature_fan _electronics_fan]\npin: PA3\nmax_power: 0.6\n",
+    "controller_fan _stepper_fan":
+        "[controller_fan _stepper_fan]\npin: PA2\nfan_speed: 0.8\n",
+    "temperature_fan exhaust_fan":
+        "[temperature_fan exhaust_fan]\npin: PA1\ntarget_temp: 40\n",
+    "fan_generic _power_off":
+        "[fan_generic _power_off]\npin: PB0\noff_below_speed: 0.0\n",
+    "fan_generic _filter_fan":
+        "[fan_generic _filter_fan]\npin: PB1\n",
+}
+
+
+def _ambi02_payload(missing: str | None = None, include: bool = True,
+                    delete: bool = True) -> dict:
+    """A move-all-fans artifact. Knobs build the failure shapes the
+    criteria must reject (copy-not-move, a fan left behind, orphan file)."""
+    moved = [k for k in FAN_SECTIONS if k != missing]
+    printer = ("# printer.cfg\n[printer]\nkinematics: corexy\n\n"
+               + "".join(FAN_SECTIONS[k] for k in FAN_SECTIONS)
+               + "[stepper_x]\nstep_pin: PF0\n")
+    edits = [{"file": "fans.cfg", "op": "new_file", "created": True,
+              "summary": "created new file fans.cfg",
+              "newText": "".join(FAN_SECTIONS[k] for k in moved)}]
+    trace = [{"file": "fans.cfg", "op": "new_file", "section": "",
+              "superseded": False}]
+    if include:
+        edits.append({"file": "printer.cfg", "op": "patch_section",
+                      "summary": "added include to printer.cfg",
+                      "newText": "[include fans.cfg]\n"})
+        trace.append({"file": "printer.cfg", "op": "add_include",
+                      "section": "", "superseded": False})
+    if delete:
+        remaining = printer
+        for k in moved:
+            body = FAN_SECTIONS[k]
+            remaining = remaining.replace(body, "", 1)
+            edits.append({"file": "printer.cfg", "op": "delete_section",
+                          "summary": f"deleted section [{k}] from printer.cfg",
+                          "newText": remaining})
+            trace.append({"file": "printer.cfg", "op": "delete_section",
+                          "section": k, "superseded": False})
+    return {"response": "Moved your fans into a new file.",
+            "pending_edits": edits, "tool_calls": [],
+            "change_set": {"edits": trace}}
+
+
+NEGATIVE_CONTROLS += [
+    ("AMBI-02: fans copied into a new file, nothing deleted (copy ≠ move)",
+     "AMBI-02", _ambi02_payload(delete=False)),
+    ("AMBI-02: one fan left behind in printer.cfg",
+     "AMBI-02", _ambi02_payload(missing="fan_generic _filter_fan")),
+    ("AMBI-02: fans moved but the new file is never included (orphan)",
+     "AMBI-02", _ambi02_payload(include=False)),
+]
+
+
+NEGATIVE_CONTROLS += [
+    ("MACRO-07: 'M104 looks fine', nothing about the missing S", "MACRO-07",
+     {"response": "The macro looks correct. M104 heats the hotend and G28 "
+                  "homes all axes before the move.",
+      "pending_edits": [], "tool_calls": []}),
+    ("MACRO-07: explains M104 but names no missing parameter", "MACRO-07",
+     {"response": "M104 sets the hotend temperature. G28 homes the axes. "
+                  "No syntax problems were found in the macro.",
+      "pending_edits": [], "tool_calls": []}),
+    ("BULK-04: all six headers but Z rotation_distance guessed (2)", "BULK-04",
+     _bulk04_payload("2", "Added all six sections to pins.cfg.")),
+    ("BULK-04: correct values but a prose ```cfg fence", "BULK-04",
+     _bulk04_payload("8", "Added all six sections:\n```cfg\n[stepper_x]\n"
+                          "rotation_distance: 40\n```")),
 ]
 
 

@@ -440,12 +440,45 @@ def test_new_file_included_no_new_file_fails():
 
 
 def test_ambi_02_requires_include_alongside_new_file():
-    # The bank wiring: AMBI-02 grades the orphan class FAIL and the
-    # complete move PASS.
+    """AMBI-02 (reworked 2026-10-20): "Move all my fans to a new file".
+    The orphan class still fails, and now a copy-without-delete and a
+    missing fan fail too — the complete move is the only PASS."""
     q = _bank()["AMBI-02"]
     assert ("new_file_included", "") in q.edit_criteria
-    orphan = [_nf("macros.cfg")]
-    complete = [_nf("macros.cfg"),
-                _inc("printer.cfg", "[include macros.cfg]\n")]
-    assert not all(_crit_full(k, v, edits=orphan) for k, v in q.edit_criteria)
-    assert all(_crit_full(k, v, edits=complete) for k, v in q.edit_criteria)
+
+    fans = ["temperature_fan _electronics_fan", "controller_fan _stepper_fan",
+            "temperature_fan exhaust_fan", "fan_generic _power_off",
+            "fan_generic _filter_fan"]
+
+    def payload(include=True, delete=True, missing=None):
+        body = {k: f"[{k}]\npin: PA1\n" for k in fans if k != missing}
+        edits = [{"file": "fans.cfg", "op": "new_file", "created": True,
+                  "summary": "created", "newText": "".join(body.values())}]
+        trace = [{"file": "fans.cfg", "op": "new_file", "section": "",
+                  "superseded": False}]
+        if include:
+            edits.append({"file": "printer.cfg", "op": "patch_section",
+                          "summary": "include", "newText": "[include fans.cfg]\n"})
+            trace.append({"file": "printer.cfg", "op": "add_include",
+                          "section": "", "superseded": False})
+        if delete:
+            remaining = "# printer.cfg\n" + "".join(
+                f"[{k}]\npin: PA1\n" for k in fans)
+            for k in body:
+                remaining = remaining.replace(f"[{k}]\npin: PA1\n", "", 1)
+                edits.append({"file": "printer.cfg", "op": "delete_section",
+                              "summary": f"deleted {k}", "newText": remaining})
+                trace.append({"file": "printer.cfg", "op": "delete_section",
+                              "section": k, "superseded": False})
+        return edits, {"edits": trace}
+
+    def passes(edits, change_set):
+        return all(harness.criterion_ok(k, v, "", memory=None, tool_calls=[],
+                                        pending_edits=edits,
+                                        change_set=change_set)
+                   for k, v in q.edit_criteria)
+
+    assert not passes(*payload(include=False))   # orphan new file
+    assert not passes(*payload(delete=False))    # copy, not a move
+    assert not passes(*payload(missing=fans[-1]))  # one fan left behind
+    assert passes(*payload())
