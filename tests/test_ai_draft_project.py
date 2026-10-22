@@ -1898,3 +1898,96 @@ def test_patch_section_commented_header_misroute_names_uncomment():
         'section': 'gcode_macro PARK', 'old_text': '    G91',
         'new_text': '    G91  # note: #[like_this] is prose'})
     assert r2['status'] in ('applied', 'applied_with_advisory'), r2
+
+
+# ── move_section (2026-10-20: AMBI-02 live probe) ───────────────────────
+#
+# "Move all my fans to a new file" had no single-call path: the model had
+# to config_write the bodies (retyped → comments dropped) and then
+# delete_section per source (qwen3.8-27b staged the copy for aux_fan.cfg
+# and never staged the delete, reporting success). move_section carries
+# the text server-side so both halves are exact and atomic.
+
+MOVE_CFG = """[printer]
+kinematics: cartesian
+max_velocity: 200
+max_accel: 1000
+
+[temperature_fan exhaust_fan]
+pin: PA1
+sensor_type: temperature_host
+max_temp: 80
+target_temp: 40
+# keep this comment
+#max_power: 1.0
+
+[gcode_macro PRINT_START]
+gcode:
+    G28
+"""
+
+
+def _move_state(extra: dict | None = None):
+    files = {'printer.cfg': {'content': MOVE_CFG}}
+    files.update(extra or {})
+    st = ProjectState.from_context_files(files)
+    return st, st.validate()
+
+
+def test_move_section_into_new_file_is_byte_exact():
+    st, base = _move_state()
+    st1, r = st.apply(base, {'op': 'move_section', 'file': 'printer.cfg',
+                             'section': 'temperature_fan exhaust_fan',
+                             'to_file': 'fans.cfg'})
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    # The section landed byte-exact — comments included (the retyping loss).
+    assert st1.files['fans.cfg'] == (
+        "[temperature_fan exhaust_fan]\npin: PA1\n"
+        "sensor_type: temperature_host\nmax_temp: 80\ntarget_temp: 40\n"
+        "# keep this comment\n#max_power: 1.0\n")
+    # … and left the source in the same op (no duplicate section).
+    assert 'exhaust_fan' not in st1.files['printer.cfg']
+    assert r['needs_include'] == 'fans.cfg'
+    assert r['diff_from']['file'] == 'printer.cfg'
+    assert 'exhaust_fan' not in r['diff_from']['after']
+
+
+def test_move_section_into_existing_file_appends_and_refuses_duplicate():
+    st, base = _move_state({
+        'fans.cfg': {'content': '[fan_generic filter_fan]\npin: PB1\n'}})
+    st1, r = st.apply(base, {'op': 'move_section', 'file': 'printer.cfg',
+                             'section': 'temperature_fan exhaust_fan',
+                             'to_file': 'fans.cfg'})
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    assert '[fan_generic filter_fan]' in st1.files['fans.cfg']
+    assert '[temperature_fan exhaust_fan]' in st1.files['fans.cfg']
+    # No include needed — the target already existed.
+    assert 'needs_include' not in r
+
+
+def test_move_section_refuses_duplicate_target_section():
+    """A half-applied copy leaves the same section in two files, which
+    Klipper refuses to load — the move must refuse up front."""
+    st, base = _move_state({
+        'fans.cfg': {'content': '[temperature_fan exhaust_fan]\npin: PA2\n'}})
+    st1, r = st.apply(base, {'op': 'move_section', 'file': 'printer.cfg',
+                             'section': 'temperature_fan exhaust_fan',
+                             'to_file': 'fans.cfg'})
+    assert r['status'] == 'error' and 'already exists' in r['error']
+    # Nothing moved.
+    assert '[temperature_fan exhaust_fan]' in st1.files['printer.cfg']
+
+
+def test_move_section_same_file_and_missing_section_errors():
+    st, base = _move_state()
+    _, r = st.apply(base, {'op': 'move_section', 'file': 'printer.cfg',
+                           'section': 'temperature_fan exhaust_fan',
+                           'to_file': 'printer.cfg'})
+    assert r['status'] == 'error' and 'both source and target' in r['error']
+    _, r2 = st.apply(base, {'op': 'move_section', 'file': 'printer.cfg',
+                            'section': 'fan_generic nope',
+                            'to_file': 'fans.cfg'})
+    assert r2['status'] == 'error' and 'not found' in r2['error'].lower()
+    _, r3 = st.apply(base, {'op': 'move_section', 'file': 'printer.cfg',
+                            'section': 'temperature_fan exhaust_fan'})
+    assert r3['status'] == 'error' and 'to_file' in r3['error']

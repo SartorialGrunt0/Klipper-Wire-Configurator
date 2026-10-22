@@ -705,12 +705,22 @@ class ProjectState:
             'advisories': findings['advisories'],
             'diff': {'file': outcome['file'], 'before': base_text, 'after': after_text},
         }
+        # move_section touches TWO files: carry the source-side diff so the
+        # recorder can emit a second change-set row (and the staged entry
+        # for the source file is refreshed, not left stale).
+        if outcome.get('move_from'):
+            src_file = outcome['move_from']
+            result['diff_from'] = {
+                'file': src_file,
+                'before': self.files.get(src_file, ''),
+                'after': new_state.files.get(src_file, ''),
+            }
         # rename_section carries structured from/to through the raw outcome
         # for the chat layer's post-rename directive (see _op_rename_section).
         # needs_include carries through the same way for the post-create
         # include directive (see _op_new_file, 2026-10-12).
         for k in ('renamed_from', 'renamed_to', 'needs_include',
-                  'resolvedSection'):
+                  'created', 'resolvedSection'):
             if k in outcome:
                 result[k] = outcome[k]
         if result['status'] == 'error':
@@ -755,6 +765,7 @@ class ProjectState:
             'add_section': self._op_add_section,
             'replace_section': self._op_replace_section,
             'delete_section': self._op_delete_section,
+            'move_section': self._op_move_section,
             'rename_section': self._op_rename_section,
             'patch_section': self._op_patch_section,
             'comment_section': self._op_comment_section,
@@ -768,7 +779,8 @@ class ProjectState:
         if handler is None:
             return _state_error(
                 f"Unknown op '{kind}'. Valid ops: set_param, add_section, "
-                "replace_section, delete_section, rename_section, "
+                "replace_section, delete_section, move_section, "
+                "rename_section, "
                 "patch_section, comment_section, uncomment_section, "
                 "delete_file, add_include, remove_include, comment_include "
                 "— use exactly one of these, one op per call.")
@@ -1168,6 +1180,91 @@ class ProjectState:
         _splice_blank_gutter(lines, header_index)
         self.files[filename] = '\n'.join(lines)
         return {'status': 'ok', 'file': filename, 'summary': f"deleted section [{header}] from {filename}"}
+
+    def _op_move_section(self, op: dict) -> dict:
+        """Move ONE section, body byte-exact, from this file into to_file.
+
+        ``rename_section`` taught the lesson: a composite intent expressed
+        as delete + re-add forces the MODEL to retype the body, and models
+        drop comments, commented-out blocks and whitespace, and can finish
+        one half while confabulating the other. Live probe 2026-10-20
+        (qwen3.8-27b, "move all my fans"): it copied
+        [fan_generic Aux_Fan] into the new file, never staged the delete
+        from aux_fan.cfg, silently dropped two commented blocks, and
+        reported success. Here the SERVER carries the text, so both halves
+        are exact and land together — or neither does.
+
+        Target: an existing project file (resolved case-insensitively, like
+        every other file ref) or a NEW file created here, in which case the
+        include directive rides out exactly as ``new_file``'s does
+        (2026-10-12 law: a file nothing includes is silently dead). A
+        target that already has the section is refused — Klipper will not
+        load duplicate sections, which is what a half-applied copy leaves.
+        """
+        src = self._require_file(op.get('file'))
+        header = self._require_header(op)
+        to_raw = str(op.get('to_file') or '').strip()
+        if not to_raw:
+            raise _OpError(
+                "Missing required argument: to_file — the file the section "
+                "moves INTO (created if it does not exist), e.g. 'fans.cfg'")
+        dst = _resolve_file_ref(to_raw, self.files)
+        created = dst is None
+        if created:
+            dst = str(PurePosixPath(to_raw.replace('\\', '/')))
+            if not dst or dst.endswith('/'):
+                return _state_error(f"to_file '{to_raw}' is not a file name")
+        if dst == src:
+            return _state_error(
+                f"move_section: '{src}' is both source and target — use "
+                "rename_section to rename a section in place.")
+        src_lines = _split_lines(self.files[src])
+        found = _find_section(src_lines, header)
+        if found is None:
+            return _state_error(
+                f"Section '[{header}]' not found in {src}."
+                + _ambiguous_section_hint(header, src_lines)
+                + _missing_section_hint(self.files, header, src))
+        header_index, end = found
+        # Same gutter trim as delete_section: the block is the section's own
+        # lines, byte-exact, without the blank run that separated it.
+        while end > header_index + 1 and not src_lines[end - 1].strip():
+            end -= 1
+        block = list(src_lines[header_index:end])
+        dst_text = self.files.get(dst, '')
+        if not created and _find_section(_split_lines(dst_text), header) is not None:
+            return _state_error(
+                f"Section '[{header}]' already exists in {dst} — moving it "
+                "would duplicate the section, and Klipper refuses to load "
+                "duplicate sections.")
+        # Remove from the source …
+        del src_lines[header_index:end]
+        _splice_blank_gutter(src_lines, header_index)
+        self.files[src] = '\n'.join(src_lines)
+        # … and place it in the target.
+        if created:
+            self.files[dst] = '\n'.join(block) + '\n'
+        else:
+            self.files[dst] = _insert_above_save_config(dst_text, block)
+        outcome = {'status': 'ok', 'file': dst, 'move_from': src,
+                   'created': created,
+                   'summary': f"moved section [{header}] from {src} to {dst}"}
+        if created:
+            already = False
+            for other in sorted(self.files):
+                if other == dst:
+                    continue
+                for _, path in _include_lines(_split_lines(self.files[other])):
+                    if _include_resolves_to(path, other, dst):
+                        outcome['summary'] += (
+                            f" — [include {path}] already present in {other}")
+                        already = True
+                        break
+                if already:
+                    break
+            if not already:
+                outcome['needs_include'] = dst
+        return outcome
 
     def _op_rename_section(self, op: dict) -> dict:
         """Rewrite a section's HEADER line, body untouched (byte-stable).
@@ -1636,11 +1733,11 @@ class ProjectState:
                 continue
             for _, path in _include_lines(_split_lines(self.files[other])):
                 if _include_resolves_to(path, other, filename):
-                    return {'status': 'ok', 'file': filename,
+                    return {'status': 'ok', 'file': filename, 'created': True,
                             'summary': f"created new file {filename} — "
                                        f"[include {path}] is already present "
                                        f"in {other}, no include needed"}
-        return {'status': 'ok', 'file': filename,
+        return {'status': 'ok', 'file': filename, 'created': True,
                 'summary': f"created new file {filename}",
                 'needs_include': filename}
 

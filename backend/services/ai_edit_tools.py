@@ -60,6 +60,7 @@ Other argument shapes:
 patch any exact lines in a named section (config params OR macro gcode): {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "patch_section", "section": "<section or gcode_macro NAME>", "old_text": "<line copied verbatim>", "new_text": "<replacement>"}} — new_text REPLACES old_text: repeat the anchor lines inside new_text when adding lines; comment out a line: new_text = '# ' + the line; uncomment a line: old_text = the '#'-prefixed line, new_text = without the '#'
 comment out or restore a WHOLE section (header + body): {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "comment_section", "section": "<section>"}} / {"op": "uncomment_section", "section": "<section>"}
 rename a section or macro: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "rename_section", "section": "<current header>", "new_section": "<new header>"}} — the body is kept exactly; never rename by delete_section + add_section
+move a section into another file: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "move_section", "section": "<section>", "to_file": "<target.cfg>"}} — the body is carried exactly and removed from the source in the same op; to_file is created if new; never move by delete_section + add_section
 delete a whole file: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "delete_file"}} — remove its [include] line first if it has one
 include a file: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "add_include", "target_file": "new.cfg"}}
 remove or comment out an include: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "comment_include", "target_file": "<path as written in the include line>"}} — comment_include keeps the line as '#[include ...]', remove_include deletes it; these ops work on ANY include line, including ones at the top of a file outside any section
@@ -77,6 +78,7 @@ value must be ONE LINE; for multi-line params (gcode:) use replace_section
 patch any exact lines in a named section (config params OR macro gcode): {"file": "<file.cfg>", "op": "patch_section", "section": "<section or gcode_macro NAME>", "old_text": "<line copied verbatim>", "new_text": "<replacement>"} — new_text REPLACES old_text: repeat the anchor lines inside new_text when adding lines; comment out a line: new_text = '# ' + the line; uncomment a line: old_text = the '#'-prefixed line, new_text = without the '#'
 comment out or restore a WHOLE section (header + body): {"file": "<file.cfg>", "op": "comment_section", "section": "<section>"} / {"op": "uncomment_section", "section": "<section>"}
 rename a section or macro: {"file": "<file.cfg>", "op": "rename_section", "section": "<current header>", "new_section": "<new header>"} — the body is kept exactly; never rename by delete_section + add_section
+move a section into another file: {"file": "<file.cfg>", "op": "move_section", "section": "<section>", "to_file": "<target.cfg>"} — the body is carried exactly and removed from the source in the same op; to_file is created if new; never move by delete_section + add_section
 delete a whole file: {"file": "<file.cfg>", "op": "delete_file"} — remove its [include] line first if it has one
 include a file: {"file": "<file.cfg>", "op": "add_include", "target_file": "<new.cfg>"}
 remove or comment out an include: {"file": "<file.cfg>", "op": "comment_include", "target_file": "<path as written in the include line>"} — comment_include keeps the line as '#[include ...]', remove_include deletes it; these ops work on ANY include line, including ones at the top of a file outside any section
@@ -118,6 +120,9 @@ CONFIG_EDIT_SPEC = {
         "text body), replace_section (rewrite a section's body), "
         "delete_section, rename_section (rename a section header, e.g. a "
         "macro — the body is kept exactly; needs new_section), "
+        "move_section (move a section into another file, creating it if "
+        "needed — the body is carried exactly and removed from the source "
+        "in the same op; needs to_file; never move by delete+add), "
         "patch_section (replace old_text with new_text "
         "inside ANY named section — config params or macro gcode alike; "
         "quote lines exactly as read returned them), "
@@ -144,7 +149,8 @@ CONFIG_EDIT_SPEC = {
                 "type": "string",
                 "enum": [
                     "set_param", "add_section", "replace_section",
-                    "delete_section", "rename_section", "patch_section",
+                    "delete_section", "move_section", "rename_section",
+                    "patch_section",
                     "comment_section", "uncomment_section",
                     "delete_file",
                     "add_include", "remove_include", "comment_include",
@@ -159,6 +165,15 @@ CONFIG_EDIT_SPEC = {
             "new_section": {
                 "type": "string",
                 "description": "New section header for rename_section (brackets optional), e.g. 'gcode_macro BED_MESH_CALIBRATE'",
+            },
+            "to_file": {
+                "type": "string",
+                "description": (
+                    "Destination file for move_section, e.g. 'fans.cfg' — "
+                    "created if it does not exist (then needs an [include]). "
+                    "The section body is carried exactly and removed from "
+                    "file in the same op; never move by delete+add."
+                ),
             },
             "key": {
                 "type": "string",
@@ -209,7 +224,8 @@ CONFIG_EDIT_SPEC = {
                     "call: {\"op\": ..., \"section\": ..., \"key\": ..., "
                     "\"value\": ..., \"text\": ..., \"old_text\": ..., "
                     "\"new_text\": ..., \"new_section\": ..., "
-                    "\"target_file\": ...} (file applies to every entry). "
+                    "\"to_file\": ..., \"target_file\": ...} (file applies "
+                    "to every entry). "
                     "When changing multiple separate locations in one file, "
                     "use ONE call with multiple entries in ops[] instead of "
                     "multiple calls. If one op fails the rest still apply; "
@@ -302,6 +318,15 @@ Rules:
   retry with a CORRECTED change — never repeat the same failed call. On a
   patch_section anchor miss the result includes the section's current text;
   quote lines exactly as they appear there.
+- To MOVE a section into another file, use ONE op per section:
+  {"file": "printer.cfg", "op": "move_section", "section": "fan_generic Aux_Fan",
+  "to_file": "fans.cfg"}. The server carries the body across and removes it
+  from the source in the SAME op — never move by delete_section + add_section,
+  which makes you retype the body (comments and commented-out blocks get
+  dropped) and can leave a duplicate section, which Klipper refuses to load.
+  to_file is created if it does not exist and then needs an [include]
+  (add_include in a follow-up op, or in the same ops[] batch). Several
+  sections = one move_section entry per section.
 - Warnings returned as advisories do not block the change; mention them
   to the user when relevant. EXCEPTION: gcode the command registry flags
   as unknown comes back UNSTAGED the first time — fix the command (the
@@ -1099,8 +1124,8 @@ class EditSession:
             }
         if name == "config_edit":
             op: dict = {"op": str(args.get("op", ""))}
-            for arg_key in ("file", "section", "new_section", "key", "text",
-                            "old_text", "new_text", "target_file"):
+            for arg_key in ("file", "section", "new_section", "to_file", "key",
+                            "text", "old_text", "new_text", "target_file"):
                 if arg_key in args and args[arg_key] is not None:
                     op[arg_key] = str(args[arg_key])
             if "value" in args and args["value"] is not None:
@@ -1928,10 +1953,33 @@ class EditSession:
         details = self._details_for(name, result)
         # Stacked edits to the same file replace its staged entry so the
         # draft UI shows the cumulative result, not intermediate states.
+        # A move_section touches TWO files (target + source), so both
+        # entries are refreshed under the same rule — a stale source entry
+        # would show the section still in its old home.
+        src_file = str((result.get("diff_from") or {}).get("file") or "")
+        touched = [file_name] + ([src_file] if src_file and src_file != file_name else [])
+        # `created` must SURVIVE the per-file replacement below: five
+        # move_section ops into one new file create it on the first and
+        # merely edit it on the rest, so only the first carries the flag —
+        # and the staged entry the UI/harness sees is the last one.
+        was_created = {
+            e["file"] for e in self.pending_edits if e.get("created")
+        }
         self.pending_edits = [
-            e for e in self.pending_edits if e["file"] != file_name
+            e for e in self.pending_edits if e["file"] not in touched
         ]
-        self.pending_edits.append(details)
+        for staged_file in touched:
+            entry = dict(details)
+            entry["file"] = staged_file
+            entry["newText"] = self.state.files.get(staged_file, "")
+            if staged_file == file_name and (result.get("created")
+                                             or staged_file in was_created):
+                entry["created"] = True
+            if staged_file != file_name:
+                entry["summary"] = (
+                    f"source side: section left {staged_file}"
+                    if result.get("op") == "move_section" else entry["summary"])
+            self.pending_edits.append(entry)
         self._last_file = file_name
         self.committed_ops.append(
             {"name": name, "op": result.get("op", name),
@@ -1941,8 +1989,8 @@ class EditSession:
         # Post-hoc review (2026-10-02): one transcript record per op, and
         # the net text we just handed the client for this file.
         self._record_edit(name, result, raw_op)
-        if file_name:
-            self.pushed_files[file_name] = self.state.files.get(file_name, "")
+        for staged_file in touched:
+            self.pushed_files[staged_file] = self.state.files.get(staged_file, "")
 
     def revalidate_and_commit(
         self, op: dict, context_files: dict | None,
@@ -2093,7 +2141,8 @@ class EditSession:
         """Client-facing staged edits (the UI consumes these; diffs stay
         out of chat tool-call records to keep responses lean)."""
         return [
-            {k: e.get(k) for k in ("file", "op", "summary", "newText", "advisories")}
+            {k: e.get(k) for k in ("file", "op", "summary", "newText",
+                                   "advisories", "created")}
             for e in self.pending_edits
         ]
 
@@ -2115,7 +2164,7 @@ class EditSession:
             return ("set_param", file_name, section,
                     str(op.get("key", "")).casefold())
         if kind in ("replace_section", "add_section", "delete_section",
-                    "comment_section", "uncomment_section"):
+                    "comment_section", "uncomment_section", "move_section"):
             return (kind, file_name, section)
         if kind in ("rename_section", "add_include", "remove_include",
                     "comment_include"):
@@ -2181,6 +2230,33 @@ class EditSession:
                     prior["superseded"] = True
                     prior["supersededBy"] = record["id"]
         self.edit_records.append(record)
+        # move_section carries the SOURCE-side diff: emit a second row so
+        # the change set shows both halves of the move (and a trace-based
+        # coverage criterion sees the source deletion). Target row is the
+        # authoritative "section now lives here"; this one records the
+        # removal. Ids stay sequential across both rows.
+        diff_from = result.get("diff_from") or {}
+        if diff_from:
+            src_name = str(diff_from.get("file") or "")
+            before_s = str(diff_from.get("before", ""))
+            after_s = str(diff_from.get("after", ""))
+            added_s, removed_s = diff_counts(before_s, after_s)
+            self.edit_records.append({
+                "id": f"e{len(self.edit_records)}",
+                "file": src_name,
+                "section": section,
+                "key": "",
+                "op": result.get("op", name),
+                "summary": f"moved section [{section}] out of {src_name}",
+                "added": added_s,
+                "removed": removed_s,
+                "diffText": diff_text(src_name, before_s, after_s),
+                "advisories": [],
+                "superseded": False,
+                "supersededBy": "",
+                "_key": None,
+                "_raw_op": op,
+            })
 
     _RECORD_KEYS = ("id", "file", "section", "key", "op", "summary",
                     "added", "removed", "diffText", "advisories",
