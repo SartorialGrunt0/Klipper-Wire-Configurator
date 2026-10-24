@@ -2200,7 +2200,8 @@ def build_bulk_questions() -> list[TestQuestion]:
     config ended 11/62 touched with a prose promise naming the rest
     (memory/momentum failure, not knowledge). These questions grade the
     fixed loop: budget feasibility (Step 1), ops[] batching (Step 2),
-    occurrence-table sweeps (Step 3), and the completion check (Step 4).
+    and occurrence-table sweeps (Step 3). (Step 4's completion check was
+    removed 2026-10-23; these questions still grade raw-loop finish.)
 
     Scoring law (same as EDIT/COMMENT): the changeSet trace is the
     deliverable — `coverage` counts DISTINCT non-superseded sections in
@@ -3766,7 +3767,6 @@ class QuestionResult:
     skill_activated: bool | None = None
     # Phase 6.5 ack guard: injected-directive count from usage.ackReprompts.
     ack_reprompts: int = 0
-    completion_judge: dict | None = None  # usage.completionJudge (dev A/B arm)
     # Per-turn narration from the response's narrationTurns
     # ([{turn, narration, toolNames}]) — feeds the consistency flag.
     narration_turns: list = field(default_factory=list)
@@ -3883,25 +3883,6 @@ def chat_request(base_url: str, question: TestQuestion, settings: dict,
     # harness field (ChatRequest.editSkill).
     if settings.get("force_skill_active") and effective_edit:
         payload["editSkill"] = True
-    # Completion-kickback override (ChatRequest.completionCheck): run-
-    # level only (no per-question override — the kick is a loop-seam
-    # behavior, not a question property). Default 'off' sends False so
-    # the bank measures the raw loop; 'auto' sends nothing (server
-    # default = armed). Sent only when the write tools are armed: with
-    # no edit session the kick can never fire anyway.
-    cc = settings.get("completion_check")
-    if cc is not None and effective_edit:
-        payload["completionCheck"] = cc
-    # Guard-choice override (ChatRequest.completionGuard): only 'judge'
-    # is sent (kickback is the server default; sending it explicitly
-    # would make 'auto' arms differ from the frontend byte-for-byte).
-    # Meaningful only when the guard is armed (cc is not False).
-    if (settings.get("completion_guard") == "judge" and effective_edit
-            and cc is not False):
-        payload["completionGuard"] = "judge"
-        # Payload-size override: only meaningful next to the judge arm.
-        if settings.get("completion_judge_payload") == "dump":
-            payload["completionJudgePayload"] = "dump"
     url = base_url.rstrip("/") + "/ai/chat"
     try:
         return http_post_json(url, payload, timeout), ""
@@ -3998,13 +3979,6 @@ def run_one_question(
         result.change_set = response.get("changeSet")
         # Phase 6.5: ack-guard rescue count + narration turns.
         result.ack_reprompts = int((result.usage or {}).get("ackReprompts") or 0)
-        # Fresh-context judge arm (dev A/B): verdict sequence + flags.
-        result.completion_judge = (result.usage or {}).get("completionJudge")
-        if result.completion_judge:
-            log.write(f"Completion judge: calls="
-                      f"{result.completion_judge.get('calls')} "
-                      f"verdicts={result.completion_judge.get('verdicts')} "
-                      f"flagged={len(result.completion_judge.get('flagged') or [])}")
         result.narration_turns = list(response.get("narrationTurns") or [])
         result.narration_tool_mismatch = _narration_tool_mismatch(
             result.narration_turns)
@@ -4211,30 +4185,9 @@ def resolve_settings(args: argparse.Namespace) -> dict:
         "tool_protocol": args.tool_protocol or "auto",
         "merge_system_messages": args.merge_system_messages,
         "edit_tools": edit_tools_setting(args),
-        "completion_check": completion_check_setting(args),
-        "completion_guard": getattr(args, "completion_guard", "kickback"),
-        "completion_judge_payload": getattr(args, "completion_judge_payload",
-                                            "labels"),
         "force_skill_active": bool(getattr(args, "force_skill_active", False)),
         "base_url": base_url,
     }
-
-
-def completion_check_setting(args: argparse.Namespace) -> bool | None:
-    """--completion-check on/off/auto. DEFAULT 'off' (Sir 2026-10-18):
-    bank runs measure the raw loop — no completion kickback, no
-    reclose echo — so R-phase diffs aren't polluted by the kick arm.
-    'auto' returns None (nothing sent; server default = armed), 'on'
-    forces True explicitly. Exception: --completion-guard judge implies
-    armed unless 'off' was passed EXPLICITLY (a judge arm that never
-    fires measures nothing)."""
-    value = args.completion_check or "off"
-    if (getattr(args, "completion_guard", "kickback") == "judge"
-            and args.completion_check is None):
-        print("  note: --completion-guard judge auto-armed the guard "
-              "(pass --completion-check off to override)")
-        return True
-    return {"on": True, "off": False}.get(value, None)
 
 
 def edit_tools_setting(args: argparse.Namespace) -> bool | None:
@@ -4376,40 +4329,6 @@ def main() -> int:
                              "default (write tools ON — product behavior), "
                              "'off' forces the read-only arm (no write tools "
                              "advertised)")
-    parser.add_argument("--completion-check", default=None,
-                        choices=["auto", "on", "off"],
-                        dest="completion_check",
-                        help="Loop-exit completion guard for bank runs "
-                             "(ChatRequest.completionCheck): 'off' (DEFAULT) "
-                             "disables it so bank numbers measure the raw "
-                             "loop with no re-query/reclose echo; 'auto' "
-                             "follows the server default (armed); 'on' "
-                             "forces it armed explicitly. A/B evidence for "
-                             "the completion-judge plan 2026-10-18.")
-    parser.add_argument("--completion-guard", default="kickback",
-                        choices=["kickback", "judge"],
-                        dest="completion_guard",
-                        help="Which loop-exit guard to run when armed "
-                             "(ChatRequest.completionGuard): 'kickback' "
-                             "(DEFAULT) = the shipped echo re-query; "
-                             "'judge' = fresh-context auditor (independent "
-                             "grade of the close vs request + staged "
-                             "ledger, no worker transcript, bounded "
-                             "verdict loop). Requires the guard to be "
-                             "armed (--completion-check on/auto). Judge "
-                             "stats land in usage.completionJudge.")
-    parser.add_argument("--completion-judge-payload", default="labels",
-                        choices=["labels", "dump"],
-                        dest="completion_judge_payload",
-                        help="Judge payload size (ChatRequest."
-                             "completionJudgePayload): 'labels' (DEFAULT) "
-                             "= ledger facts only; 'dump' = adds the "
-                             "project section inventory + CURRENT text "
-                             "of every file the request edited (server "
-                             "state, capped) so the auditor can verify "
-                             "content and completeness, not just which "
-                             "sections were touched. Only sent with "
-                             "--completion-guard judge.")
     parser.add_argument("--force-skill-active", action="store_true",
                         help="Skill-gate A/B arm: send editSkill=true so the "
                              "write tools are advertised immediately (edit law "
