@@ -1583,6 +1583,64 @@ class ProjectState:
         # '[...]' line can never legally exist inside a section's body
         # scope (the parser would have ended the section there), so any
         # header line in new_text is corruption by construction.
+        # Own-header ANCHOR exemption (BULK-05 bank autopsies
+        # 2026-10-24): the bulk comment-sweep re-emits the section's own
+        # header because there is nothing body-anchored to quote — and
+        # for body-less sections ([pause_resume]) the header is the ONLY
+        # anchor that exists. When old_text IS exactly the own header
+        # line, the op is an unambiguous insert after the header (same
+        # habit replace_section already strips), so the remainder of
+        # new_text (header itself optional) is inserted directly after
+        # it. A FOREIGN header line anywhere, or the own header at a
+        # non-leading position, stays refused (BULK-04/BULK-01
+        # corruption classes unchanged).
+        old_stripped = old_text.strip()
+        old_hdr_m = RE_SECTION_HEADER.match(old_stripped)
+        old_is_own_header = bool(
+            old_hdr_m and old_hdr_m.group(1).strip() == header)
+        if old_hdr_m and not old_is_own_header:
+            # Anchor is a header but names a DIFFERENT section than the
+            # op — patching it into [{header}] would duplicate the
+            # anchor header inside this body (BULK-01 merge class).
+            # Name the mismatch instead of the generic new_text guard.
+            return _state_error(
+                f"old_text anchor '[{old_hdr_m.group(1).strip()}]' is the "
+                f"header of a different section, not [{header}] — "
+                f"patch_section edits INSIDE [{header}] only. Re-send the "
+                f"op with section='{old_hdr_m.group(1).strip()}' to edit "
+                f"that section, or anchor on its body lines.")
+        if old_is_own_header and old_text == new_text:
+            return _state_error(
+                f"patch_section made NO change: old_text and new_text are "
+                f"identical. To add a comment after the header, new_text "
+                f"must be the header line PLUS the new comment line(s).")
+        if old_is_own_header and old_text != new_text:
+            # The anchor line itself is replaced, so own-header lines in
+            # new_text cannot duplicate it — only FOREIGN headers can
+            # corrupt. Own headers pass anywhere; foreign -> the guard.
+            new_lines_pre = new_text.split('\n')
+            if not any(
+                    (m := RE_SECTION_HEADER.match(l))
+                    and m.group(1).strip() != header
+                    for l in new_lines_pre):
+                insert_body = [l for l in new_lines_pre
+                               if not (RE_SECTION_HEADER.match(l)
+                                       and l.strip() == old_stripped)]
+                lines = _split_lines(self.files[filename])
+                found = _find_section(lines, header)
+                if found is None:
+                    return _state_error(
+                        f"Section '[{header}]' not found in {filename}."
+                        + _ambiguous_section_hint(header, lines)
+                        + _missing_section_hint(self.files, header, filename)
+                        + " Read the file first."
+                    )
+                header_index, end = found
+                section_lines = lines[header_index + 1:end]
+                lines[header_index + 1:end] = insert_body + section_lines
+                self.files[filename] = '\n'.join(lines)
+                return {'status': 'ok', 'file': filename,
+                        'summary': f"patched [{header}] in {filename}"}
         for line in new_text.split('\n'):
             m_hdr = RE_SECTION_HEADER.match(line)
             if m_hdr:

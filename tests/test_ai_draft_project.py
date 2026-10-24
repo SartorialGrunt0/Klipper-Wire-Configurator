@@ -544,6 +544,99 @@ def test_patch_section_new_text_with_header_refused():
     assert 'add_section' in r['error']
 
 
+# ── Own-header anchor (BULK-05 bank autopsies, 2026-10-23/24) ─────────
+# The bulk-comment sweep sends old_text/new_text as the section's OWN
+# header line ('[printer]' -> '[printer]\n# purpose') because there is
+# nothing body-anchored to quote, and the header guard rejected all 26
+# ops on both models. An exact own-header anchor is unambiguous: insert
+# the remainder directly after the header.
+
+def test_patch_section_header_anchor_inserts_comment():
+    """Trace shape from guard3-off-27b BULK-05 op[0]."""
+    st, base = _state()
+    st1, r = st.apply(base, {'op': 'patch_section', 'file': 'printer.cfg',
+                             'section': 'printer',
+                             'old_text': '[printer]',
+                             'new_text': '[printer]\n'
+                                         '# Printer settings and motion limits'})
+    assert r['status'] == 'applied', r
+    text = st1.files['printer.cfg']
+    assert text.count('[printer]') == 1
+    lines = text.split('\n')
+    assert lines[lines.index('[printer]') + 1] == \
+        '# Printer settings and motion limits'
+    # body untouched
+    assert 'kinematics: cartesian' in text
+
+
+def test_patch_section_header_anchor_empty_section():
+    """The deliberate body-less-section trap: a header anchor is the
+    ONLY anchor an empty section has (verify-C)."""
+    st, _ = _state()
+    st0 = ProjectState({'printer.cfg': '[printer]\nkinematics: cartesian\n\n'
+                                       '[pause_resume]\n\n[display_status]\n'})
+    st1, r = st0.apply({}, {'op': 'patch_section', 'file': 'printer.cfg',
+                            'section': 'pause_resume',
+                            'old_text': '[pause_resume]',
+                            'new_text': '[pause_resume]\n# resume helper'})
+    assert r['status'] == 'applied', r
+    text = st1.files['printer.cfg']
+    assert text.count('[pause_resume]') == 1
+    assert '[pause_resume]\n# resume helper' in text
+    assert '[display_status]' in text
+
+
+def test_patch_section_header_anchor_new_text_without_header():
+    """Header anchor whose new_text omits the header: insertion keeps
+    the header (a patch that drops a header is never legitimate)."""
+    st, base = _state()
+    st1, r = st.apply(base, {'op': 'patch_section', 'file': 'printer.cfg',
+                             'section': 'bed_mesh',
+                             'old_text': '[bed_mesh]',
+                             'new_text': '# mesh probing settings'})
+    assert r['status'] == 'applied', r
+    text = st1.files['printer.cfg']
+    assert text.count('[bed_mesh]') == 1
+    assert '[bed_mesh]\n# mesh probing settings' in text
+
+
+def test_patch_section_header_anchor_header_only_is_noop():
+    """old_text == new_text == the header: no-op refusal, not a
+    false-success insert."""
+    st, base = _state()
+    _, r = st.apply(base, {'op': 'patch_section', 'file': 'printer.cfg',
+                           'section': 'printer',
+                           'old_text': '[printer]',
+                           'new_text': '[printer]'})
+    assert r['status'] == 'error'
+    assert 'NO change' in r['error']
+
+
+def test_patch_section_foreign_header_anchor_refused():
+    """Anchor line is a header but NOT the op's section: the mismatch
+    names the anchor's own section rather than silently inserting."""
+    st, base = _state()
+    _, r = st.apply(base, {'op': 'patch_section', 'file': 'printer.cfg',
+                           'section': 'printer',
+                           'old_text': '[stepper_x]',
+                           'new_text': '[stepper_x]\n# note'})
+    assert r['status'] == 'error'
+    assert 'anchor' in r['error'].lower()
+
+
+def test_patch_section_own_header_mid_new_text_still_refused():
+    """Own header at a NON-leading position still duplicates the
+    header in the file — same merge-corruption class replace_section
+    refuses (BULK-01)."""
+    st, base = _state()
+    _, r = st.apply(base, {'op': 'patch_section', 'file': 'printer.cfg',
+                           'section': 'printer',
+                           'old_text': 'kinematics: cartesian',
+                           'new_text': '# c\n[printer]\nkinematics: cartesian'})
+    assert r['status'] == 'error'
+    assert 'must not contain a section header' in r['error']
+
+
 def test_replace_section_header_prefixed_body_is_stripped():
     """r2 TRIDENT-15 (2026-09-14): models habitually start the text with
     the section's own header. Kept verbatim it duplicated '[header]' and

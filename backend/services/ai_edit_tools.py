@@ -401,11 +401,32 @@ def _ops_result_content(name: str, results: list[dict]) -> str:
                      + block)
     if failed:
         head += "\nFailed ops (fix ONLY these and re-send them):"
-        for r in failed[:10]:
-            where = r.get('section') or ''
-            head += (f"\n- op[{r.get('idx', '?')}] {r.get('op', '')}"
-                     + (f" [{where}]" if where else "")
-                     + f": {r.get('error', 'failed')}")
+        # BULK-05 bank autopsies (2026-10-24): a 26-op sweep where every
+        # op hit the same error rendered the identical sentence 26x
+        # (~2.6KB per call, and every failed op charges the waste
+        # budget while the text floods the context). Identical
+        # (op, section, error) failures collapse into one line naming
+        # the index range; distinct failures keep their own lines.
+        def _where(r: dict) -> str:
+            return (f" {r.get('op', '')}"
+                    + (f" [{r.get('section')}]" if r.get('section') else ""))
+        groups: list[tuple[list[int], dict]] = []
+        for r in failed:
+            key = (r.get('op', ''), r.get('section') or '',
+                   r.get('error', 'failed'))
+            if groups and (groups[-1][1].get('op', ''),
+                           groups[-1][1].get('section') or '',
+                           groups[-1][1].get('error', 'failed')) == key:
+                groups[-1][0].append(r.get('idx', 0))
+            else:
+                groups.append(([r.get('idx', 0)], r))
+        for idxs, r in groups[:10]:
+            if len(idxs) == 1:
+                span = f"op[{idxs[0]}]"
+            else:
+                span = f"op[{idxs[0]}-{idxs[-1]}]"
+            head += (f"\n- {span}{_where(r)}: {r.get('error', 'failed')}"
+                     + (f" ({len(idxs)} ops)" if len(idxs) > 1 else ""))
     return head
 
 

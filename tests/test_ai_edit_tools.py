@@ -2687,6 +2687,41 @@ def test_batch_per_index_feedback_format():
     assert details is not None  # partial commit still stages details
 
 
+def test_batch_identical_failures_render_once():
+    """BULK-05 bank autopsies (2026-10-23): a 26-op sweep where every op
+    hit the SAME error rendered the identical sentence 26 times (~2.6KB
+    of repeated text per call). Identical (op, section, error) failures
+    now collapse into ONE line naming the index range."""
+    session = EditSession(_ctx())
+    content, _ = session.execute(_batch_args([
+        {'op': 'set_param', 'section': 'nope_missing', 'key': f'k{i}',
+         'value': '1'} for i in range(26)
+    ]))
+    assert 'applied 0 of 26 ops' in content
+    fails_block = content.split('Failed ops')[1]
+    # one merged line, named by index range (the name appears twice on
+    # that line only because the error text quotes the section itself)
+    assert fails_block.strip().count('\n') == 1
+    assert 'op[0-25]' in fails_block
+    assert '(26 ops)' in fails_block
+
+
+def test_batch_mixed_failures_group_only_identical():
+    """Non-identical failures stay on their own lines; only exact
+    repeats merge, and the merge keeps the fix-ONLY-these contract."""
+    session = EditSession(_ctx())
+    content, _ = session.execute(_batch_args([
+        {'op': 'set_param', 'section': 'nope_a', 'key': 'k1', 'value': '1'},
+        {'op': 'set_param', 'section': 'nope_b', 'key': 'k2', 'value': '1'},
+        {'op': 'set_param', 'section': 'nope_b', 'key': 'k3', 'value': '1'},
+    ]))
+    fails_block = content.split('Failed ops')[1]
+    assert 'nope_a' in fails_block
+    assert 'op[1-2]' in fails_block  # ops 1-2 collapsed onto one line
+    assert 'op[0]' in fails_block
+    assert '(2 ops)' in fails_block
+
+
 def test_batch_validation_kickback_names_the_findings():
     """BULK-04 bank re-run (2026-10-17): a failed batch entry said only
     'failed validation after merging' — the concrete newErrors
