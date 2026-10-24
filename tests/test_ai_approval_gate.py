@@ -670,11 +670,10 @@ def test_staged_edits_are_published_live_on_the_progress_rail(
     from api.printer_memory_routes import PrinterMemory
     slow = _SlowClient([
         _text_tool_call('config_edit', SET_ACCEL),
-        # The completion check (Step 4) re-queries this confident-prose
-        # close; the assertion snapshot is taken on the FINAL query, so
-        # the kick round-trip gets its own reply too.
+        # The loop closes on this prose reply (completion kickback
+        # removed 2026-10-23); the assertion snapshot is taken on that
+        # FINAL query, while the request is still open.
         _final_reply('Staged.'),
-        _final_reply('Staged and complete.'),
     ])
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
     monkeypatch.setattr(ai_routes.httpx, 'AsyncClient', lambda *a, **k: slow)

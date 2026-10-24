@@ -632,106 +632,6 @@ def thrash_budget() -> int:
         return THRASH_BUDGET_DEFAULT
 
 
-# ── completion-check directive (Step 4, large-edit rework 2026-10-16) ──
-# One re-query when an edit-INTENT request tries to close with confident
-# prose. Pure self-grading is the documented failure (nag-proof prompt
-# still failed 2026-10-16; Oct-13 law: checkmarks inherit the worker's
-# blind spot; a 12B's sycophancy asserts completion). Re-presenting the
-# trace ledger in the recency window at the moment-of-close converts
-# "grading homework in a vacuum" into "answering against one's own
-# visible trace" — answering "yes" over a visible "2 failed calls" is a
-# different, rarer failure.
-#
-# `KWC_COMPLETION_CHECK=bare|ledger` picks the A/B arm; LEDGER is the
-# build default (the clarify asking Cliff timed out 2026-10-17 — plan
-# default stands, flagged in the handoff). Unparseable values fall back
-# to ledger, never crash.
-COMPLETION_CHECK_MODE_DEFAULT = "ledger"
-# Section names sampled per file in the ledger brief. Early entries
-# FIRST: forgotten work hides at the head of a long bulk request, and
-# the "+K more" tail keeps the count exact.
-COMPLETION_LEDGER_SECTION_CAP = 20
-# Per-failure one-line errors shown before "+K more".
-COMPLETION_LEDGER_FAILURE_CAP = 5
-
-
-def completion_check_mode() -> str:
-    """'bare' or 'ledger' (default ledger; invalid values -> ledger)."""
-    raw = _os.environ.get("KWC_COMPLETION_CHECK", "").strip().lower()
-    if raw in ("bare", "ledger"):
-        return raw
-    return COMPLETION_CHECK_MODE_DEFAULT
-
-
-def ledger_facts_line(edit_session) -> str:
-    """Pure facts sentence of the ledger brief: staged counts per file
-    with sampled section labels, plus the failed-call line. Shared by
-    completion_kickback_directive (worker-facing) and the fresh-context
-    judge (auditor-facing) so the two arms never see different facts.
-    No framing prose — callers add their own. Emitting the lowercase
-    "staged N edit(s): …" fragment lets completion_kickback_directive
-    compose its "So far this request …" sentence byte-identically."""
-    records = [r for r in getattr(edit_session, "edit_records", [])
-               if not r.get("superseded")]
-    if records:
-        parts = []
-        for fname in dict.fromkeys(r.get("file", "") for r in records):
-            recs = [r for r in records if r.get("file") == fname]
-            verbs = sorted({str(r.get("op", "edit")) for r in recs})
-            names: list[str] = []
-            for r in recs:
-                label = str(r.get("section", "") or "")
-                if r.get("key"):
-                    label = f"{label}.{r['key']}" if label else str(r["key"])
-                if label and label not in names:
-                    names.append(label)
-            shown = names[:COMPLETION_LEDGER_SECTION_CAP]
-            extra = (f" +{len(names) - len(shown)} more"
-                     if len(names) > len(shown) else "")
-            parts.append(f"{fname} — {'/'.join(verbs)}: "
-                         f"{', '.join(shown)}{extra}"
-                         if shown else
-                         f"{fname} — {'/'.join(verbs)}")
-        text = (f"staged {len(records)} edit{'s' if len(records) != 1 else ''}: "
-                + " · ".join(parts))
-    else:
-        text = "staged 0 edits."
-    failures = int(getattr(edit_session, "write_failures", 0) or 0)
-    if failures:
-        notes = list(getattr(edit_session, "failure_notes", [])
-                     or [])[:COMPLETION_LEDGER_FAILURE_CAP]
-        text += (f" · failed calls: {failures}"
-                 + (f" ({'; '.join(notes)})" if notes else ""))
-        if failures > len(notes):
-            text += f" +{failures - len(notes)} more"
-    return text
-
-
-def completion_kickback_directive(user_prompt: str, edit_session, *,
-                                  mode: str | None = None) -> str:
-    """Model-facing re-prompt for the loop-exit completion check.
-
-    BARE arm re-asks the user's request verbatim. LEDGER arm appends the
-    request's own trace facts: exact staged-edit counts per file with
-    sampled section names (early entries first, "+K more" when capped),
-    and the failed-call count with one-line errors (``failure_notes``,
-    capped at COMPLETION_LEDGER_FAILURE_CAP). All facts come from the
-    session's records — nothing here defines "done" for the model and no
-    "remaining" list is invented; diff-against-intent stays the model's
-    job.
-    """
-    if mode is None:
-        mode = completion_check_mode()
-    text = (f'COMPLETION CHECK — Your request: "{user_prompt}". Is it '
-            "entirely resolved with the edits made?")
-    if mode == "ledger":
-        text += f" So far this request {ledger_facts_line(edit_session)}"
-        text += (" Is the request entirely resolved? If work remains, "
-                 "continue with the edit tools now. If you deliberately "
-                 "skipped items, name them in your reply.")
-    else:
-        text += (" If not, continue with the edit tools now.")
-    return text
 
 
 # ── Change-set display helpers (post-hoc review, 2026-10-02) ───────────
@@ -1057,13 +957,8 @@ class EditSession:
         # kills them in ai_routes before execution, unchanged).
         self.read_calls = 0
         # Fact source for the over-budget directive (and the Step-4
-        # completion-check ledger): per-call write failures, not units.
+        # confab guard): per-call write failures, not units.
         self.write_failures = 0
-        # One-line summaries of failed calls (Step-4 ledger), appended at
-        # every charge site that produces a kickback, capped at
-        # FAILURE_NOTE_CAP — the ledger shows these under "failed calls".
-        # Cleared by apply_steer like the other deterministic ledgers.
-        self.failure_notes: list[str] = []
         # R1 batch tagging: targets (op+file+section) that FAILED earlier
         # this request. A batch entry succeeding one of these is a
         # failed-then-retried op — the one batch shape whose realized
@@ -1272,7 +1167,6 @@ class EditSession:
         self.thrash_units = 0
         self.read_calls = 0
         self.write_failures = 0
-        self.failure_notes.clear()
         self._failed_targets.clear()
         self._last_file = None
 
@@ -1337,23 +1231,6 @@ class EditSession:
         Fail-open by contract: this only ever moves a counter."""
         self.thrash_units = max(0, self.thrash_units + units)
 
-    FAILURE_NOTE_CAP = 5
-
-    def note_failure(self, label: str, error: str) -> None:
-        """Record a one-line summary of a FAILED write call for the
-        Step-4 completion-check ledger. `label` is the model-facing
-        shape ('set_param@fan'); the error is flattened to one short
-        line. Capped — the ledger shows the first few and counts the
-        rest; never raises (a missing note is a leaner ledger, never a
-        broken request)."""
-        try:
-            one_line = " ".join(str(error).split())[:120]
-            self.failure_notes.append(f"{label}: {one_line}"
-                                      if label else one_line)
-            if len(self.failure_notes) > self.FAILURE_NOTE_CAP:
-                del self.failure_notes[self.FAILURE_NOTE_CAP:]
-        except Exception:  # pragma: no cover - fail-open
-            pass
 
     def charge_read(self) -> bool:
         """One executed read call (loop-side, after the repeat guard —
@@ -1576,8 +1453,6 @@ class EditSession:
                 self.thrash_units += 1
                 self.write_failures += 1
                 self.last_write_outcome = "correctable"
-                self.note_failure(f"op[{idx}] {sub.get('op', '')}",
-                                  "missing file")
                 results.append({"idx": idx, "op": sub.get("op", ""), "ok": False,
                                 "error": "missing file — pass file= on the "
                                          "call or on the entry"})
@@ -1621,10 +1496,6 @@ class EditSession:
                         f"{e.get('param', '')}: {e.get('message', '')}"
                         .rstrip()
                         for e in sub_errs)
-                self.note_failure(
-                    f"op[{idx}] {sub.get('op', '')}"
-                    + (f"@{sub.get('section')}" if sub.get("section") else ""),
-                    err)
                 if count >= 2:
                     err += " (this exact entry already failed — do not re-send it unchanged)"
                 results.append({"idx": idx, "op": sub.get("op", ""),
@@ -1672,8 +1543,6 @@ class EditSession:
             self.last_write_outcome = "correctable"
             self.thrash_units += 1
             self.write_failures += 1
-            self.note_failure(f"batch {name}",
-                              blocked.splitlines()[0] if blocked else "blocked")
             return blocked
         ops_arg = parse_maybe_stringified(args.get("ops"))
         ops = ops_arg if isinstance(ops_arg, list) else []
@@ -1686,10 +1555,6 @@ class EditSession:
             self.thrash_units += 1
             self.write_failures += 1
             self.last_write_outcome = "correctable"
-            self.note_failure(
-                "batch size",
-                f"{len(ops)} ops in one call exceeds the "
-                f"{MAX_OPS_PER_CALL}-op limit")
             return (f"{name} FAILED: this call carries {len(ops)} "
                     f"ops — the limit is {MAX_OPS_PER_CALL} per call; "
                     "split the work across several calls.")
@@ -1797,9 +1662,6 @@ class EditSession:
             self.last_write_outcome = "correctable"
             self.thrash_units += 1
             self.write_failures += 1
-            self.note_failure(
-                f"{op.get('op', name)}@{op.get('section', op.get('file', ''))}",
-                blocked.splitlines()[0] if blocked else "blocked")
             return blocked, None
 
         dup = self._duplicate_of_committed(op)
@@ -1824,9 +1686,6 @@ class EditSession:
             self.write_failures += 1
             count = self._note_failure(name, args)
             lean_err = _lean_error_content(name, result)
-            self.note_failure(
-                f"{op.get('op', name)}@{op.get('section', op.get('file', ''))}",
-                lean_err.splitlines()[0] if lean_err else "failed")
             return (lean_err
                     + self._repeat_directive(name, count)), None
 
@@ -1890,9 +1749,6 @@ class EditSession:
             self.last_write_outcome = "correctable"
             self.thrash_units += 1
             self.write_failures += 1
-            self.note_failure(
-                f"{op.get('op', name)}@{op.get('section', op.get('file', ''))}",
-                blocked.splitlines()[0] if blocked else "blocked")
             return blocked, None, None
 
         dup = self._duplicate_of_committed(op)
@@ -1912,9 +1768,6 @@ class EditSession:
             self.write_failures += 1
             count = self._note_failure(name, args)
             lean_err = _lean_error_content(name, result)
-            self.note_failure(
-                f"{op.get('op', name)}@{op.get('section', op.get('file', ''))}",
-                lean_err.splitlines()[0] if lean_err else "failed")
             return (lean_err
                     + self._repeat_directive(name, count)), None, None
 

@@ -32,7 +32,6 @@ from services.ai_edit_tools import (
     EDIT_TOOL_NAMES,
     EDIT_TOOL_SPECS,
     EditSession,
-    completion_kickback_directive,
     create_approval,
     find_approval_for_request,
     format_approval_result,
@@ -354,15 +353,6 @@ class ChatRequest(BaseModel):
     # None/False = the model must call load_skill to unlock the write
     # tools.
     editSkill: bool | None = None
-    # Completion-check override (harness A/B runs ONLY; the frontend
-    # never sends it). None = server behavior (kickback armed — product
-    # default). False disables the loop-exit completion kickback for
-    # this request: the bank measures the raw loop with no re-query and
-    # no reclose echo (Sir 2026-10-18, pre-R1 bank work — every bank
-    # number should say whether the kick was in the loop at all).
-    # Mirrors the editTools/editSkill harness-override precedent, so
-    # A/B runs need no backend restart.
-    completionCheck: bool | None = None
     # Approval-gate override (harness A/B runs ONLY; the frontend never
     # sends it). INERT since the post-hoc review change (2026-10-02):
     # nothing in the edit path suspends, so there is no wait to skip and
@@ -2869,10 +2859,6 @@ MAX_TOOL_OPS_PER_REQUEST = 500
 # (tool-loop exhaustion, an unparseable call format, or a final tool-only
 # response), re-prompt it without tools to force a direct text answer.
 EMPTY_REPROMPT_LIMIT = 2
-# Completion check (Step 4, 2026-10-17): ONE re-query per request when an
-# edit-intent reply tries to close with prose. Cap 1 by the same latency
-# law as the ack guard; steering re-arms it (new instruction, new check).
-COMPLETION_KICKBACK_LIMIT = 1
 # Reasoning-enabled local builds (llama.cpp --reasoning-budget) spend part of
 # the completion budget on hidden tokens that never become visible content.
 # A low max_tokens can exhaust the whole budget invisibly and come back
@@ -3664,14 +3650,6 @@ async def chat_proxy(req: ChatRequest):
             # surfaced as usage.ackReprompts.
             ack_reprompts = 0
 
-            # Completion-check budget (Step 4, 2026-10-17): an edit-INTENT
-            # request closing on confident prose gets ONE re-prompt that
-            # re-presents the request + its own trace ledger. Cap 1 — the
-            # second close is the model's answer. Surfaced as
-            # usage.completionKicks; cleared by a steer (new instruction
-            # deserves its own check).
-            completion_kicks = 0
-
             def _emit_progress(tool_names: list[str], narration: str) -> None:
                 """Publish mid-loop progress for the poller (Phase 6.5.1).
 
@@ -3743,7 +3721,6 @@ async def chat_proxy(req: ChatRequest):
                     # needed — after the model burned its writes driving
                     # the wrong way.
                     tool_turns = 0
-                    completion_kicks = 0
                     steers_applied += len(_steers)
                     _progress_entry = _chat_progress.get(req.requestId)
                     if _progress_entry is not None:
@@ -4003,93 +3980,6 @@ async def chat_proxy(req: ChatRequest):
                             ack_usage["context"] = f"ack-reprompt-{ack_reprompts}"
                             usage_events.append(ack_usage)
                         continue
-                    # ── Completion check (Step 4, 2026-10-17) ──
-                    # An edit-INTENT request closing on confident prose
-                    # gets ONE re-query that re-presents the request and
-                    # its own trace ledger (KWC_COMPLETION_CHECK=bare|
-                    # ledger, default ledger). Closes the advice-only
-                    # hole: change requested, zero writes, confident
-                    # prose, no guard fires today. Placed AFTER the
-                    # edit-prose nudge and ack guard so they keep owning
-                    # their stronger-evidence cases. Skips: empty prose,
-                    # cfg-fenced answers (inert-draft territory),
-                    # continue-intent tails (ack guard's case), tails
-                    # asking the user a question (same exemption
-                    # discipline as the ack guard — an honest clarify is
-                    # never gaslit). Second prose exit closes normally;
-                    # a steer clears the counter.
-                    if (edit_session is not None
-                            # Harness override (see ChatRequest.
-                            # completionCheck): only an explicit False
-                            # disarms; None keeps the product default
-                            # (same "explicit override wins" shape as
-                            # editTools).
-                            and req.completionCheck is not False
-                            and current_content.strip()
-                            # Refusal/budget shield (same discipline as
-                            # the edit-prose nudge): after a user_gated
-                            # decision or a spent waste budget, the
-                            # explain-and-report close IS the finished
-                            # move — kicking it pressure-cooks an
-                            # explicit user decision or a budget the
-                            # loop already soft-landed on.
-                            and edit_session.last_write_outcome
-                            not in ('user_gated', 'budget')
-                            and (edit_session.edit_attempts > 0
-                                 or _is_edit_request(req.messages))
-                            and not extract_config_code_blocks(
-                                current_content)
-                            and not _ends_with_continue_intent(
-                                current_content)
-                            and not _CLARIFYING_TAIL_RE.search(
-                                " ".join(
-                                    ln for ln in current_content.splitlines()
-                                    if ln.strip())[-400:])):
-                        _cc_prompt = ""
-                        for _cc_msg in reversed(req.messages):
-                            if _cc_msg.get("role") == "user" and str(
-                                    _cc_msg.get("content", "")).strip():
-                                _cc_prompt = str(_cc_msg["content"]).strip()
-                                break
-                        if completion_kicks < COMPLETION_KICKBACK_LIMIT:
-                            completion_kicks += 1
-                            logger.info(
-                                "Completion check | edit-intent prose "
-                                "close | attempts=%d staged=%d failures=%d "
-                                "kick=%d turn=%d preview=%s",
-                                edit_session.edit_attempts,
-                                len(edit_session.pending_edits),
-                                edit_session.write_failures,
-                                completion_kicks, tool_turns,
-                                current_content[:120].replace("\n", " "),
-                            )
-                            clean_prior = MCP_TOOL_BLOCK_RE.sub("", current_content).strip()
-                            if clean_prior:
-                                current_messages.append(
-                                    {"role": "assistant", "content": clean_prior})
-                            current_messages.append({
-                                "role": "user",
-                                "content": completion_kickback_directive(
-                                    _cc_prompt, edit_session),
-                            })
-                            cc_payload = _build_provider_payload(
-                                req.apiProvider, current_messages, req.model,
-                                max_tokens=req.maxTokens,
-                                temperature=req.temperature,
-                                tools=native_tools,
-                                merge_system=req.mergeSystemMessages,
-                            )
-                            current_content, current_data = await _query_provider(
-                                client, req.apiUrl, headers, cc_payload,
-                                req.apiProvider,
-                                logger_context=f"completion-check-{completion_kicks}",
-                                stop_event=stop_event,
-                            )
-                            cc_usage = _extract_usage_info(current_data)
-                            if cc_usage:
-                                cc_usage["context"] = f"completion-check-{completion_kicks}"
-                                usage_events.append(cc_usage)
-                            continue
                     if tool_turns > 0:
                         logger.info("Tool call loop done | turns=%d final_chars=%d", tool_turns, len(current_content))
                     break
@@ -4698,11 +4588,6 @@ async def chat_proxy(req: ChatRequest):
                     # (expect_no_ack_stall) — a cleaned-up lie is still
                     # the weakness.
                     "ackReprompts": ack_reprompts,
-                    # Completion-check bookkeeping (Step 4): 1 when an
-                    # edit-intent prose close was re-queried with the
-                    # trace ledger. The harness counts kicks separately
-                    # from ackReprompts (different guard, different fix).
-                    "completionKicks": completion_kicks,
                     "events": usage_events,
                     "truncated": any(
                         (e.get("finishReason") or "") == "length" for e in usage_events
