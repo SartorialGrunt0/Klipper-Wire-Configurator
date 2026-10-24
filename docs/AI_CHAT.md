@@ -109,19 +109,13 @@ rework fixed the machinery that manufactured that symptom:
   (what failed, what was over-read) and never claims further writes are
   blocked. Steering a request mid-flight resets the budget — the model
   didn't waste anything driving where you redirected it.
-- **Completion check at the loop exit.** An edit-*intent* request that tries
-  to close with confident prose while its trace shows zero staged writes
-  gets **one** re-query that re-presents the request *and its own ledger*:
-  per-file staged-edit counts with sampled section names, and the failed-call
-  count with one-line errors. The model grades itself against facts instead
-  of a vacuum (self-grading alone is the documented failure: a 12B's
-  sycophancy asserts completion). Only one kick per request, like the ack
-  guard; a steer re-arms it. The check skips cfg-fenced answers,
-  continue-intent tails, and honest clarifying questions; the second prose
-  exit closes normally. `KWC_COMPLETION_CHECK=bare|ledger` picks the A/B
-  arm (default `ledger`); usage reports the kick count as
-  `completionKicks`. The reply is now also stamped with a failed-call note
-  when the loop gave up on any call, so "all done" cannot ride over errors.
+- **Trace-truth stamping at the close.** The reply is stamped with a
+  failed-call note when the loop gave up on any call, so "all done"
+  cannot ride over errors; a fully-confabbed close (write attempts,
+  nothing staged) gets the trace-truth note the same way. The loop
+  itself closes when the model says it is done — the loop-exit
+  completion kickback and the fresh-context judge were measured away
+  and removed (see "Guard removal", 2026-10-23).
 
 ### Engine invariants (2026-10-17, from the BULK bank autopsies)
 
@@ -458,6 +452,51 @@ Repeat-sample note (standing law): one run each — before crediting or
 blaming the contract vs the labels-quote dump arm, re-run or use the
 continue-intent exemption fix (now backed by 5 regressed closes that
 escaped through exactly that hole) as the next lever.
+
+### Guard removal: kickback + judge deleted (2026-10-23)
+
+The 2026-10-19 sections above were single-run signals. The decision-grade
+reruns used a 3-arm cycle (off / kickback / judge-dump) on the SAME tip,
+identical settings, arms differing ONLY in the loop-exit guard, full
+111-qid corrected bank, t=1.0:
+
+| Model | off | kickback | judge | fail sets |
+| --- | --- | --- | --- | --- |
+| qwen3.8-27b (`guard3-*-27b`, 4096 tok) | 109 | 110 | 108 | fully disjoint |
+| gemma-4-12b (`guard3g-*-12b`, 8192 tok) | 102 | 104 | 104 | mostly disjoint |
+
+Findings that closed the question:
+
+1. **No accuracy effect.** 27B: a ±1 spread with zero overlap between
+   fail sets — noise, not signal. gemma: +2 for guarded arms, but the
+   guards RESHUFFLED failures instead of removing the class (kickback
+   did not rescue its flagship BULK-02 early-stop — it failed off AND
+   kick; judge passed BULK-02/05 while breaking TRIDENT-04, TRIDENT-15,
+   SKILL-N02 that both other arms passed).
+2. **The one observed off-arm rescue was a one-off.** BULK-02's off-mode
+   zero-edit close reran 3/3 PASS (`bulk02-off-r{1,2,3}`) — a ~1-in-4
+   sampling tail on 27B, not a hole the guard plugs.
+3. **Mid-loop deltas were sampling, not guard effect.** Apparent
+   edit-budget/re-edit differences concentrated in two thrash episodes
+   (AMBI-02, COMMENT-05) reproducible as dice; `move_section →
+   delete_section` on one key is legitimate move choreography, not a
+   re-edit.
+4. **Judge's observed dogfood failure was the worst kind:** it attested
+   a false DONE on an incomplete rename (2026-10-23 level_bed dogfood),
+   and it cost 33–46 extra model calls per bank run.
+
+Removed: the judge service, the kickback block in the chat loop, the
+`completionCheck`/`completionGuard`/`completionJudgePayload` request
+fields, `usage.completionKicks`/`completionJudge`, the failure-notes
+ledger that only fed the kick, and the harness A/B flags
+(`a372b5b`, `995dae2`, `895b05e`). Untouched and still shipped: the
+validation kickbacks on FAILED ops (error feedback, not a guard), the
+ack guard, the confab/trace-truth notes, the thrash budget.
+
+`COMMENT-06` failed every arm on both models (6/6) — the systematic
+gap is TOOL CAPABILITY, not loop guardianship; that is where further
+reliability work goes. If a future model class shows a *consistent*
+early-stop failure, re-run the 3-arm cycle before re-adding any guard.
 
 ### Family detail (baseline run, pre-fix)
 
