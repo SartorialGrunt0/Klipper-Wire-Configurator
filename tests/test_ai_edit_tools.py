@@ -1995,6 +1995,99 @@ def test_list_hardware_stepper_suffix_and_literal_type():
     assert 'timeout: 600' in literal
 
 
+_HW_MIXED = (
+    '[mcu]\nserial: /dev/tty0\n'
+    '[mcu EBBCan]\ncanbus_uuid: aa\n'
+    '[stepper_x]\nstep_pin: PF13\n'
+    '[extruder]\nstep_pin: EBBCan:PD13\nrotation_distance: 5.78\n'
+    '[extruder_stepper my_extra]\nextruder: extruder\n'
+    '[tmc2209 extruder]\nuart_pin: PD12\n'
+    '[tmc2240 stepper_x]\ncs_pin: PG0\n'
+    '[heater_bed]\nheater_pin: PA0\n'
+    '[heater_fan hotend_fan]\npin: EBBCan:PA0\n'
+    '[multi_endstops stepper_z]\nstep_pin: PB3\n'
+    '[temperature_sensor mcu_temp]\nsensor_type: temperature_mcu\n'
+    '[gcode_macro FOO]\ngcode:\n    M106\n'
+    '[delayed_gcode boot]\ngcode:\n    M400\n'
+    '[respond]\n'
+    '[virtual_sdcard]\npath: /tmp\n')
+
+
+def test_list_hardware_stepper_class_excludes_extruder_with_note():
+    """Sir 2026-10-24: [extruder] drives a stepper motor but folding it
+    into the 'stepper' class would make every stepper sweep acquire the
+    filament path. Deterministic observation footer instead — names the
+    near-miss, never adds the member."""
+    from services.hardware_lookup import list_hardware
+    out = list_hardware({'printer.cfg': _HW_MIXED}, 'stepper')
+    assert '[stepper_x]' in out
+    assert '## [extruder]' not in out
+    assert '# Note: [extruder]' in out
+    assert "NOT in the sweep above" in out
+    # no extruder in the project -> no note at all
+    plain = list_hardware({'printer.cfg': _HW_MAIN}, 'stepper')
+    assert 'Note:' not in plain
+
+
+def test_list_hardware_driver_class_and_natural_aliases():
+    """'driver'/'drivers' had no alias (only the literal group name
+    'stepper_driver' worked); hotend/nozzle/bed were unknown classes."""
+    from services.hardware_lookup import list_hardware
+    files = {'printer.cfg': _HW_MIXED}
+    for alias in ('driver', 'drivers'):
+        out = list_hardware(files, alias)
+        assert '[tmc2209 extruder]' in out and '[tmc2240 stepper_x]' in out
+        assert '[stepper_x]' not in out  # motors are not drivers
+    for alias in ('hotend', 'nozzle'):
+        out = list_hardware(files, alias)
+        assert '## [extruder]' in out and 'heater_bed' not in out
+    bed = list_hardware(files, 'bed')
+    assert '[heater_bed]' in bed
+    assert '[heater_fan hotend_fan]' not in bed
+
+
+def test_list_hardware_heater_class_excludes_heater_fan():
+    """The old 'heater' whole-word token swept [heater_fan ...], which
+    is a fan. The heater GROUP covers every real heater type."""
+    from services.hardware_lookup import list_hardware
+    out = list_hardware({'printer.cfg': _HW_MIXED}, 'heater')
+    assert '[heater_bed]' in out
+    assert '## [heater_fan hotend_fan]' not in out
+    fans = list_hardware({'printer.cfg': _HW_MIXED}, 'fan')
+    assert '[heater_fan hotend_fan]' in fans
+
+
+def test_list_hardware_macro_class_excludes_respond_and_vsd():
+    """The macro class used to ride the whole 'gcode' component_group,
+    so 'update every macro' claimed [respond] and [virtual_sdcard].
+    Macro membership is now base-type: gcode_macro/delayed_gcode."""
+    from services.hardware_lookup import list_hardware
+    for alias in ('macro', 'macros'):
+        out = list_hardware({'printer.cfg': _HW_MIXED}, alias)
+        assert '[gcode_macro FOO]' in out and '[delayed_gcode boot]' in out
+        assert '## [respond]' not in out
+        assert '## [virtual_sdcard]' not in out
+
+
+def test_list_hardware_endstop_matches_multi_endstops():
+    from services.hardware_lookup import list_hardware
+    out = list_hardware({'printer.cfg': _HW_MIXED}, 'endstop')
+    assert '[multi_endstops stepper_z]' in out
+
+
+def test_list_hardware_mcu_class_excludes_temp_sensor():
+    """The 'mcu' name token matched [temperature_sensor mcu_temp] —
+    a board sweep must not claim a temperature sensor."""
+    from services.hardware_lookup import list_hardware
+    for alias in ('mcu', 'board'):
+        out = list_hardware({'printer.cfg': _HW_MIXED}, alias)
+        assert '## [mcu]' in out and '[mcu EBBCan]' in out
+        assert '## [temperature_sensor mcu_temp]' not in out
+    # the temp sensor stays reachable via its own class
+    temps = list_hardware({'printer.cfg': _HW_MIXED}, 'temperature_sensor')
+    assert '[temperature_sensor mcu_temp]' in temps
+
+
 def test_list_hardware_unknown_type_and_summary():
     from services.hardware_lookup import list_hardware
     files = {'printer.cfg': _HW_MAIN}

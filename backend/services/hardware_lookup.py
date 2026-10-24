@@ -31,9 +31,11 @@ from typing import Any
 
 from parser.config_schema import SECTION_DEFS, get_section_def
 
-# Model-facing class aliases -> (component groups, name/suffix tokens).
-# Groups come from SECTION_DEFS; tokens catch sections whose *name* or
-# *prefix-suffix* mentions the class regardless of registry group.
+# Model-facing class aliases -> (canonical label, groups, name/suffix
+# tokens). Groups come from SECTION_DEFS; tokens catch sections whose
+# *name* or *prefix-suffix* mentions the class regardless of registry
+# group. A group tuple of () means TOKENS ONLY (see _CLASS_BASES for
+# base-type-restricted classes like 'macro').
 CLASS_ALIASES: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
     # alias -> (canonical label, groups, tokens)
     "led": ("led", ("led",), ("led", "light", "rgb", "caselight",
@@ -49,9 +51,20 @@ CLASS_ALIASES: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
     "stepper": ("stepper", ("stepper",), ("stepper",)),
     "steppers": ("stepper", ("stepper",), ("stepper",)),
     "motor": ("stepper", ("stepper",), ("stepper", "motor")),
+    # Drivers answer to 'driver'/'drivers' as a class (live gap 2026-10-24:
+    # only the literal group name 'stepper_driver' worked, a shape models
+    # rarely guess). 'tmc' token catches named/driver sections by name.
+    "driver": ("stepper_driver", ("stepper_driver",), ("tmc", "driver")),
+    "drivers": ("stepper_driver", ("stepper_driver",), ("tmc", "driver")),
     "extruder": ("extruder", ("extruder",), ("extruder",)),
-    "heater": ("heater", ("heater",), ("heater", "heater_bed")),
-    "heaters": ("heater", ("heater",), ("heater",)),
+    "hotend": ("extruder", ("extruder",), ("hotend", "nozzle")),
+    "nozzle": ("extruder", ("extruder",), ("hotend", "nozzle")),
+    # 'heater' token REMOVED: whole-word 'heater' swept [heater_fan ...],
+    # which is a fan. The heater group already covers every heater type
+    # (heater, heater_generic, verify_heater); literal type covers pins.
+    "heater": ("heater", ("heater",), ()),
+    "heaters": ("heater", ("heater",), ()),
+    "bed": ("heater", ("heater",), ("bed",)),
     "probe": ("probe", ("probe",), ("probe", "bltouch", "klicky",
                                    "smart_effector")),
     "probes": ("probe", ("probe",), ("probe", "bltouch", "klicky",
@@ -60,10 +73,10 @@ CLASS_ALIASES: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
                       ("accel", "adxl", "lis2dw", "shaketune")),
     "accel": ("accelerometer", ("accelerometer",),
               ("accel", "adxl", "lis2dw", "shaketune")),
-    "board": ("mcu", ("mcu",), ("mcu",)),
-    "boards": ("mcu", ("mcu",), ("mcu",)),
-    "mcu": ("mcu", ("mcu",), ("mcu",)),
-    "mcus": ("mcu", ("mcu",), ("mcu",)),
+    "board": ("mcu", ("mcu",), ()),
+    "boards": ("mcu", ("mcu",), ()),
+    "mcu": ("mcu", ("mcu",), ()),
+    "mcus": ("mcu", ("mcu",), ()),
     "display": ("display", ("display",), ("display", "screen")),
     "servo": ("servo", ("servo",), ("servo",)),
     "servos": ("servo", ("servo",), ("servo",)),
@@ -71,10 +84,30 @@ CLASS_ALIASES: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
                         ("filament",)),
     "temperature_sensor": ("temperature", ("temperature",),
                            ("thermistor", "pt1000", "temperature_probe")),
-    "endstop": ("homing", ("homing",), ("endstop",)),
-    "macro": ("gcode", ("gcode",), ("gcode_macro", "macro")),
-    "macros": ("gcode", ("gcode",), ("gcode_macro", "macro")),
+    # 'endstops' token: Klipper's multi-endstop switch driver section is
+    # [multi_endstops ...] — whole-word 'endstop' never matched it.
+    "endstop": ("homing", ("homing",), ("endstop", "endstops")),
+    # Macros match by BASE type (_MACRO_BASES), never the whole 'gcode'
+    # group: the group also holds [respond] and [virtual_sdcard], which
+    # a "update every macro" sweep must not claim. Literal type still
+    # reaches them.
+    "macro": ("macro", (), ()),
+    "macros": ("macro", (), ()),
 }
+
+# Section bases that ARE macros — the 'macro' class matches these exactly
+# (name-token matching would hit [respond]'s suffixes etc.).
+_MACRO_BASES = {"gcode_macro", "delayed_gcode"}
+
+# Sections that drive a stepper motor but are NOT members of the
+# 'stepper' class (their component_group is 'extruder'). When the model
+# asks for the stepper class and the project has these, attach a
+# deterministic observation (intent law: observation only, never a
+# member) so it knows the extruder's step/rotation_distance params
+# exist without the class sweep claiming them — a "set every stepper's
+# rotation_distance" task must not silently acquire the filament path.
+_MOTION_NEIGHBOURS = frozenset(
+    {"extruder", "extruder1", "extruder2", "extruder3", "extruder4"})
 
 # Groups shown in summary mode (no type). 'config' (include/overrides)
 # and 'printer' are structure, not hardware.
@@ -169,6 +202,29 @@ def _unknown_reply(requested: str) -> str:
     )
 
 
+def _stepper_neighbour_note(all_entries: list[dict[str, Any]]) -> str:
+    """Observation footer for type='stepper' when the project has
+    extruder sections. Never adds members — names the near-miss so the
+    model doesn't have to guess whether the filament stepper was
+    deliberately excluded."""
+    neigh = [e for e in all_entries
+             if e["base"].lower() in _MOTION_NEIGHBOURS]
+    if not neigh:
+        return ""
+    listed = ", ".join(f"[{e['header']}]" for e in neigh)
+    return (
+        "\n# Note: " + listed + " also drive"
+        + ("s" if len(neigh) == 1 else "")
+        + " a stepper motor, but "
+        + ("it belongs" if len(neigh) == 1 else "they belong")
+        + " to the 'extruder' class and "
+        + ("is" if len(neigh) == 1 else "are")
+        + " NOT in the sweep above. "
+        "Include one only if the task genuinely applies to filament "
+        "motion (its rotation_distance is flow, not axis travel); "
+        "list_hardware(type='extruder') has its full text.\n")
+
+
 def list_hardware(files: dict[str, str], hw_type: str = "") -> str:
     """Render every hardware section of one class, or a full summary.
 
@@ -188,7 +244,13 @@ def list_hardware(files: dict[str, str], hw_type: str = "") -> str:
     alias = CLASS_ALIASES.get(hw_type)
     if alias is not None:
         label, groups, tokens = alias
-        hits = [e for e in all_entries if _matches(e, groups, tokens)]
+        if label == "macro":
+            # Base-type match (see _MACRO_BASES): token matching would
+            # hit any section whose suffix says 'macro'.
+            hits = [e for e in all_entries
+                    if e["base"].lower() in _MACRO_BASES]
+        else:
+            hits = [e for e in all_entries if _matches(e, groups, tokens)]
     else:
         # Literal section-type passthrough: 'bed_mesh', 'idle_timeout',
         # 'tmc2240', even unknown types matched by base name equality.
@@ -228,7 +290,9 @@ def list_hardware(files: dict[str, str], hw_type: str = "") -> str:
                 "unrendered member's text with read_user_config or "
                 "narrow with a literal section type.\n\n"
                 + rendered +
-                "\n# ALL MATCHES (sweep checklist):\n" + listing + "\n")
+                "\n# ALL MATCHES (sweep checklist):\n" + listing + "\n"
+                + (_stepper_neighbour_note(all_entries)
+                   if label == "stepper" else ""))
 
     header_line = (f"# list_hardware type={hw_type} — {len(hits)} "
                    f"match{'es' if len(hits) != 1 else ''} (working "
@@ -240,7 +304,9 @@ def list_hardware(files: dict[str, str], hw_type: str = "") -> str:
         "verbatim text as old_text in config_edit (patch_section / "
         "replace_section).\n"
     )
-    return header_line + "\n" + rendered + law
+    return (header_line + "\n" + rendered + law
+            + (_stepper_neighbour_note(all_entries)
+               if label == "stepper" else ""))
 
 
 def _summarize(entries: list[dict[str, Any]]) -> str:
