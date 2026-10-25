@@ -1,705 +1,501 @@
 # AI Chat
 
-The KWC AI assistant answers Klipper questions and edits configs, macros, and printer-memory profiles using the bundled Klipper documentation, example configs, and your loaded project files. Nothing the assistant does touches your config until you approve each change in the approval card, and nothing reaches disk until you save. The docs MCP points to your active config file path and the installed Klipper folder. This ensures the docs referenced match your installed version of Klipper and stay up to date.
+The KWC AI assistant answers Klipper questions and edits your configs,
+macros, and printer-memory profile from inside the configurator. It reads the
+bundled Klipper documentation (matched to your installed Klipper version),
+example configs, and your loaded project; it changes your files only through
+typed edit operations that the **server** applies and validates mechanically;
+and nothing reaches disk until you save.
 
-I'm still experimenting with this feature, learning new ways help the model create accurate and desired outputs. My goal is for this to be entirely reliable using only a small local model.
+What it can do:
+
+- **Answer Klipper questions** grounded in the bundled docs, the Config
+  Reference, your own configs, and live Klipper state.
+- **Edit configs safely** — parameter changes, section surgery, macro-body
+  patches, renames, comment/uncomment sweeps, file moves, include management
+  — as an honest change set you review after the reply with Keep/Undo.
+- **Handle large requests** — "comment out every macro", "rename this
+  everywhere", "add these six sections from my pin map" — via batched ops and
+  occurrence sweeps instead of prose dumps.
+- **Draft and validate macros** against Klipper's Jinja rules.
+- **Fill in your printer memory** profile when it's blank.
+- **Diagnose a failed firmware restart** after a save (see
+  [Interactions](#interactions)).
+
+Everything is model-agnostic by design: the harness validates, kicks back,
+and reports, so accuracy comes from the machinery around the model, not from
+hoping the model is careful.
+
+---
+
+## Table of Contents
+
+1. [Configuration](#configuration)
+2. [Models](#models)
+3. [Interactions](#interactions)
+   - [The top bar](#the-top-bar)
+   - [The text view and how edits are shown](#the-text-view-and-how-edits-are-shown)
+   - [Failed firmware restart analysis](#failed-firmware-restart-analysis)
+4. [Design](#design)
+   - [Request lifecycle](#request-lifecycle)
+   - [Tools](#tools)
+   - [Edit operations](#edit-operations)
+   - [Validation and kickbacks](#validation-and-kickbacks)
+   - [Budgets and loop control](#budgets-and-loop-control)
+   - [Honesty guards](#honesty-guards)
+5. [Appendix](#appendix)
+   - [Accuracy testing](#accuracy-testing)
+   - [Question bank](#question-bank-111-questions)
+   - [Current model results](#current-model-results)
+   - [Known failure families](#known-failure-families)
+   - [Running the harness](#running-the-harness)
+   - [Historical results](#historical-results)
+
+---
 
 ## Configuration
 
-Open the chat from the toolbar, then click the settings button to configure:
+Everything lives in the chat dialog: press **AI Chat** in the toolbar (or the
+chat fold button on the text view) and open **Settings** inside the dialog.
+The panel shows the same fields inline whenever no model is configured yet,
+so the first-run path is identical.
 
-- **Provider** — OpenAI, Google Gemini, Anthropic, GitHub Copilot, an OpenAI-compatible endpoint (LM Studio, Ollama, etc.), or the local default.
-- **API key** — required only for cloud providers; local servers usually don't need one.
-- **Model** — any model the provider exposes; the model list is fetched from your endpoint.
-- **Max tokens** — cap on the assistant's reply length (default 4096).
-- **Temperature** — sets the model temperature (default 0.7)
-- **Tool Format** — only for openAI compatible providers, allows a native tool calling or text protocol format (default Auto)
+| Setting | What it does |
+| --- | --- |
+| **Provider** | ChatGPT (OpenAI), Google (Gemini), Anthropic (Claude), GitHub Copilot, or **OpenAI Compatible** for local servers (llama.cpp, LM Studio, Ollama, llama-swap) and any OpenAI-style endpoint. |
+| **API URL** | OpenAI Compatible only — the full chat-completions URL, e.g. `http://localhost:11434/v1/chat/completions`. |
+| **API Key** | Required for cloud providers only; marked optional for local servers. Stored only in your browser. |
+| **Model** | The model list is fetched live from your endpoint with a refresh button; you can also type a model name directly. |
+| **Tool Format** | OpenAI Compatible only — `Auto` (default), `native` (OpenAI function calling), or `text` (the ```tool fence protocol, a fallback for servers that advertise tools but emit template garbage). |
+| **Max Tokens** | Cap on the assistant's reply length (default 4096; 8192 recommended for edit-heavy use). |
+| **Temperature** | Sampling temperature (default 0.7). |
 
-Provider settings, conversation history, and attached config files persist locally and are restored when you reopen a saved conversation.
+Settings, conversation history, and attached config references persist
+locally and are restored when you reopen a saved conversation
+(**New Chat** starts fresh; the history dialog lists saved conversations).
 
-## How a request works, from prompt to file edit
+The docs MCP points at your active config path and the installed Klipper
+folder, so the reference material always matches the firmware you actually
+run — the installed repo is used when present, a bundled copy otherwise, and
+KWC-authored docs load alongside either way.
 
-1. **You send a message.** The app builds the request context: your message, recent conversation history, attached config files, and the current printer memory file.
-2. **The backend prepares the prompt.** It adds the assistant's operating rules, the built-in tool list (Klipper docs search, example configs, validation, board detection, macro templates, and more).
-3. **The model answers with tools.** Every provider — local servers included — uses native function calling, with the text `tool` protocol kept as a fallback for servers that cannot do it. The backend runs the requested tools (for example, searching the bundled docs or validating a snippet) and feeds the results back to the model: up to ten read-only tool rounds, extended to fifty when edit tools are in play (2026-10-16 large-edit rework: a 62-section request batched via `ops[]` needs ~15–25 calls; the old cap of 20 *manufactured* early exits). Runaway protection is no longer the turn cap — it is the per-request **thrash budget** (below) plus an invisible absolute ceiling of 500 executed tool calls per request, which announces nothing and only ever logs a harness-bug line.
-4. **Config edits are staged, not written.** To change a file the model must call `config_edit` / `config_write`. The **server** applies each operation mechanically to a working copy of your project and validates the result, so the assistant cannot fabricate a change, silently rewrite a whole file, or mangle lines it did not touch. Invalid edits are kicked straight back to the model to fix before you ever see them.
-5. **You approve each change.** Every validated edit suspends the request and opens an **Approve / Decline** card showing the exact before/after lines the server computed. Approving puts the change into your **pending changes** as unsaved (dirty) work; declining leaves your config untouched. Nothing is written to disk until you use the toolbar "Save" menu — and your printer is never restarted behind your back. If no decision is made within 90 seconds the card **auto-declines** and the assistant reports honestly that you didn't respond; declining a card you still want to change is fine — just ask again.
-6. **Long tool chains show progress.** While the assistant is working through tools, a small subordinate strip under the typing dots shows what it said it was doing plus the tools it has run (deduped, collapsible). It is strictly display state — progress text is never the answer, and it disappears when the reply lands.
+---
 
-## Printer memory
+## Models
 
-The assistant sees your printer memory (mainboard, toolhead, expander boards, kinematics, probe, etc.) as context on every request. If it is blank, the assistant investigates your configs and the bundled examples to propose a filled-in profile. Proposals come back as a `printer-memory` code block and are shown in a review dialog — saved only when you confirm.
+Three recommendations, ranked by measured accuracy on the 111-question
+accuracy bank (harness described in the [Appendix](#accuracy-testing),
+native tool protocol, temperature 1.0 as the recent full-bank runs use it).
+Ranges span multiple full-bank runs; ±3 on a single run is this bank's noise
+level, so ranges are more honest than any single headline number.
 
-## How the assistant targets config edits
+| # | Model | Accuracy (111-Q bank) | VRAM pairing | Why it's recommended |
+| --- | --- | --- | --- | --- |
+| 1 | **Qwen3.8 27B** | **97–99%** (108–110) | 16–24 GB | The accuracy ceiling for local use. Best tool discipline, the only model that reliably honors "don't touch my files", and the strongest bulk-edit performer (5/5 on the BULK sweep family across repeat runs). Slower per turn; occasionally over-clarifies when a premise contradicts your real config — which is safe behavior, not a stall. |
+| 2 | **Gemma4 12B (QAT)** | **92–95%** (102–106) | 8–12 GB | Best accuracy per VRAM byte and the harness's reference model — most of KWC's AI behavior was developed against it. Excellent edit routing and macro/Jinja syntax; weaker than the 27B on ambiguous multi-file sweeps and on resisting drafts-when-told-not-to. |
+| 3 | **Qwen3.5 4B** | **87–95%** (97–105) | < 8 GB | Proof the harness works: a 4B model scoring high-80s to mid-90s on real Klipper edits is entirely a product of the tool machinery. Expect more mid-edit kickbacks to re-read files and occasional missed references on big sweeps; run it at 8192 max tokens. |
 
-> **Tool-mediated editing (the only edit path).** Config edits never go
-> through prose. The model calls `config_edit` / `config_write` tools and
-> the **server** applies each change mechanically to a working copy of
-> your project. Each op is validated against the live project the moment
-> it is requested, and every validated change stops at an **Approve /
-> Decline** card whose diff is computed from the text that will actually
-> be applied. Config code blocks in an answer are display-only — shown
-> to you, never applied. The loop nudges the model (with exact call
-> shapes) if it answers an edit request without staging it. The tools:
->
-> - `config_edit` — one anchored operation per call on an **existing**
->   file: `set_param`, `add_section`, `replace_section`, `delete_section`,
->   `patch_section` (replace exact lines inside any named section —
->   config params or macro gcode alike; quote `old_text` exactly as
->   `read_user_config` returned it; comment a line out = `# ` in front),
->   `comment_section` / `uncomment_section` (disable / restore a whole
->   section including its `[header]` line), `delete_file`, `add_include`,
->   `remove_include`,
->   `comment_include` (disables an include as `#[include x.cfg]` instead
->   of deleting it).
-> - `config_write` — creates **new files only** (wholesale rewrites of
->   existing files are refused; whole-file regeneration is where models
->   drop comments and mangle Jinja).
-> - Errors carry exact reasons and name the working alternative (the file
->   that actually holds the section, the actual include lines), so the
->   model corrects itself instead of guessing.
-> - Only a hard validation ERROR refuses the change; warnings ride the
->   card as advisories. Since the 2026-09-30 unknown-param escalation
->   (`unknown_param` in a section KWC grounds against the bundled Klipper
->   snapshot is an ERROR — Klipper refuses to load such a config), a
->   hallucinated parameter in a known section is now refused at the tool
->   call instead of slipping through as an ignorable advisory.
-> - File and section names resolve **case-insensitively to the project's
->   real spelling** — `Printer.cfg` → `printer.cfg`, `Gcode_Macro level_bed`
->   → `[gcode_macro Level_Bed]` — matching what the read tools have always
->   done. The resolution only ever lands on an identifier that already
->   exists, so a case variant can never be created: an `add_section` whose
->   name differs only by case is reported as the duplicate it is. Ambiguity
->   is never guessed — the error lists the candidates.
+**Honorable mentions** (solid, not currently quantified on the bank):
 
-## Large edits: batching, occurrence sweeps, budgets (2026-10-16 rework)
+- **Qwen3.6 35B-A3B** — MoE with a small active footprint; near-27B answers
+  with 4B-class speed on the older 106-question bank.
+- **Qwen3.8 Flash Next** — reasoning-family model; strong answers, but the
+  longest wall-clock per question of anything tested.
+- **Gemma4 E4B** — the efficient variant; the best model that fits tiny GPUs,
+  just behind the Qwen3.5 4B on families requiring precise tool choice.
 
-Requests like "comment out every macro" or "rename this everywhere" used to
-land in a prose dump of ```` ```cfg ```` drafts instead of staged edits. The
-rework fixed the machinery that manufactured that symptom:
+If your hardware fits two of the three, run the bank on both with your own
+configs — per-model behavior varies with fixture, temperature, and prompt
+build, and the bank exists precisely so you don't have to guess.
 
-- **`ops[]` batching.** One `config_edit` / `config_write` call carries up to
-  32 operations (`MAX_OPS_PER_CALL`) in an `ops` array, each shaped exactly
-  like the single-op form plus an `op` name. The server **prepares** every op
-  against the working copy in order, then replays so the committed result and
-  the per-op feedback come from the same engine. Feedback is **per index**:
-  ops that applied stay applied, and only the failed indices bounce back with
-  their exact reasons ("op 7 failed: ..."), so one bad op never voids a good
-  batch. If a small model stringifies the array (JSON as a quoted string),
-  `parse_maybe_stringified` recovers it instead of rejecting the call.
-  Batching is always optional — single-op calls keep working unchanged.
-- **Occurrence sweeps.** `search_user_configs` takes `keywords=['level_bed',
-  'old_probe_home']` — several names per call — and every hit answers with a
-  **REFERENCES checklist**: each occurrence with its section and line number,
-  per-name counts included, in-string occurrences (`RESPOND MSG='level_bed'`)
-  covered, not just section headers. The rename/"every reference" contract is
-  now mechanical for the model: edit from the list, re-search, stop when the
-  counts hit 0. The table serves the model's own discovery — the harness
-  never grades "done" off it.
-- **Thrash budget — charges waste, not work.** The old flat write cap
-  charged every write attempt, so a legitimate 62-section request was
-  arithmetically impossible in one prompt and "WRITE LIMIT REACHED" *taught
-  the model to give up*. The budget is now inverted: it charges only waste —
-  failed write attempts, reads past a 10-read grace, malformed-call
-  corrections, empty re-prompts — while **successful write ops are free**
-  (a state change is reviewable work, and the oscillation family the write
-  cap guarded is covered deterministically by duplicate/supersede detection).
-  Default 50 waste units per request (`KWC_THRASH_BUDGET` overrides; ≤0
-  disables). Spending it is a **soft landing**: the directive states facts
-  (what failed, what was over-read) and never claims further writes are
-  blocked. Steering a request mid-flight resets the budget — the model
-  didn't waste anything driving where you redirected it.
-- **Trace-truth stamping at the close.** The reply is stamped with a
-  failed-call note when the loop gave up on any call, so "all done"
-  cannot ride over errors; a fully-confabbed close (write attempts,
-  nothing staged) gets the trace-truth note the same way. The loop
-  itself closes when the model says it is done — the loop-exit
-  completion kickback and the fresh-context judge were measured away
-  and removed (see "Guard removal", 2026-10-23).
+---
 
-### Engine invariants (2026-10-17, from the BULK bank autopsies)
+## Interactions
 
-The BULK family's first live runs traced every corruption path a small
-model can drive through the draft engine. Each is now a hard rule inside
-the engine (not prompt advice), and each kickback names the fix so the
-model can self-correct on the next call:
+### The top bar
 
-- **One op, one section: no header lines in body text.** `replace_section`,
-  `patch_section`, and `add_section` refuse any `[header]` line inside the
-  text they write — the section's own header re-pasted *or* a foreign one.
-  Klipper splits files on header lines, so a smuggled header nests or
-  splices sections while per-op validation still passes; the staged file
-  then refuses to load. Multiple new sections go in as separate `ops[]`
-  entries.
-- **A bare section TYPE never resolves onto a coincident family name.**
-  The bare-name convenience (`Level_Bed` → `[gcode_macro Level_Bed]`) skips
-  requests that are themselves complete section types: with
-  `[tmc2209 stepper_x]` present, `section='stepper_x'` no longer lands on
-  the driver section (it reports *not found* + `add_section`, instead of
-  hijacking the driver or blocking the real stepper with a phantom
-  "already exists").
-- **Batch kickbacks carry the concrete findings.** A failed `ops[]` entry
-  bounces back with its actual `newErrors` (up to 3, same lean shape as
-  single-op feedback) — "failed validation" alone sent a model re-sending
-  invented params for 50 rounds.
-- **`add_section` accepts the header under `new_section` too** — the
-  key rename ops use — because small models mix the two; the value lands
-  verbatim and an explicit `section` still wins.
-- **`list_hardware` overflow never truncates the member list.** With 30+
-  matches, bodies are trimmed but EVERY `[header] in file` line is listed
-  — the class-sweep law ("cover every listed member") is only honest if
-  the enumeration is complete (a truncated page hid a macro from an
-  otherwise-complete sweep).
-- **changeSet rows carry the canonical header** resolved *before* the op
-  applied, so a macro commented via its bare name records as
-  `gcode_macro M109`, not `M109` — the review pane and trace-based
-  grading see the same truth.
-- **TMC driver refs are validated across every file in the session, not
-  just printer.cfg's include closure** (validator F25). A staged
-  `[tmc2209 x]` next to an unrelated `printer.cfg` used to validate clean
-  because the edited file sat outside the closure — Klipper would hard-
-  fail the boot (`Could not find config section '[x]' required by tmc
-  driver`) the moment the file is included. Editor-carried files are the
-  user's intended config, so binding checks and their reference
-  resolution span all of them; the delta gate cancels pre-existing
-  findings, so only a new write can trigger the kickback.
+The **AI Chat** button on the toolbar opens the assistant as a dialog, and it
+doubles as a status light while the chat is *not* in front of you:
 
-## Stopping, retrying, and resuming
+- **Green** — a reply landed, or an edit set is waiting for your review.
+- **Red** — the last request failed (retry is offered in the dialog).
+- **Neutral** — idle, or the chat is visible (the moment you open it, the
+  attention signal clears).
 
-- **Stop** — while the assistant is processing, the Send button becomes Stop. Pressing it cancels the request immediately.
-- **Retry** — if a request fails (timeout, no model loaded), your message stays in the conversation and a Retry button re-sends it with full context.
-- **New chat after an interruption** — you can keep the current conversation (messages, provider settings, and attached config files) or start fresh.
+The same signal appears on the text view's chat fold button, so the docked
+panel behaves identically. While a request is in flight, a small strip under
+the typing dots shows the assistant's own step narration plus a deduped
+checklist of the tools it has run — strictly display state; it disappears
+when the reply lands. Pressing **Stop** (the Send button while busy) cancels
+immediately, and if a request fails your message stays in the conversation
+with a **Retry** that re-sends it with full context.
 
-## Accuracy testing
+You can also **steer mid-flight**: typing while a request is running doesn't
+queue a new turn — it injects your words into the *current* loop at the next
+tool boundary, discards the reply the model had produced, and re-queries with
+your steer included. Change your mind halfway through a bulk edit and the
+model changes course.
 
-`scripts/ai_chat_accuracy_test.py` is an end-to-end harness that drives the **real backend `/ai/chat` endpoint** — the same one the frontend uses — against a battery of questions with known success criteria. It exists so we can measure how well a given model actually answers Klipper questions and uses the embedded tools, and to catch regressions when the prompt, tools, or doc index change.
+### The text view and how edits are shown
 
-How it works:
+The chat can dock as a third column beside the text editor (the fold button
+on the editor's edge). Both the toolbar dialog and the docked panel write the
+same change set, and both feed the same review surface. The governing rule:
+**blocking approval is only for irreversible actions** (disk writes,
+firmware restarts). Everything the assistant edits is a reversible in-memory
+staging, so you review it **after** the reply instead of being interrupted
+card-by-card:
 
-- Each question starts a **fresh chat dialog** (a single user message, its own requestId), so the model cannot lean on prior conversation context.
-- Every question checks two things: **answer accuracy** and **tool reliability** (does the model use the right embedded tool for the job?). For edit questions the graded artifact is the server-staged change set (`pendingEdits`), not the reply's prose — declared `edit_criteria` grade the change that will actually land.
-- Every step is logged: the request payload, raw response, tool names and tool-turn count, the per-question slice of the backend's own log, the pass/fail evaluation for each criterion, and a final summary.
+- **In the chat transcript**, each edit gets a compact row —
+  `file / [section]  +N −N` — that unfolds to that operation's own mini-diff.
+  Rows are a record, not a control surface; if a later edit supersedes one,
+  the old row stays visible and is marked superseded. Honest history.
+- **In the editor**, unreviewed AI changes render as **green runs** (lines
+  the assistant added, in place) and **red ghost runs** (lines it removed,
+  still displayed, never present in the saved text). A floating **Keep /
+  Undo** pair sits on each run, and runs split at section headers so one stop
+  equals one section. **Keep** folds the change into your working text
+  (nothing moves — it just stops being highlighted); **Undo** replays the
+  remaining kept edits from the pre-request baseline, so a dropped edit can
+  never leave a half-applied mess. If you hand-edit while a change is
+  unreviewed, your text wins and any edit that no longer applies is reported
+  as stale rather than forced.
+- **The change-set bar** docks at the bottom of the chat: "N unreviewed",
+  **Undo all** / **Keep all**, and an expandable per-file list with per-file
+  and per-run Keep/Undo. It is a to-do list, not a receipt — its `+N/−N`
+  counters show only the undecided remainder, decided rows stay attached to
+  their reply, and when nothing is left undecided the bar disappears.
+- **Nothing touches disk** until you use the toolbar **Save** menu, and your
+  printer is never restarted behind your back. The Save dialog warns while
+  changes are still unreviewed.
 
-### Question Bank (111 questions)
-| Item / Feature | Description & Details |
+### Failed firmware restart analysis
+
+If you save to Klipper and the FIRMWARE_RESTART fails, the apply dialog shows
+the failure and offers **AI Analyze**. One press builds a diagnosis prompt
+from the live evidence — the restart error, recent klippy.log lines, the
+section the error names, and your current config — and sends it to the chat,
+which replies with the minimal fix staged as a normal reviewable edit.
+
+---
+
+## Design
+
+### Request lifecycle
+
+1. **You send a message.** The app builds the request context: your message,
+   recent history, attached file/section references (via `@`-mention or the
+   text view), your loaded project, and the printer memory profile.
+2. **The backend prepares the prompt.** Operating rules plus the built-in
+   tool list go in; all providers — local servers included — get native
+   function calling by default. The text-fence protocol is kept as a
+   fallback extractor: a model that ignores the tools array still works.
+3. **The model works with tools.** The backend executes each requested tool
+   and feeds results back in a multi-round loop. The loop closes when the
+   **model says it is done** — loop-exit "completion guards" (an echo
+   kickback and a fresh-context judge) were measured across three-arm
+   full-bank cycles and deleted: they reshuffled failures instead of
+   removing them (see [Appendix](#current-model-results)). Runaway control
+   is the thrash budget below, not an opinion about when the model is done.
+4. **Edits are applied mechanically.** The model *requests* changes via
+   `config_edit` / `config_write`; the server applies each op to a working
+   copy and validates it the same instant. The assistant cannot fabricate a
+   change, silently rewrite a whole file, or mangle lines it didn't touch —
+   and config blocks pasted in an answer are display-only, never applied.
+5. **You review after the fact.** Keep/Undo as described above; Save remains
+   the only path to disk.
+
+### Tools
+
+The model sees three layers: MCP tools, one chat-layer tool, and the
+conditional edit tools. Names below are the real tool identifiers —
+the set grows over releases, so re-derive from
+`McpServer._list_tools()` + `ai_routes._build_native_tools()` rather than
+trusting any count.
+
+**Documentation & reference lookup** — the assistant grounds answers, never
+guesses parameters:
+
+| Tool | Purpose |
+| --- | --- |
+| `search_klipper_docs` / `read_klipper_doc` / `list_klipper_docs` | Full-text search and reads over the bundled (or installed) Klipper documentation, KWC-authored docs included. |
+| `list_config_reference_sections` / `get_config_reference_section` | The Config_Reference section index and any single section's full parameter list. |
+| `get_section_schema` | Machine-readable parameter spec per section type — what's required, what's legal, with types. |
+| `search_example_configs` / `read_example_config` | Bundled example configs by board, printer, or feature. |
+
+**Your project (read)**:
+
+| Tool | Purpose |
+| --- | --- |
+| `search_user_configs` | Search your loaded configs; accepts several `keywords` per call and answers with a **REFERENCES checklist** — every occurrence with file, section, and line, per-name counts, in-string occurrences (`RESPOND MSG='level_bed'`) included. The rename/"everywhere" contract is mechanical: edit from the list, re-search, stop at 0. |
+| `list_user_configs` / `list_user_config_sections` / `read_user_config` | Inventory and reads; reads are what edit anchors must quote verbatim. |
+| `list_hardware` | Class sweeps over your project — "all macros", "all drivers", "all heaters" — with member-complete listings (never truncated to a page). |
+
+**Validation & compute**:
+
+| Tool | Purpose |
+| --- | --- |
+| `validate_klipper_config` | Validate a draft snippet you haven't staged. |
+| `validate_config_project` | Validate your whole loaded project (the save-gate engine). |
+| `validate_macro` | Check a `gcode_macro` against Klipper's Jinja rules — unbalanced blocks, unknown commands, missing homing. |
+| `generate_macro_template` | Structured templates (PAUSE/PRINT_START/etc.) with include-flags. |
+| `detect_board` | Identify the likely board from a config snippet or pin layout. |
+| `calculate_rotation_distance` | Steps/mm math for belts and leadscrews. |
+| `list_connected_devices` / `get_klippy_status` | Real serial/CAN devices; live Klipper state (ready / startup error / shutdown) — used before edits that depend on whether the printer is even up. |
+
+**The edit layer is skill-gated**: write tools are advertised only after the
+model calls `load_skill(name='config-editing')`, which injects the edit
+protocol, op shapes, and laws for that session. The gate is model-triggered
+by design — no UI toggle, no intent classifier — and a matching
+`printer-memory` skill guards profile writes.
+
+### Edit operations
+
+`config_write` creates **new files only** (whole-file rewrites of existing
+files are refused — wholesale regeneration is exactly where models drop
+comments and mangle Jinja). `config_edit` performs one anchored operation
+per call, thirteen ops:
+
+| Op | Effect |
+| --- | --- |
+| `set_param` | Set/add a parameter in a section. |
+| `add_section` / `replace_section` / `delete_section` | Section lifecycle; replace takes the full new body. |
+| `move_section` | Move one section body **byte-exact** into another file (created if absent) and remove it from the source in the same op. |
+| `rename_section` | Rename a section header (keeps the family; `gcode_macro Foo` → `gcode_macro Bar`). |
+| `patch_section` | Replace exact lines inside any named section — config params *or* macro gcode. `old_text` is quoted verbatim from `read_user_config`; comment a line = prefix `'# '`, uncomment = the reverse. |
+| `comment_section` / `uncomment_section` | Disable/restore a whole section including its `[header]` line. |
+| `add_include` / `remove_include` / `comment_include` | Include-line management; comment keeps the line as `#[include x.cfg]` for re-enable. Works on any include line, including top-of-file ones with trailing comments. |
+| `delete_file` | Delete a project file — refused while another file still includes it. |
+
+Engine invariants that keep small models from corrupting configs (each one
+is enforced in the op engine, not asked in the prompt, and each refusal
+names the fix):
+
+- **Text surgery, never re-render.** Ops edit the text; untouched lines stay
+  byte-stable. A writer round-trip would churn your formatting.
+- **One op, one section.** No `[header]` line may hide inside body text —
+  the section's own header or a foreign one. Multiple new sections go in as
+  separate ops.
+- **Names resolve to reality.** Files and sections resolve
+  case-insensitively to the project's real spelling, and only ever onto an
+  identifier that already exists — a case-variant `add_section` is reported
+  as the duplicate it is. Bare names (`Level_Bed` →
+  `[gcode_macro Level_Bed]`) never hijack a coincident section type.
+  Ambiguity is never guessed: the error lists the candidates.
+- **The SAVE_CONFIG banner is a hard boundary** — the saved-settings block
+  at the end of printer.cfg can't be targeted or spliced by any op.
+- **Batching is optional**: one call may carry `ops[]` with up to 32
+  operations. Every op is prepared against the working copy in order; good
+  ops stay applied and **only failed indices bounce back** with their exact
+  reasons, so one bad op never voids a good batch. A stringified array is
+  parsed and recovered, not rejected.
+
+### Validation and kickbacks
+
+Every write validates as a **delta against the baseline**: pre-existing
+problems in your config never block an edit, only *new* findings count.
+
+- A **new error** refuses the write and kicks it back to the model, unstaged,
+  with the concrete findings — the model corrects and continues; you never
+  see the broken attempt. Since the unknown-param escalation, a hallucinated
+  parameter in a section KWC grounds against the bundled Klipper snapshot is
+  an error at the tool call, not an ignorable advisory.
+- **Warnings ride along as advisories** on the change record — they never
+  block a Keep. One exception, by design: a hallucinated gcode command
+  (`unknown_gcode_command`) kicks back once, unstaged — invalid commands are
+  never routed to a human to notice.
+- **Kickback doctrine**: every error either moves the model one step closer
+  or names the working alternative. Wrong file? "It exists in Y — pass
+  file=Y." Missing include? The error enumerates the file's actual include
+  lines so the model can re-quote. An error that only negates invites
+  confabulation; these don't.
+- Deterministic anti-oscillation: a second write to the same target in one
+  request gets a DUPLICATE TARGET kickback; identical *failed* calls escalate
+  to a directive and then a block. A mid-flight **steer** resets these (your
+  redirect isn't the model flip-flopping).
+- Repair feedback after a validation failure follows the measured shape:
+  never quote the broken reply (models copy it byte-identically), lean
+  context only (affected section + exact error + one imperative), and
+  retry-exempt findings the model can't fix by regenerating end honestly
+  instead of burning attempts.
+
+### Budgets and loop control
+
+The old flat write cap punished *work* — a legitimate 62-section request was
+arithmetically impossible and "WRITE LIMIT REACHED" *taught models to give
+up*. The current design charges waste only:
+
+- **Thrash budget** (default 50 units, `KWC_THRASH_BUDGET`): failed write
+  attempts, reads past a grace allowance, malformed-call corrections, and
+  empty re-prompts spend it; **successful write ops are free** (they're
+  reviewable work). Spending it triggers a **soft landing** — the directive
+  states facts (what failed, what was over-read) and never claims further
+  writes are blocked. Steering resets it.
+- Turn caps of 10 (read-only) / 50 (edit-capable) plus an invisible absolute
+  ceiling of 500 executed tool calls per request that announces nothing and
+  only ever logs a harness-bug line.
+- A malformed tool call is never executed and never quoted back: mechanical
+  recovery is attempted first (fenced calls, smart quotes, python-call
+  shapes), then one format-correction re-prompt, then the empty-reply
+  backstop. Truncated calls fail closed, not open into wrong arguments.
+
+### Honesty guards
+
+The failure mode that matters most in an editing assistant is not a wrong
+edit (the diff catches that) — it's a **claim the trace doesn't support**.
+The harness never parses prose to judge intent, but it stamps the reply with
+what actually happened:
+
+- **Trace-truth notes** — if the loop gave up on any call, or claimed work
+  with nothing staged, the reply is stamped with the failed-call facts, so
+  "all done" can't ride over errors.
+- **Realized-change reporting** — successful edit results report the change
+  that *landed* (mini-diff for small ops, `+A/−R` counts with removed lines
+  verbatim for big ones), so the model reviewing its own work sees reality,
+  not its intention. This measurably closed staged-content gaps on the bulk
+  families.
+- **Declines are human acts** — a declined or timed-out decision reads as
+  "the user chose not to apply", never as a system error, and the model is
+  directed to end with a direct question instead of ruminating.
+
+---
+
+## Appendix
+
+### Accuracy testing
+
+`scripts/ai_chat_accuracy_test.py` is an end-to-end harness that drives the
+**real backend `/ai/chat` endpoint** — the same one the frontend uses —
+against a battery of questions with known success criteria. It exists so
+model choice, prompt changes, and tool changes are measured, not argued.
+
+Design laws earned the hard way:
+
+- Each question is a **fresh chat** (single user message, own requestId) —
+  no leaning on prior context.
+- Every question grades two things: **answer accuracy** and **tool
+  reliability** (right tool for the job). For edit questions the graded
+  artifact is the **server-staged change set**, never the reply's prose —
+  a model that *describes* the correct edit and stages nothing must fail,
+  and a model that stages it correctly must pass whatever its summary says.
+  (`PASS_NO_TOOL` marks a correct answer that skipped the expected tool.)
+- Criteria kinds include staged header/param (Klipper's own case rules:
+  alias names case-insensitive, section type tokens exact), staged regex,
+  `any_of` arms, bulk `coverage` (distinct non-superseded sections),
+  `no_fence` (rejects terminal ```cfg drafts), `single_request`, and a
+  `failed_named_in_reply` honesty floor.
+- **±3 on a full run is noise** on this bank; model-behaviour claims require
+  consistent directional movement across ~3 reruns. Every mechanism ever
+  shipped or deleted (completion guards, judge payloads, budgets) went
+  through same-tip A/B arms on the full bank.
+- Bank edits are rare and surgical: a criteria fix must show its intended
+  verdict flips and zero collateral damage offline
+  (`scripts/validate_criteria_offline.py`) before the bank changes, and only
+  the touched qids need re-running.
+
+### Question bank (111 questions)
+
+| Family | Coverage |
 | :--- | :--- |
-| Core Tools (Q01–Q20, minus retired Q09) | Covers docs lookups, example configs, validation, calculations, and tool-mediated edit routing. |
-| Macro Authoring (MACRO-01..11) | Includes macro authoring, editing, fixing, template options, and individual `validate_macro` checks. |
-| Trident Configs (TRIDENT-01..16) | Real Trident configs from `reference/Trident_backup` and backend user configs (read, edit, delete, manage), incl. cross-file edits and the `idle_timeout` multi-LED case. Files are read-only context. |
-| Harness (HARNESS-01..03) | Harness self-checks: criteria that must reject a wrong staged artifact. |
-| Edit Cases (MINIDIFF-01..04) | Staged-edit cases carried forward under their original qids: `level_bed` adaptive mode, `[printer] max_accel`, pin edits, tool-required `pressure_advance`. |
-| Ambiguity Cases (AMBI-01..08) | Handles new-file drafts without names, hypothetical "what if" questions, batch section reads, multi-topic explain-and-edit turns, and content search for bare pin values. |
-| Setup Cases (SETUP-01..05) | New-section requests with no existing home (firmware_retraction, idle_timeout, G2/G3 arcs, save_variables, respond). |
-| Live Routing (LIVE-01..07) | Routes between project validator vs draft validation vs devices vs schema vs reference vs Klippy status (incl. restart-safety ordering). |
-| Edit Tools (EDIT-01..06) | Tool-mediated editing (the only edit path): param edit via `config_edit`, gcode-body anchor edit, cross-file pin edit, new-file + `add_include` staging, pure Q&A must stage nothing, and commented-param uncomment keeping the `!` polarity. |
-| Skill Gate (SKILL-01..05, SKILL-N01..04) | The `config-editing` skill must load before any write path (direct param, macro body, multi-part, new file + include, implicit "my prints wobble"), and must NOT load on pure Q&A, how-to, pasted-text validation, or discuss-a-draft. |
-| Tool Coverage (TOOL-01..08) | One case per shipped tool: reference index, section index, board detection, rotation-distance calc, macro template, strict new-file routing, live devices, live Klippy state. |
-| Rename Cases (RENAME-01..03) | Macro-section renames: the staged header must keep the `gcode_macro` family, and stale callers must be repaired. |
-| Comment Cases (COMMENT-01..06) | Comment/uncomment ops: whole-section disable including the header via `comment_section`, block restore via `uncomment_section`, single-line comment/uncomment via `patch_section`, and the rename+uncomment combo. |
-| Ack Guard (ACK-01/02, ACK-N01) | Mid-loop ack-guard probes (Phase 6.5.5): the same single-value edit pinned to native AND text protocol with `expect_no_ack_stall` (a promise-with-no-action rescued by the injected directive FAILS even when the staged artifact is right), plus a pure-Q&A case the guard must never touch. Run as `--questions ACK,ACK-N`. |
-| Bulk Edits (BULK-01..05) | Large-edit rework (2026-10-17): comment-every-section and comment-every-macro sweeps on engine-verified synthetic fixtures (thresholds derived from the fixture inventory, never hand-counted), a Level_Bed-shaped rename sweep with in-string `RESPOND MSG=` arms, a constructive pin-map add of six sections in one request, and an honesty trap (a named-but-missing section the reply must own up to). Graded trace-only: `coverage` counts distinct non-superseded sections in the server `changeSet`, `no_fence` rejects terminal-reply ```` ```cfg ```` drafts, `single_request` bounds loop economy, `failed_named_in_reply` is the honesty floor. Run as `--questions BULK`. No baselines yet — first numbers land with the ablation arms below. |
-| Optional Memory Check (MEMORY-01..03) | Adds printer-memory auto-fill checks when the `--include-memory` flag is used. |
+| Core Tools (Q01–Q20, minus retired Q09) | Docs lookups, example configs, validation, calculations, edit routing. |
+| Macro Authoring (MACRO-01..11) | Authoring, editing, fixing, templates, `validate_macro` checks. |
+| Trident Configs (TRIDENT-01..16) | Real Trident configs (read/edit/delete/manage, cross-file edits, the `idle_timeout` multi-LED case). Read-only context. |
+| Harness (HARNESS-01..03) | Self-checks: criteria that must reject a wrong staged artifact. |
+| Edit Cases (MINIDIFF-01..04) | Staged-edit cases: `level_bed` adaptive mode, `max_accel`, pin edits, `pressure_advance`. |
+| Ambiguity (AMBI-01..08) | Unnamed new files, hypotheticals, batch reads, explain-and-edit turns, bare-pin search. |
+| Setup (SETUP-01..05) | New sections with no existing home (firmware_retraction, idle_timeout, arcs, save_variables, respond). |
+| Live Routing (LIVE-01..07) | Routes between project validator / draft validation / devices / schema / reference / Klippy status. |
+| Edit Tools (EDIT-01..06) | `config_edit` param edit, anchored gcode edit, cross-file pin edit, new file + `add_include`, pure Q&A stages nothing, `!` polarity kept on uncomment. |
+| Skill Gate (SKILL-01..05, N01..04) | `config-editing` must load before any write path — and must NOT load on Q&A, how-to, pasted-text validation, or discuss-a-draft. |
+| Tool Coverage (TOOL-01..08) | One case per shipped tool. |
+| Rename (RENAME-01..03) | Header keeps the `gcode_macro` family; stale callers repaired. |
+| Comment (COMMENT-01..06) | Whole-section comment/uncomment, single-line via `patch_section`, rename+uncomment combo. |
+| Ack Guard (ACK-01/02, ACK-N01) | Promise-with-no-action rescued; pure Q&A never nudged. Native and text protocol pinned. |
+| Bulk Edits (BULK-01..05) | Comment-every-section / comment-every-macro sweeps, rename sweep with in-string arms, six-section constructive add, honesty trap. Graded trace-only. |
+| Memory (MEMORY-01..03) | Printer-memory auto-fill (opt-in `--include-memory`). |
 
-### Baselines (pre-fix)
+### Current model results
 
-Full 106-question bank on `improvement/ai-chat-edit-refactor` @ `9c6bdf4`, native
-tool protocol, `--max-tokens 8192 --temperature 0.7`, edit tools on, one model per
-run (runs under `reports/ai-chat-accuracy/bank106-r1-*`). These numbers still
-carry the four round-1 harness false negatives and the four round-2 ones:
+All rows are the **current** bank (111 questions) at temperature 1.0, native
+protocol, edit tools on, against the same backend. Ranges span the full-bank
+runs closest to the shipped build; single-run deltas inside the range are
+noise, not ranking.
 
-| Model | Host | PASS | Rate | Errored |
-| --- | --- | --- | --- | --- |
-| gemma-4-12b | CachyPC | 97/106 | 92% | 0 |
-| qwen3.6-35B-A3B | Thor | 97/106 | 92% | 0 |
-| gemma-4-26B-A4B | Thor | 97/106 | 92% | 1 |
-| gemma-4-e4b | CachyPC | 91/106 | 86% | 0 |
-| qwen3.5-4b | CachyPC | 90/106 | 85% | 0 |
-| qwen3.8-27B | Thor | 89/106 | 84% | 12 |
-| qwen3.5-9b | CachyPC | 86/106 | 81% | 0 |
-
-Errored = per-request failure (provider 5xx or the 600 s timeout), not a model
-miss. Errored qids were re-run where possible; `qwen3.8-27B` kept 12 timeouts
-(its 600 s loops), so its row is understated — 3 of its misses are `COMMENT` and
-1 is `RENAME`, families where the shortfall is infra, not quality. `gemma-4-26B-A4B`
-has one genuine repeat-timeout (`AMBI-02`).
-
-### Updated (post-fix)
-
-Eight harness false negatives were corrected across two rounds (2026-09-28 →
-09-29, see below), plus one premise-conflict question reworded (`SETUP-02`). The
-bank edits touched **nine qids and nothing else**, so re-running those nine on a
-model settles its whole score: every other qid's verdict is unaffected by
-construction. Runs: `bank106-r2-spotfix-*`.
-
-| Model | Host | Baseline | Updated | Evidence |
-| --- | --- | --- | --- | --- |
-| gemma-4-12b | CachyPC | 97/106 | **102/106** | **full bank re-run** — measured |
-| gemma-4-26B-A4B | Thor | 97/106 | **102/106** | 9-qid spot (+5) |
-| qwen3.6-35B-A3B | Thor | 97/106 | **100/106** | 9-qid spot (+3) |
-| qwen3.5-4b | CachyPC | 90/106 | **95/106** | 9-qid spot (+5; `Q19` recovered from a provider 500) |
-| gemma-4-e4b | CachyPC | 91/106 | **93/106** | 9-qid spot (+3, −1: `SETUP-02`) |
-| qwen3.8-27B | Thor | 89/106 | **93/106** | 9-qid spot (+4; 3 were infra ERRORs, 9 timeouts still unmeasured) |
-| qwen3.5-9b | CachyPC | 86/106 | **88/106** | 9-qid spot (+3, −1: `MACRO-01`) |
-
-`gemma-4-12b` was re-run on the **full** bank to check the method: 102/106, 0
-errored, exactly the spot projection. Its seven flips up are `MACRO-01`,
-`TRIDENT-10`, `AMBI-07`, `SETUP-05`, `COMMENT-03` (the fixes) plus `COMMENT-02`
-and `SKILL-N01` (variance — neither was edited either round); the two down
-(`MACRO-03`, `AMBI-02`) are variance on untouched qids. Its four remaining
-non-passes are `MACRO-03` (fixed the macro correctly but staged it into a NEW
-`fix_me.cfg` + include — the criterion's `any_of` covers staging into
-printer.cfg or a display block, not a third file), `AMBI-02` (the registry
-kickback refused the new file and the model went on to stage 12 section
-**deletions** in printer.cfg — partial, and destructive in effect if approved),
-`SKILL-N04` (the open nudge question) and `ACK-N01` (conditional pass, no tool
-needed).
-
-Per-defect flips across all seven models: `COMMENT-03` +5, `SETUP-05` +5,
-`TRIDENT-10` +4, `MACRO-01` +3, `Q19` +3, `Q04` +2, `TOOL-05` +2, `AMBI-07` +1,
-`SETUP-02` +1 (against one regression each on `SETUP-02` and `MACRO-01`).
-`±1` on a single run is noise on this bank — only consistent, directional
-movement is evidence.
-
-### R1: realized-change reporting (2026-10-18, 111-qid bank, gemma-4-12b)
-
-Success results now report the REALIZED change, not the intended one
-(`feat(ai-edit) 1774bac`): ≤12 changed lines show a mini-diff under the
-summary; larger ops collapse to `+A/−R` counts with removed lines verbatim;
-deletes name lines without re-shipping the block; clean batch ops stay lean
-(failed-then-retried ops show their diff). Both arms run with the
-loop-exit kickback DISARMED (`--completion-check off`, the new harness
-default for bank runs).
-
-Arms: baseline = `3ead333` worktree (pre-R1), R1 = tip `1774bac`;
-`reports/ai-chat-accuracy/{r1base-bank111, r1-bank111}/`.
-
-| Arm | PASS | fixed | regressed | avg turns | avg tok |
-| --- | --- | --- | --- | --- | --- |
-| baseline `3ead333` | 103/111 | — | — | 3.15 | 1004 |
-| R1 tip | 105/111 | `BULK-02` `Q14` `Q16` `TRIDENT-15` | `AMBI-02` `MACRO-03` | 3.18 | 1066 |
-
-Net +2 on the 110-qid overlap. The two regressions are the SAME two qids
-this doc already flags as gemma's run-to-run variance (`MACRO-03` stages
-into a third file; `AMBI-02` registry-kickback refusal shape) — single-run
-±1 noise by the rule above, not R1-attributable. The four fixes are all
-staged-content misses (a swept LED line, two staged-section gaps, BULK-02
-coverage) consistent with the recognition-gap thesis: seeing the realized
-diff let the model close gaps the intent summary hid. Context cost +6%
-avg completion tokens, turns flat. Single-run evidence; BULK-04 still
-fails in both arms (known pin-map construction issue, tracked separately).
-
-### Guard A/B: echo kickback vs fresh-context judge (2026-10-19, gemma-4-12b)
-
-Both arms on the SAME tip (`58c416f`), guard ARMED both arms, only the
-mechanism differs: echo = the shipped kickback (worker re-answers its
-own close against the ledger); judge = independent fresh-context audit
-(request + ledger, no worker transcript, quote-validated `continue`,
-verdict cap 2, fingerprint-unchanged skip). Harness-only selector
-`completionGuard`; product default remains kickback.
-`reports/ai-chat-accuracy/{guard-echo-ab, guard-judge-ab}/`.
-
-| Arm | PASS | fixed | regressed | avg turns | avg tok | wall |
-| --- | --- | --- | --- | --- | --- | --- |
-| echo | 103/111 | — | — | 3.38 | 1297 | 1469 s |
-| judge | 105/111 | `BULK-01` `BULK-05` `MACRO-07` | `COMMENT-04` | 3.15 | 1225 | 1540 s |
-
-Mechanics: the judge graded 34 closes (16 `done`, 18 `continue`); the
-echo kicked 30. Every continue ended at grade #1 (the cap / fingerprint
-skip fired — no ping-pong seen). `BULK-01` passed after a continue +
-fingerprint-flag close. Turns flat-to-down (3.38→3.15): the judge
-replaces the transcript-heavy worker reclose with a ~1 KB fresh call,
-so measured tokens are down ~6% while wall time is up ~5% (one extra
-round on 18 continues). The lone regression (`COMMENT-04`,
-rename_existing uncomment) is the bank's known ±1 single-run shape.
-
-Caveats before crediting: single run each, same-day host; judge verdicts
-that fired on eventually-PASS questions prove co-occurrence, not
-causation, per-fire. The direction is right (bulk families 2/5→4/5,
-zero ping-pong, cost neutral) — this is the evidence to flip the product
-default per plan 2.4's gate, but only after the next bank round or a
-repeat confirms it. Judge model = worker model here (gemma grading
-gemma); `KWC_JUDGE_MODEL` targeting a stronger auditor is untested.
-
-### Judge payload A/B: labels vs dump (2026-10-19, gemma-4-12b)
-
-`completionJudgePayload: dump` adds the deterministic facts the labels
-arm lacked: PROJECT INVENTORY (live section headers per file) + CURRENT
-TEXT OF EDITED FILES (post-edit state, caps). Same trigger, same rules.
-`reports/ai-chat-accuracy/{guard-judge-ab, judge-dump-ab}/`.
-
-| Arm | PASS | fixed | regressed | judge fires | continue | flagged |
-| --- | --- | --- | --- | --- | --- | --- |
-| labels (`guard-judge-ab`) | 105/111 | — | — | 34 | 18 | 17 |
-| dump (`judge-dump-ab`) | **106/111** | `COMMENT-04` `MACRO-02` | `TRIDENT-03` | 33 | **9** | 8 |
-
-Net +1 against labels; mechanism matters more than the count. **More
-evidence made the judge more confident, not more trigger-happy**: `done`
-16→24 while `continue` fell 18→9. The labels arm's over-strict class
-(invisible reads graded as skipped work, e.g. Q16's "no docs search
-staged") largely disappears when the auditor sees current file text.
-The 9 remaining continues are now *factual* gaps (staged 0 edits vs a
-delete ask — TRIDENT-03's quote names the instructed shape the ledger
-contradicts).
-
-`TRIDENT-03` (the regression) is instructive: dump judge said
-`continue` (deletion asked, ledger shows 0 edits); the worker's reclose
-still didn't stage the delete → delivered flagged → FAIL on
-`staged_section_absent`. The labels arm got PASS by never judging.
-That's honest under-delivery, flagged — the guard did its job; the
-worker's reclose didn't.
-
-Cost: dump judge payloads avg 8.4 KB (5.4–11 KB observed) vs ~1.2 KB
-labels, on ~1/3 of questions — invisible against worker context.
-`COMMENT-04` fixing itself is the thesis in one qid: `rename_existing`
-is content, and content is exactly what the dump made gradeable.
-
-Single runs; the net-1 stays noise-adjacent — but the verdict-mix shift
-(done↑ continue↓ flagged 17→8, no ping-pong) is mechanism evidence in
-the same direction as the guard A/B. Dump mode is the sharper, calmer
-auditor. Next lever unchanged: `KWC_JUDGE_MODEL` on a stronger auditor.
-
-### Judge outbound contract: assertive actions list (2026-10-19)
-
-The continue nudge is now an instruction, not a quotation. Judge schema:
-`actions: [{text, file, quote, evidence}]` — `text` is ONE imperative
-(<20 words, names file/section/key), `quote` (verbatim from the USER
-request) stays the anti-loop-extension law, `evidence` (verbatim from
-the dump) is new and log-only. `parse_verdict` normalizes both shapes
-(legacy `remaining` still accepted); a `text`-less action falls back to
-its quote. `continue_directive_text` renders the worker-facing block
-with NO judge voice and NO justification:
-
-```
-Verdict: needs work
-
-Complete these actions now. Do not continue, re-answer, or declare
-done without addressing each one:
-
-Actions:
-- add a purpose comment as the first line inside [pause_resume] [bulk.cfg]
-```
-
-Action-text dedupe (`_judge_injected`): a repeat verdict re-listing an
-already-injected action cannot re-extend the loop with an identical
-instruction. Live gemma emits explicit JSON nulls for unused fields —
-parse uses `or ""` everywhere (a `needs_user` + `question: null` would
-previously have delivered the literal string "None" to the user).
-
-Smoke (`reports/ai-chat-accuracy/judge-actions-smoke/`, gemma worker +
-gemma judge, dump mode): BULK-03 5/5 PASS — 3 graded `done` in ~7s on
-the correct sweep close, 2 slipped via continue-intent tails. Live
-`continue`s captured on Q16/MACRO-11/BULK-05: judge actions are
-imperative and file-named ("add a purpose comment as the first line
-inside [pause_resume] in bulk.cfg", evidence `[pause_resume]` copied
-from the dump) — the contract works end-to-end. Both continues ended
-fingerprint-unchanged (worker re-answered verbatim, delivered+flagged):
-the nudge is assertive but a worker that ignores it still lands on the
-flag path, unchanged law.
-
-**Gap found (open, not fixed):** a close ending on a continue-intent
-tail ("I will now check Knomi.cfg…") is exempted from the completion
-check by `_ends_with_continue_intent` (the ack guard's case), but the
-ack guard requires NO write tool fired — so a partial sweep that wrote
-printer.cfg and promises the other files next falls through every
-guard, judge included. 2 of 5 BULK-03 closes took exactly that exit
-(they still passed the criteria; the promise was a lie the harness
-never checked). Candidate: let the judge arm grade continue-intent
-closes too — the fresh-context auditor doesn't need the echo's
-exemption. Awaiting Sir's call.
-
-### Full bank, actions-contract judge (2026-10-19, gemma-4-12b)
-
-First full-bank run of the assertive actions contract (`b18f254`),
-`reports/ai-chat-accuracy/judge-actions-full/`. Arm identical to
-`judge-dump-ab` except the verdict/directive shape.
-
-| Arm | PASS | fixed | regressed | fires | done/continue | flagged |
-| --- | --- | --- | --- | --- | --- | --- |
-| dump (`judge-dump-ab`) | 106/111 | — | — | 33 | 24/9 | 8 |
-| actions (`judge-actions-full`) | 103/111 | `BULK-02` `COMMENT-06` `SKILL-N04` `TRIDENT-03` | 7 (below) | 34 | 22/12 | 10 |
-
-−3 sits AT the ±3 single-run noise bound for this bank/model, and the
-regressions do NOT attribute to the judge: **5 of 7 fired no judge at
-all** (`SKILL-N01` `TRIDENT-15` `TRIDENT-16` `AMBI-07` `BULK-04`) —
-pure worker variance closing through the known exemptions (TRIDENT-15
-= documented model variance; TRIDENT-16/15 closes landed on ```cfg
-fences = inert-draft-territory exemption; AMBI-07/BULK-04 closes ended
-on clarify tails). `MACRO-02` = the documented decision-stall family
-(offer-two-options-and-ask close). Only `AMBI-02` is judge-adjacent:
-judge said continue (correctly — move asked, macros still in place),
-the worker re-answered verbatim, fingerprint short-circuit delivered
-flagged — honest under-delivery, same shape as the dump arm's
-TRIDENT-03, which THIS run fixed. No ping-pong (every continue closed
-at cap/fingerprint), cost +7% tok, one ERROR row = `ACK-N01`
-PASS_NO_TOOL bookkeeping, same in both arms.
-
-Mechanism read: the actions shape did NOT make the auditor twitchy in
-the dangerous direction (continues 12-vs-9 lands inside noise; 10 of
-12 continues rode on eventually-PASS questions), but it also did not
-yet demonstrate worker OBEDIENCE — most continues still ended
-fingerprint-unchanged (worker repeats verbatim). The assertive nudge's
-value prop is currently the flag honesty, not reclose conversion;
-per-fire causation stays unclaimed per the standing caveat.
-
-Product bug found + fixed same day (AMBI-02 footer): the flag footer
-rendered the shared request-QUOTE per action — five macros sharing one
-quote printed the same sentence 5× to the USER. `flag_footer_text` now
-renders deduped ACTION texts (imperative, what the worker failed to
-do), falling back to quote for legacy items. Test:
-`test_flag_footer_renders_actions_not_repeated_quotes`.
-
-Repeat-sample note (standing law): one run each — before crediting or
-blaming the contract vs the labels-quote dump arm, re-run or use the
-continue-intent exemption fix (now backed by 5 regressed closes that
-escaped through exactly that hole) as the next lever.
-
-### Guard removal: kickback + judge deleted (2026-10-23)
-
-The 2026-10-19 sections above were single-run signals. The decision-grade
-reruns used a 3-arm cycle (off / kickback / judge-dump) on the SAME tip,
-identical settings, arms differing ONLY in the loop-exit guard, full
-111-qid corrected bank, t=1.0:
-
-| Model | off | kickback | judge | fail sets |
-| --- | --- | --- | --- | --- |
-| qwen3.8-27b (`guard3-*-27b`, 4096 tok) | 109 | 110 | 108 | fully disjoint |
-| gemma-4-12b (`guard3g-*-12b`, 8192 tok) | 102 | 104 | 104 | mostly disjoint |
-
-Findings that closed the question:
-
-1. **No accuracy effect.** 27B: a ±1 spread with zero overlap between
-   fail sets — noise, not signal. gemma: +2 for guarded arms, but the
-   guards RESHUFFLED failures instead of removing the class (kickback
-   did not rescue its flagship BULK-02 early-stop — it failed off AND
-   kick; judge passed BULK-02/05 while breaking TRIDENT-04, TRIDENT-15,
-   SKILL-N02 that both other arms passed).
-2. **The one observed off-arm rescue was a one-off.** BULK-02's off-mode
-   zero-edit close reran 3/3 PASS (`bulk02-off-r{1,2,3}`) — a ~1-in-4
-   sampling tail on 27B, not a hole the guard plugs.
-3. **Mid-loop deltas were sampling, not guard effect.** Apparent
-   edit-budget/re-edit differences concentrated in two thrash episodes
-   (AMBI-02, COMMENT-05) reproducible as dice; `move_section →
-   delete_section` on one key is legitimate move choreography, not a
-   re-edit.
-4. **Judge's observed dogfood failure was the worst kind:** it attested
-   a false DONE on an incomplete rename (2026-10-23 level_bed dogfood),
-   and it cost 33–46 extra model calls per bank run.
-
-Removed: the judge service, the kickback block in the chat loop, the
-`completionCheck`/`completionGuard`/`completionJudgePayload` request
-fields, `usage.completionKicks`/`completionJudge`, the failure-notes
-ledger that only fed the kick, and the harness A/B flags
-(`a372b5b`, `995dae2`, `895b05e`). Untouched and still shipped: the
-validation kickbacks on FAILED ops (error feedback, not a guard), the
-ack guard, the confab/trace-truth notes, the thrash budget.
-
-`COMMENT-06` failed every arm on both models (6/6) — the systematic
-gap is TOOL CAPABILITY, not loop guardianship; that is where further
-reliability work goes. If a future model class shows a *consistent*
-early-stop failure, re-run the 3-arm cycle before re-adding any guard.
-
-### Family detail (baseline run, pre-fix)
-
-| Model | Q | MACRO | TRIDENT | HARNESS | MINIDIFF | AMBI | SETUP | LIVE | EDIT | RENAME | COMMENT | SKILL | SKILL-N | TOOL | ACK | ACK-N |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| gemma-4-12b | 19/19 | 9/10 | 15/16 | 2/2 | 4/4 | 7/8 | 4/5 | 7/7 | 6/6 | 3/3 | 4/6 | 5/5 | 2/4 | 8/8 | 2/2 | 0/1 |
-| qwen3.6-35B-A3B | 18/19 | 10/10 | 15/16 | 2/2 | 4/4 | 8/8 | 3/5 | 6/7 | 6/6 | 3/3 | 5/6 | 4/5 | 3/4 | 8/8 | 1/2 | 1/1 |
-| gemma-4-26B-A4B | 18/19 | 9/10 | 15/16 | 2/2 | 4/4 | 6/8 | 4/5 | 7/7 | 6/6 | 3/3 | 5/6 | 4/5 | 4/4 | 8/8 | 2/2 | 0/1 |
-| gemma-4-e4b | 18/19 | 8/10 | 13/16 | 2/2 | 3/4 | 6/8 | 4/5 | 7/7 | 5/6 | 3/3 | 4/6 | 4/5 | 3/4 | 8/8 | 2/2 | 1/1 |
-| qwen3.5-4b | 18/19 | 9/10 | 13/16 | 2/2 | 3/4 | 6/8 | 4/5 | 7/7 | 5/6 | 3/3 | 5/6 | 4/5 | 3/4 | 6/8 | 2/2 | 0/1 |
-| qwen3.8-27B | 16/19 | 7/10 | 16/16 | 2/2 | 4/4 | 3/8 | 3/5 | 7/7 | 6/6 | 2/3 | 3/6 | 5/5 | 4/4 | 8/8 | 2/2 | 1/1 |
-| qwen3.5-9b | 16/19 | 8/10 | 15/16 | 2/2 | 3/4 | 7/8 | 3/5 | 7/7 | 5/6 | 2/3 | 3/6 | 4/5 | 3/4 | 6/8 | 2/2 | 0/1 |
-
-Movement against the previous 94-Q baseline, on the **94 overlapping qids** (all
-four documented models re-measured on the same host, so this is apples-to-apples):
-
-| Model | New | Old | Δ |
+| Model | Runs (PASS/111) | Band | Notes |
 | --- | --- | --- | --- |
-| gemma-4-12b | 88/94 | 92/94 | **−4** |
-| qwen3.5-4b | 80/94 | 78/94 | +2 |
-| gemma-4-e4b | 81/94 | 77/94 | +4 |
-| qwen3.5-9b | 79/94 | 73/94 | **+6** |
+| Qwen3.8 27B | 109 / 110 / 108 | 97–99% | Three-arm full bank (2026-10-23); earlier same-build runs reached 111/111 once and never scored below 103 through the large-edit rework. Current-tip spot re-runs recovered every miss (6/6, plus BULK 5/5 twice and 3/5 once across three runs) — effectively at or above the band on today's build. |
+| Gemma4 12B (QAT) | 102 / 104 / 104 | 92–95% | Same 2026-10-23 bank; current-tip spot re-run recovered 8 of its 14 union-misses. Persistent single gap: COMMENT-06 fails on every model and arm (see below). |
+| Qwen3.5 4B | 97 | 87–95% | Full bank 2026-10-24 (87% this run); 8 of its 14 misses recovered immediately on a same-evening spot re-run, placing its true band ~87–95%. Its six consistent misses: MACRO-01, MINIDIFF-01, COMMENT-06, SKILL-02, SKILL-N04, ACK-02. |
 
-gemma-4-12b is the only genuine regression; its losses concentrate in `SKILL-N01`
-(skill false-positives 1/4 → 2/4) plus two of the harness false negatives above.
-`TRIDENT-15` — previously the all-model failure — now passes on 5 of 7.
+Guard-arm evidence: the loop-exit completion guard A/B (off / echo-kickback
+/ fresh-context judge, same tip, full bank) produced a ±1 spread with
+**disjoint fail sets** on the 27B and mere failure-reshuffling on the 12B —
+the guards were removed (2026-10-23) and the loop now trusts the model's own
+"done" with honesty stamping as the backstop. Full forensics:
+[AI_CHAT_TEST_HISTORY.md](AI_CHAT_TEST_HISTORY.md).
 
-Failure modes seen across the models (from their traces):
+### Known failure families
 
-- **Staged but not what was asked** (the dominant mode) — the model picks a
-  blunter operation than the case needs (`replace_section` or `set_param`
-  where an anchored `patch_section` is required) and the staged text misses
-  the required line. This is what fails `EDIT-02` / `MINIDIFF-01` / `SKILL-02`
-  (the `level_bed` adaptive-anchor trio) on 4 of 7 models. Verified genuine
-  against Klipper's own source: `bed_mesh.py` gates adaptive mode on
-  `gcmd.get_int('ADAPTIVE', 0)`, so `adaptive=true` is invalid and
-  `adaptive_margin` alone does **not** enable it. Only gemma-4-12b writes the
-  documented `ADAPTIVE=1`.
-- **Skill gate fires on an explicit "don't change my files"** — `SKILL-N04`
-  ("Draft me a PARK_X macro… Don't add it to my config"). 5 of 7 models load
-  the editing skill and 4 of 7 stage an edit anyway. Traced end-to-end: the
-  model writes the draft, the backend fires its edit-prose nudge, and the
-  nudge's leading exception — *"Unless the user explicitly said NOT to change
-  their files…"* — is honoured by only 1 of 7 (qwen3.8-27B, the only pass).
-- **Over-clarification** — qwen3.8-27B alone refuses to stage on `Q14`, `Q17`
-  and `MACRO-02`, because each question's premise contradicts the real Trident
-  fixture (a `[bed_mesh]` already exists; `PRINT_START` is heavily customised).
-  Safe behaviour, scored as a miss — a question-design question, not a bug.
-- **Runaway tool loops** — qwen3.8-27B burned 21 tool calls and 108k characters
-  of context on `MACRO-03`, a question about a 7-line macro, and hit the
-  10-minute request ceiling. 12 of its 106 questions timed out this way; every
-  other model had ≤3 request errors.
-- **Registry kickback not re-sent** — `AMBI-02` / `AMBI-03`: an unknown gcode
-  command (`CLEAN_NOZZLE`, `SMART_PARK` from plugins) kicks the write back
-  unstaged, and the design needs an *identical* resend to pass. Most models
-  narrate the rejection and stop instead.
-- **Nothing staged after burning the retry budget** — the model keeps re-sending
-  variations the server rejects, then lands on the soft-landing summary. The
-  write-attempt cap keeps this honest, but the loop is not converging for the
-  smaller models.
+Patterns that recur across models (useful for calibrating expectations, and
+the map for future reliability work):
 
-**Harness false negatives — FIXED 2026-09-28, awaiting re-run.** Four were
-found by auditing every repeat failure against the real artifacts, and are now
-corrected in the harness:
-
-- `AMBI-07` graded the reply *prose* for a numeric assignment, so a correct
-  staged edit FAILed whenever the model wrote "added to `[extruder]`". The
-  explanation half stays prose; the edit half is now `staged_regex`. This
-  flipped 2 false negatives to PASS **and 1 false positive to FAIL** (a model
-  that explained but staged nothing used to pass).
-- `MACRO-01` demanded `G1…X0` and rejected `G0`, which the bundled Klipper docs
-  define as the same command ("Move (G0 or G1)").
-- `Q19`'s clarifying-question regex did not match "I'll need some basic hardware
-  details… paste them here".
-- `COMMENT-03` asked for `max_accel` — a *required* `[printer]` parameter — to be
-  commented out, which the validator correctly refuses to stage; passing needed
-  an unstated two-part swap (1 of 7 managed it). Retargeted to the optional
-  `max_z_velocity`.
-- The rename criteria matched the macro **name** case-sensitively
-  (`[gcode_macro LEVEL_BED1]`), but Klipper upper-cases the alias
-  (`gcode_macro.py`: `self.alias = name.upper()`) and the command token before
-  dispatch, so `Level_Bed1` and `LEVEL_BED1` are the *same* command. Those
-  checks now use `staged_header` — type token exact (it resolves to a module
-  filename, so `[Gcode_Macro …]` genuinely fails to load), instance name
-  case-insensitive.
-
-Two latent scoring gaps were closed at the same time: `staged_param` was
-case-sensitive while `staged_regex` is not (Klipper normalises gcode param names
-and config option names, so those checks are now `staged_param_ci` — section
-headers deliberately stay case-sensitive), and `not_staged` was file-scoped, so
-a "don't change my files" request passed when the model edited a *different*
-file (`not_staged_any` closes it).
-
-Validation and evidence: `reports/ai-chat-accuracy/bank106-r1-criteria-audit.md`;
-re-check any of it offline with `scripts/validate_criteria_offline.py`.
-
-**Harness false negatives, round 2 — FIXED 2026-09-29, awaiting re-run.** A
-second pass audited the remaining non-PASS slots across all seven runs and
-found four more defects (all on failures that repeat on ≥2 models), plus two
-product defects the bank cannot see:
-
-- `Q04`'s list regex accepted only `-` bullets and bare filenames, so
-  `* **Config_Reference.md**` and `**\`Config_Reference.md\`**` (bold wrapping
-  code) — both naming five real docs — were scored FAIL.
-- `SETUP-05`'s criterion was file-scoped to `printer.cfg`, but the fixture's
-  `[respond]` lives in `mainsail.cfg:61` (empty). Driving the real `EditSession`
-  (`scripts/probe_setup05_respond_routes.py`) shows `add_section` in
-  `printer.cfg`, `set_param` and `replace_section` in `mainsail.cfg` all stage
-  cleanly, so the arm now accepts either file.
-- `TRIDENT-10` asked for a **display** block ("return the corrected macro in a
-  fenced cfg code block with a '# file: printer.cfg' hint line") while the
-  criteria graded the staged artifact. 5 of 7 models followed the instruction
-  with a perfect fix and FAILed; the prompt now asks for the edit, like every
-  other artifact-graded qid.
-- `TOOL-05`'s header arm graded the reply prose, but the deliverable there is
-  the *tool's* return value: two models called `generate_macro_template` with
-  `include_bed_mesh: true` and the tool returned the full
-  `[gcode_macro PRINT_START]` body, while their prose only described it. New
-  `tool_output_regex` criterion kind grades `toolCalls[].output`.
-- Two questions were re-worded for premise conflicts (`SETUP-02` asks for a
-  *change* now; `SETUP-05` names the target state), the same family as
-  `COMMENT-03`. `Q17` / `MACRO-02` / `Q14` have the same shape and are left
-  as-is pending a decision.
-
-Offline validation (`scripts/validate_criteria_offline.py`, now with 15
-negative controls): **6 new verdict flips, all intended, 0 controls wrongly
-passing** — the widening did not touch a single unaffected qid. `TRIDENT-10`
-and `SETUP-02` cannot be replayed (their question text changed), so they need
-the live re-run.
-
-**Round-2 spot re-run — MEASURED.** The 9 qids touched by rounds 1–2 were
-re-run on all seven models (same hosts and flags, `bank106-r2-spotfix-*`, after
-restarting the backend at 10:02 so it served the fixed code):
-
-| model | before | after | Δ |
-| --- | --- | --- | --- |
-| gemma-4-12b | 4/9 | **9/9** | +5 |
-| qwen3.5-4b | 2/9 | **7/9** | +5 |
-| gemma-4-26B-A4B | 3/9 | **8/9** | +5 |
-| qwen3.6-35B-A3B | 5/9 | **8/9** | +3 |
-| qwen3.8-27B | 4/9 | **8/9** | +4 (3 were infra ERRORs) |
-| gemma-4-e4b | 5/9 | **7/9** | +2 |
-| qwen3.5-9b | 4/9 | **6/9** | +2 |
-| **total** | **27/63** | **53/63** | **+26** |
-
-No errored qids in any leg. Per-defect: `COMMENT-03` +5, `SETUP-05` +5,
-`TRIDENT-10` +4, `MACRO-01` +3, `Q19` +3 (1 criteria, 2 infra), `Q04` +2,
-`TOOL-05` +2, `AMBI-07` +1, `SETUP-02` +1. **These 9 qids are now measured and
-the rest of the table above still is not.**
-
-Two regressions surfaced, and one of them is a criterion contradicting the
-product's own rule: `SETUP-02` — the fixture defines `[idle_timeout]` in BOTH
-`printer.cfg` and `Hotkey.cfg`, and **4 of 6 models edit the `Hotkey.cfg` copy**
-(one citing load order). KWC's validator agrees with them:
-`severity=info, code=project_duplicate, "Section [idle_timeout] is defined
-multiple times in this file — the later definition wins"`
-(`scripts/probe_duplicate_idle_timeout.py`). The criterion only accepts
-`printer.cfg`, so models behaving the way the app itself describes are scored
-FAIL. `MACRO-01` failed qwen3.5-4b on a *parameterised* park
-(`params.PARK_X|default(0)`, the idiom KWC's own `PAUSE` template uses) while
-demanding a literal `X0`.
-
-Product fixes shipped with the same work, both model-agnostic:
-
-- **Staged work no longer reports as a failure.** When a request ends with no
-  visible text, the reply used to be *"I wasn't able to generate a response.
-  Please try rephrasing your question."* — which hit **11 qids in one model's
-  run, every one with a validated edit waiting for review**. The fallback now
-  names the staged changes ("I staged 1 change to printer.cfg for your
-  review…") and keeps the old wording only when nothing was staged.
-- **Orphan tool-call markup no longer reaches the bubble.** Three replies
-  carried the *tail* of a native call (`<parameter=…>…</parameter>`,
-  `</function>`, `</tool_call>`) that every opener-anchored cleanup regex
-  missed — one of them was the entire reply. `TOOL_RESIDUE_RE` strips those
-  fragments and, when nothing else survives, routes the reply into the empty
-  fallback above instead of showing raw markup.
-
-Evidence for the second round (per-qid verdicts, the probe output, and the
-replay diff): `reports/ai-chat-accuracy/bank106-r1-failure-states.md`.
-
-**Variance, not shared breakage.** Across 106 questions × 7 models: **61 pass on
-all 7**, **45 are mixed**, and **0 fail on all 7**. 17 of the mixed ones fail on
-exactly 1 of 7 — single-model flakiness. Only 6 fail on 5+ of 7, and of those 3
-are harness defects above rather than model gaps. Treat a few points of spread as
-noise and require three runs before claiming a model-behaviour difference.
-Re-baseline after any prompt or tool change.
+- **Staged-but-not-what-was-asked** — picking a blunter op (`replace_section`
+  where anchored `patch_section` was needed) and missing a line. The dominant
+  failure mode on smaller models; mostly closed by realized-change reporting.
+- **COMMENT-06-class tool gaps** — rename + uncomment in one flow fails on
+  every model and arm; this is TOOL capability, not loop guardianship, and is
+  where further work goes.
+- **Skill false-positives** — "draft it but don't touch my files" still
+  tempts most models to load the edit skill; staging anyway is rarer. The
+  review surface (Keep/Undo) is the real defense, not the gate.
+- **Decision stalls** — an ambiguous premise (e.g. the named section already
+  exists) can produce offer-two-options-and-ask closes instead of a staged
+  edit. Safe, scored as a miss; more common on 27B.
+- **Runaway loops on reasoning models** — historically repeated near-identical
+  reads until timeout; controlled now by the thrash budget and repeat-call
+  directives rather than a tight cap.
+- **Variance law** — across 106 questions × 7 models on the older bank: 61
+  passed on all 7, 45 were mixed, 0 failed on all 7. Re-baseline after any
+  prompt or tool change, and require three runs before believing a
+  model-behaviour difference.
 
 ### Running the harness
 
-From the repo root, with the backend running:
+From the repo root, with the backend running on the port the harness is told
+about:
 
 ```bash
 python3 scripts/ai_chat_accuracy_test.py \
     --provider openai-compatible --api-url http://192.168.1.135:8080/v1/chat/completions \
-    --model gemma-4-12b --max-tokens 8192 --temperature 0.7 \
-    --tool-protocol native --merge-system-messages --edit-tools on \
+    --model gemma-4-12b --max-tokens 8192 --temperature 1.0 \
+    --tool-protocol native --edit-tools on \
     --base-url http://localhost:8099 \
     --output-dir reports/ai-chat-accuracy/<run-name>
 ```
 
-- Always pass `--max-tokens` and `--temperature` explicitly — unattended/background runs die on the interactive prompt otherwise.
-- Tool protocol: the default `--tool-protocol auto` uses the text ```` ```tool ```` protocol for local http endpoints and native function calling for cloud https endpoints. For local llama.cpp servers, `--tool-protocol native` forces OpenAI native `tool_calls` — required for gpt-oss (text replies come back empty) and generally equal-or-better for gemma/qwen.
-- `--merge-system-messages` matches the shipped request shape (single leading system message; strict chat templates need it). `--edit-tools on|off` forces the write tools visible/hidden regardless of the model class.
-- Cloud providers need an API key: pass `--api-key`, set `KWC_TEST_API_KEY`, or answer the interactive prompt (never echoed; keys are redacted to `***` in logs).
-- Useful flags: `--questions EDIT-01..06` or `--questions TRIDENT,AMBI-0*` (QID-based subsets; positional `1-5,8` still works but drifts as the bank grows), `--question TEXT --check TEXT` (one ad-hoc question), `--list-questions` (print the question bank, no API calls), `--include-memory` (printer-memory auto-fill tests; the backend's printer memory is backed up, blanked to trigger auto-fill, and restored afterward).
-- Reports land in `reports/ai-chat-accuracy/<output-dir>/` as both a human-readable `.log` and a machine-readable `.json`.
+- Pass `--max-tokens` and `--temperature` explicitly — unattended runs die
+  on the interactive prompt otherwise.
+- `--tool-protocol native` is correct for current llama.cpp servers (probe
+  an endpoint before assuming otherwise); `auto` falls back to the text
+  protocol per URL scheme.
+- Subsets by qid: `--questions EDIT-01..06`, `--questions TRIDENT,AMBI-0*`,
+  `--questions BULK`; `--question TEXT --check TEXT` for one ad-hoc case;
+  `--list-questions` prints the bank (indices drift as it grows — search by
+  qid, never hand-count).
+- Cloud providers need `--api-key` or `KWC_TEST_API_KEY` (never logged).
+- Reports land in `reports/ai-chat-accuracy/<run-name>/` as a human `.log`
+  and a machine `.json` (per-question tool trace, backend-log slice,
+  per-criterion verdicts, usage).
+- **Staleness check before any bank run**: a healthy backend port does not
+  mean current code — compare the process start time against the last
+  commit; a backend older than the last source edit silently invalidates the
+  whole run.
+
+### Historical results
+
+Older-bank numbers (55/62/94/106-question generations), the full harness
+false-negative audit rounds, the R1 realized-change A/B, and the
+judge/kickback experiment forensics moved verbatim to
+[AI_CHAT_TEST_HISTORY.md](AI_CHAT_TEST_HISTORY.md). Treat the old
+per-model tables there as historical baseline snapshots from superseded
+prompt builds — do not compare them against current numbers.
