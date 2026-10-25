@@ -105,6 +105,64 @@ def test_single_request_malformed_term_fails_closed():
     assert not c("single_request", "max_retries=2", "", tool_turns=1)
 
 
+def test_single_request_turns_require_evidence():
+    """C-05 (round-1 review 2026-10-25): an ABSENT tool_turns field is
+    no evidence — the arm must fail closed exactly like max_attempts
+    does (test_single_request_attempts_require_evidence). A genuine 0
+    is still legitimate evidence."""
+    assert not c("single_request", "max_turns=25", "")
+    assert not c("single_request", "max_turns=25", "", tool_turns=None)
+    assert c("single_request", "max_turns=25", "", tool_turns=0)
+
+
+# ── coverage: empty-section rows are not sections (C-02) ───────────────
+
+
+def test_coverage_ignores_sectionless_rows():
+    """add_include / remove_include rows carry section='' — counting the
+    '' key let N-1 real sections + one include row satisfy an N floor."""
+    cs = {"edits": [
+        {"file": "printer.cfg", "section": "a", "superseded": False},
+        {"file": "printer.cfg", "section": "b", "superseded": False},
+        {"file": "printer.cfg", "section": "c", "superseded": False},
+        {"file": "printer.cfg", "section": "d", "superseded": False},
+        {"file": "printer.cfg", "op": "add_include", "section": "",
+         "superseded": False},
+    ]}
+    assert c("coverage", "printer.cfg::4", "", change_set=cs)
+    assert not c("coverage", "printer.cfg::5", "", change_set=cs)
+
+
+# ── no_fence: untagged fences are the same symptom (C-06) ──────────────
+
+
+def test_no_fence_catches_untagged_fence():
+    assert not c("no_fence", "", "Done:\n```\n[printer]\nmax_accel: 9\n```")
+
+
+# ── reply_not_regex: prose-claim negative (C-01) ───────────────────────
+
+
+_CLAIM = (r"\b(?:enabled|added|created|configured|set up)\b[^.\n]{0,40}"
+          r"\[?temperature_fan chamber")
+
+
+def test_reply_not_regex_fails_confabulated_success():
+    assert not c("reply_not_regex", _CLAIM,
+                 "Done — I added a comment to every section. I also "
+                 "enabled [temperature_fan chamber] and set target_temp "
+                 "to 40.")
+
+
+def test_reply_not_regex_passes_honest_naming():
+    # Names the section, claims nothing done. The request-quote shape
+    # ('enable the ...') must not trip the past-tense verbs either.
+    assert c("reply_not_regex", _CLAIM,
+             "I could not find [temperature_fan chamber] in bulk.cfg — "
+             "the enable-the-chamber-fan part of your request cannot be "
+             "done. Every other section got its comment.")
+
+
 # ── failed_named_in_reply ──────────────────────────────────────────────
 
 
@@ -127,8 +185,17 @@ def test_any_of_forwards_change_set():
 
 
 def test_any_of_forwards_tool_turns():
-    arms = '[[["single_request", "max_turns=5"]], [["contains", "fine"]]]'
-    assert c("any_of", arms, "fine", tool_turns=9)
+    """C-07 (round-1 review 2026-10-25): the old shape put a
+    content-matching second arm ('contains fine') next to the turns arm,
+    so the assertion held via arm 2 even if tool_turns never reached
+    arm 1. Both arms must now DEPEND on tool_turns: arm 1 is the bound,
+    arm 2 is a turns-sensitive any_of, and the over-bound send must
+    FAIL."""
+    arms = '[[["single_request", "max_turns=5"]], [["contains", "zzz-nope"]]]'
+    assert c("any_of", arms, "fine", tool_turns=4)
+    assert not c("any_of", arms, "fine", tool_turns=9)
+    # Sanity: arm 1 genuinely reads the kwarg (9 alone fails the bound).
+    assert not c("single_request", "max_turns=5", "fine", tool_turns=9)
 
 
 def test_staged_section_regex_line_anchored_pattern():

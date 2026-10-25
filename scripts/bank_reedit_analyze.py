@@ -142,7 +142,20 @@ def analyze_run(report_dir):
             summary["applied_ops"] += applied
             summary["failed_ops"] += max(0, total_ops - applied)
             if tc.get("name") == "config_write":
-                keys = [(tc.get("file") or "?", "write-all")]
+                # C-03 (round-1 review 2026-10-25): the executed tool-call
+                # record carries {name, arguments, output} — the target
+                # file lives INSIDE the arguments JSON, never on the
+                # record. Reading tc["file"] returned None for every
+                # call, collapsing all config_writes onto ('?','write-all')
+                # and reporting two creates of DIFFERENT files as one
+                # re-edit — the analyzer's headline metric, inflated.
+                target = "?"
+                try:
+                    args_obj = json.loads(tc.get("arguments") or "{}")
+                    target = str(args_obj.get("file") or "?")
+                except (TypeError, ValueError):
+                    pass
+                keys = [(target, "write-all")]
                 kinds = ["config_write"]
             else:
                 ops = _ops_from_args(tc.get("arguments", ""))

@@ -398,9 +398,9 @@ Design laws earned the hard way:
 | Family | Coverage |
 | :--- | :--- |
 | Core Tools (Q01–Q20, minus retired Q09) | Docs lookups, example configs, validation, calculations, edit routing. |
-| Macro Authoring (MACRO-01..11) | Authoring, editing, fixing, templates, `validate_macro` checks. |
+| Macro Authoring (MACRO-01..07, 09–11, minus retired MACRO-08) | Authoring, editing, fixing, templates, `validate_macro` checks. |
 | Trident Configs (TRIDENT-01..16) | Real Trident configs (read/edit/delete/manage, cross-file edits, the `idle_timeout` multi-LED case). Read-only context. |
-| Harness (HARNESS-01..03) | Self-checks: criteria that must reject a wrong staged artifact. |
+| Harness (HARNESS-01, 03, minus retired HARNESS-02) | Self-checks: criteria that must reject a wrong staged artifact. |
 | Edit Cases (MINIDIFF-01..04) | Staged-edit cases: `level_bed` adaptive mode, `max_accel`, pin edits, `pressure_advance`. |
 | Ambiguity (AMBI-01..08) | Unnamed new files, hypotheticals, batch reads, explain-and-edit turns, bare-pin search. |
 | Setup (SETUP-01..05) | New sections with no existing home (firmware_retraction, idle_timeout, arcs, save_variables, respond). |
@@ -411,7 +411,7 @@ Design laws earned the hard way:
 | Rename (RENAME-01..03) | Header keeps the `gcode_macro` family; stale callers repaired. |
 | Comment (COMMENT-01..06) | Whole-section comment/uncomment, single-line via `patch_section`, rename+uncomment combo. |
 | Ack Guard (ACK-01/02, ACK-N01) | Promise-with-no-action rescued; pure Q&A never nudged. Native and text protocol pinned. |
-| Bulk Edits (BULK-01..05) | Comment-every-section / comment-every-macro sweeps, rename sweep with in-string arms, six-section constructive add, honesty trap. Graded trace-only. |
+| Bulk Edits (BULK-01..05) | Comment-every-section / comment-every-macro sweeps, rename sweep with in-string arms, six-section constructive add, honesty trap. Graded primarily from the server-staged trace (`coverage`, `staged_section_absent`); BULK-05's honesty pair also reads the reply — `failed_named_in_reply` (must name the missing section) + `reply_not_regex` (must not claim it performed it). |
 | Memory (MEMORY-01..03) | Printer-memory auto-fill (opt-in `--include-memory`). |
 
 ### Current model results

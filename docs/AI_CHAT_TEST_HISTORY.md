@@ -255,7 +255,10 @@ summary; larger ops collapse to `+A/−R` counts with removed lines verbatim;
 deletes name lines without re-shipping the block; clean batch ops stay lean
 (failed-then-retried ops show their diff). Both arms run with the
 loop-exit kickback DISARMED (`--completion-check off`, the new harness
-default for bank runs).
+default for bank runs). **Archive note (2026-10-25): the
+`--completion-check` flag and the kickback mechanism were both removed
+on 2026-10-23 (`995dae2`/`895b05e`) — this command line is historical
+evidence, not reproducible on the current build.**
 
 Arms: baseline = `3ead333` worktree (pre-R1), R1 = tip `1774bac`;
 `reports/ai-chat-accuracy/{r1base-bank111, r1-bank111}/`.
@@ -282,7 +285,9 @@ mechanism differs: echo = the shipped kickback (worker re-answers its
 own close against the ledger); judge = independent fresh-context audit
 (request + ledger, no worker transcript, quote-validated `continue`,
 verdict cap 2, fingerprint-unchanged skip). Harness-only selector
-`completionGuard`; product default remains kickback.
+`completionGuard`; product default remains kickback (as of that run —
+both arms were removed 2026-10-23, `a372b5b`/`995dae2`; the selector no
+longer exists).
 `reports/ai-chat-accuracy/{guard-echo-ab, guard-judge-ab}/`.
 
 | Arm | PASS | fixed | regressed | avg turns | avg tok | wall |

@@ -40,6 +40,18 @@ from services.ai_draft_validation import (
 )
 
 RE_SECTION_HEADER = re.compile(r'^\[([^\]]+)\]\s*$')
+# Parser-aligned header predicate (round-1 review 2026-10-25, L3): BOTH
+# parsers that matter split the file on an INDENTED header line and on a
+# header with a trailing comment — KWC's config_parser matches
+# SECTION_RE against line.strip() with an optional trailing comment, and
+# klippy's own reader strips '#' before matching RawConfigParser.SECTCRE,
+# which itself allows leading whitespace. RE_SECTION Header anchors ']'
+# to EOL against the RAW line, so '  [foo]' and '[foo] # note' slipped
+# past every body guard while the parsers still split there (silent
+# section duplication). Body guards use THIS predicate; RE_SECTION_HEADER
+# stays for _find_section placement scans, which walk real committed
+# files and must keep column-0 semantics.
+RE_HEADER_LINE = re.compile(r'^\s*\[([^\]]+)\]\s*(?:#.*)?$')
 # Param line inside a section body: key, separator (: or =). Mirrors the
 # parser's param shape (column-indented).
 RE_PARAM_LINE = re.compile(r'^(\s*)([A-Za-z_][A-Za-z0-9_.\-]*)\s*([:=])(.*)$')
@@ -626,6 +638,21 @@ class ProjectState:
             # cancels out of the delta — while producing zero findings of
             # its own that could skew the comparison.
             control.files[op_file] = '# control placeholder\n'
+        if kind == 'move_section':
+            # move_section is a file-CREATING op too (round-1 review
+            # 2026-10-25, L2): to_file is created when absent, and the
+            # candidate validates in the 2+-file project mode while the
+            # control stayed in the 1-file world — file-set-mode findings
+            # the op never caused (e.g. kinematics_stepper_missing) lit up
+            # as NEW and the whole move was refused with a false ERROR.
+            # config_write making the identical file-set change succeeds,
+            # so project the same placeholder for the created target.
+            to_raw = str(op.get('to_file', '') or '').strip()
+            if to_raw:
+                from pathlib import PurePosixPath
+                to_key = str(PurePosixPath(to_raw.replace('\\', '/')))
+                if to_key and to_key not in self.files:
+                    control.files[to_key] = '# control placeholder\n'
         return control
 
     def _delta_findings(self, baseline: dict[str, dict],
@@ -1015,7 +1042,7 @@ class ProjectState:
         # coverage criterion counted 3 of 6. One op, one section: extra
         # sections belong in their own ops[] entry.
         for line in body.split('\n'):
-            match = RE_SECTION_HEADER.match(line)
+            match = RE_HEADER_LINE.match(line)
             if match:
                 found = match.group(1).strip()
                 if found == header:
@@ -1102,7 +1129,7 @@ class ProjectState:
         # leading line.
         body_lines_pre = body_stripped.split('\n')
         for pos, line in enumerate(body_lines_pre):
-            match = RE_SECTION_HEADER.match(line)
+            match = RE_HEADER_LINE.match(line)
             if not match:
                 continue
             found_hdr = match.group(1).strip()
@@ -1232,7 +1259,17 @@ class ProjectState:
             end -= 1
         block = list(src_lines[header_index:end])
         dst_text = self.files.get(dst, '')
-        if not created and _find_section(_split_lines(dst_text), header) is not None:
+        # Case-folded (round-1 review 2026-10-25, L6): every other
+        # existence test in the module folds case (_resolve_section_ref,
+        # _section_exists_in_project, _resolve_file_ref), and the engine's
+        # section resolution is case-insensitive — so a dst holding
+        # [FAN_GENERIC first_fan] IS this section and must refuse the
+        # move, not duplicate it into a twin resolution can no longer tell
+        # apart. _find_section stays strict for placement scans.
+        if not created and any(
+                (hm := RE_SECTION_HEADER.match(line))
+                and hm.group(1).strip().casefold() == header.casefold()
+                for line in _split_lines(dst_text)):
             return _state_error(
                 f"Section '[{header}]' already exists in {dst} — moving it "
                 "would duplicate the section, and Klipper refuses to load "
@@ -1618,14 +1655,28 @@ class ProjectState:
             # The anchor line itself is replaced, so own-header lines in
             # new_text cannot duplicate it — only FOREIGN headers can
             # corrupt. Own headers pass anywhere; foreign -> the guard.
+            # Detection is parser-aligned (RE_HEADER_LINE, L3): an
+            # indented or trailing-commented header splits the file just
+            # the same, so it must be judged here too.
             new_lines_pre = new_text.split('\n')
             if not any(
-                    (m := RE_SECTION_HEADER.match(l))
+                    (m := RE_HEADER_LINE.match(l))
                     and m.group(1).strip() != header
                     for l in new_lines_pre):
                 insert_body = [l for l in new_lines_pre
-                               if not (RE_SECTION_HEADER.match(l)
-                                       and l.strip() == old_stripped)]
+                               if not ((hm := RE_HEADER_LINE.match(l))
+                                       and hm.group(1).strip() == header)]
+                if not any(s.strip() for s in insert_body):
+                    # L5: new_text was ONLY header lines — after dropping
+                    # them nothing would be inserted, yet the branch below
+                    # would report 'patched' on a byte-identical file. A
+                    # patch that changes nothing must say so (same law as
+                    # the old_text == new_text no-op above).
+                    return _state_error(
+                        f"patch_section made NO change: new_text contains "
+                        f"only section-header line(s) — nothing would be "
+                        f"inserted into [{header}]. Add the comment or body "
+                        f"line(s) you actually want after the header.")
                 lines = _split_lines(self.files[filename])
                 found = _find_section(lines, header)
                 if found is None:
@@ -1642,7 +1693,7 @@ class ProjectState:
                 return {'status': 'ok', 'file': filename,
                         'summary': f"patched [{header}] in {filename}"}
         for line in new_text.split('\n'):
-            m_hdr = RE_SECTION_HEADER.match(line)
+            m_hdr = RE_HEADER_LINE.match(line)
             if m_hdr:
                 return _state_error(
                     f"new_text must not contain a section header "

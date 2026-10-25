@@ -53,18 +53,28 @@ CLASS_ALIASES: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
     "motor": ("stepper", ("stepper",), ("stepper", "motor")),
     # Drivers answer to 'driver'/'drivers' as a class (live gap 2026-10-24:
     # only the literal group name 'stepper_driver' worked, a shape models
-    # rarely guess). 'tmc' token catches named/driver sections by name.
+    # rarely guess). 'tmc'/'driver' match the BASE type only (round-1
+    # review B1 2026-10-25: name matching claimed [gcode_macro TMC_STATUS]
+    # and [output_pin driver_enable]; plugin bases like [tmc_custom] stay
+    # reachable — see _BASE_ONLY_TOKEN_ALIASES).
     "driver": ("stepper_driver", ("stepper_driver",), ("tmc", "driver")),
     "drivers": ("stepper_driver", ("stepper_driver",), ("tmc", "driver")),
     "extruder": ("extruder", ("extruder",), ("extruder",)),
-    "hotend": ("extruder", ("extruder",), ("hotend", "nozzle")),
-    "nozzle": ("extruder", ("extruder",), ("hotend", "nozzle")),
+    # 'hotend'/'nozzle' TOKENS removed (round-1 review B1 2026-10-25):
+    # suffix-substring swept [fan_generic hotend_fan] / [gcode_macro
+    # NOZZLE_CLEAN]. The extruder group covers every real hotend.
+    "hotend": ("extruder", ("extruder",), ()),
+    "nozzle": ("extruder", ("extruder",), ()),
     # 'heater' token REMOVED: whole-word 'heater' swept [heater_fan ...],
     # which is a fan. The heater group already covers every heater type
     # (heater, heater_generic, verify_heater); literal type covers pins.
     "heater": ("heater", ("heater",), ()),
     "heaters": ("heater", ("heater",), ()),
-    "bed": ("heater", ("heater",), ("bed",)),
+    # 'bed' token REMOVED for the same reason (round-1 review B1
+    # 2026-10-25): suffix-substring 'bed' swept [fan_generic bed_fan],
+    # [output_pin bed_light], [gcode_macro BED_OFF]. The heater group
+    # covers every real bed ([heater_bed] and [heater_generic …]).
+    "bed": ("heater", ("heater",), ()),
     "probe": ("probe", ("probe",), ("probe", "bltouch", "klicky",
                                    "smart_effector")),
     "probes": ("probe", ("probe",), ("probe", "bltouch", "klicky",
@@ -98,6 +108,11 @@ CLASS_ALIASES: dict[str, tuple[str, tuple[str, ...], tuple[str, ...]]] = {
 # Section bases that ARE macros — the 'macro' class matches these exactly
 # (name-token matching would hit [respond]'s suffixes etc.).
 _MACRO_BASES = {"gcode_macro", "delayed_gcode"}
+
+# Aliases whose class-name tokens ('tmc', 'driver') judge the BASE type
+# only — a name/suffix match is a false positive by class
+# ([gcode_macro TMC_STATUS], [output_pin driver_enable] are not drivers).
+_BASE_ONLY_TOKEN_ALIASES = frozenset({"driver", "drivers"})
 
 # Sections that drive a stepper motor but are NOT members of the
 # 'stepper' class (their component_group is 'extruder'). When the model
@@ -163,9 +178,19 @@ def _group_of(entry: dict[str, Any]) -> str:
 
 
 def _matches(entry: dict[str, Any], groups: tuple[str, ...],
-             tokens: tuple[str, ...]) -> bool:
+             tokens: tuple[str, ...], base_only: bool = False) -> bool:
     if _group_of(entry) in groups:
         return True
+    if not tokens:
+        return False
+    base = entry["base"].lower()
+    if base_only:
+        # Class-name tokens ('tmc', 'driver') judge the BASE type only
+        # (round-1 review 2026-10-25, B1): a macro named TMC_STATUS or an
+        # output_pin named driver_enable is not a driver. Plugin drivers
+        # outside SECTION_DEFS ('[tmc_custom stepper_x]') still answer —
+        # their BASE carries the token.
+        return any(token in base for token in tokens)
     name_hay = f"{entry['base']} {entry['suffix']}".lower()
     words = set(re.split(r"[^a-z0-9]+", name_hay))
     for token in tokens:
@@ -250,7 +275,9 @@ def list_hardware(files: dict[str, str], hw_type: str = "") -> str:
             hits = [e for e in all_entries
                     if e["base"].lower() in _MACRO_BASES]
         else:
-            hits = [e for e in all_entries if _matches(e, groups, tokens)]
+            base_only = hw_type in _BASE_ONLY_TOKEN_ALIASES
+            hits = [e for e in all_entries
+                    if _matches(e, groups, tokens, base_only=base_only)]
     else:
         # Literal section-type passthrough: 'bed_mesh', 'idle_timeout',
         # 'tmc2240', even unknown types matched by base name equality.

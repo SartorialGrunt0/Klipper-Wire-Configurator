@@ -845,10 +845,35 @@ def resolve_change_chain(chain, context_files: dict | None = None,
     kept_ok: set[tuple] = set()
     for session, kept_ids, request_id in entries:
         kept_set = None if kept_ids is None else {str(i) for i in kept_ids}
+        # Unit resolution (L1): a row's _unit (move_section's two rows)
+        # is kept when ANY row of the unit is kept — the client's per-row
+        # keep of one half means keep the whole atomic op. A unit with NO
+        # kept row is rejected: its replayable row reports stale only when
+        # the client is keeping SOME of the request (keeping nothing at
+        # all = reject-all, and reject-all must not raise stale noise).
+        unit_kept: dict[str, bool] = {}
+        if kept_set is not None:
+            for rec in session.edit_records:
+                unit = rec.get("_unit")
+                if unit:
+                    unit_kept[unit] = (unit_kept.get(unit, False)
+                                       or rec["id"] in kept_set)
         for rec in session.edit_records:
-            if kept_set is not None and rec["id"] not in kept_set:
-                continue
             raw_op = rec.get("_raw_op") or {}
+            unit = rec.get("_unit")
+            if rec.get("_display_only"):
+                # Transcript/display row (move source half): never
+                # replayed, never stale. The replayable twin covers it.
+                continue
+            if kept_set is not None:
+                if unit:
+                    # Atomic unit: kept when ANY row is kept; rejected
+                    # silently when none is (a user choice is never
+                    # 'stale' — stale means KEPT but no longer applies).
+                    if not unit_kept.get(unit, False):
+                        continue
+                elif rec["id"] not in kept_set:
+                    continue
             if not raw_op:
                 stale.append({"id": rec["id"], "requestId": request_id or "",
                               "file": rec["file"],
@@ -985,6 +1010,12 @@ class EditSession:
         # failed-then-retried op — the one batch shape whose realized
         # diff rides (plan: clean batch ops stay lean).
         self._failed_targets: set[tuple] = set()
+        # B4: (op, file) keys of write calls that FAILED and have not
+        # been re-landed since. Drives the confab guard's partial-success
+        # footer — see _note_failure / commit(). Cleared by a successful
+        # commit of the same (op, file), by steer, and by the budget
+        # reset alongside _failed_targets.
+        self._open_failures: set[tuple] = set()
         # Classification of the most recent write-tool outcome:
         #   None         — no write call yet this request
         #   'success'    — staged (partial success counts; see 'correctable')
@@ -1083,15 +1114,32 @@ class EditSession:
                 return None
             file_default = str(args.get("file", "") or "")
             mapped: list[dict] = []
-            for entry in ops_arg:
+            # Round-1 review 2026-10-25, L4: ONE malformed entry must not
+            # abort the whole batch. Unusable entries map to a per-index
+            # shape-error op that the engine reports at its index (the
+            # other entries run); the kickback names the index instead of
+            # the misleading 'ops must be a non-empty list' claim.
+            for entry_idx, entry in enumerate(ops_arg):
                 if not isinstance(entry, dict):
-                    return None
+                    mapped.append({
+                        "op": "", "_shape_error":
+                            f"entry is {type(entry).__name__}, not an "
+                            "operation object — re-send this entry as "
+                            '{"op": ..., "section": ..., ...}'})
+                    continue
                 entry_args = dict(entry)
                 if not entry_args.get("file"):
                     entry_args["file"] = file_default
                 single = EditSession._single_op(name, entry_args)
                 if single is None or single.get("op") == "new_file":
-                    return None
+                    mapped.append({
+                        "op": "", "_shape_error":
+                            "not a config_edit operation"
+                            + (" (config_write does not belong in ops[]; "
+                               "call it on its own)"
+                               if single and single.get("op") == "new_file"
+                               else "")})
+                    continue
                 mapped.append(single)
             return {"batch": True, "file": file_default, "ops": mapped}
         return EditSession._single_op(name, args)
@@ -1189,6 +1237,7 @@ class EditSession:
         self.read_calls = 0
         self.write_failures = 0
         self._failed_targets.clear()
+        self._open_failures.clear()
         self._last_file = None
 
     @staticmethod
@@ -1209,7 +1258,28 @@ class EditSession:
             self._identical_failures.get(key, 0) + 1
         if isinstance(args, dict):
             self._note_failed_target(args)
+            # B4 (round-1 review 2026-10-25): the (op, file) view of the
+            # failure for the confab guard. The old_text-mismatch / wrong-
+            # section-name retry re-lands the same op on the same file —
+            # commit() clears this key, so a RECOVERED request no longer
+            # stamps the "N edit calls failed and are NOT staged" footer
+            # over a fully staged change set.
+            self._open_failures.add(self._op_file_key(args))
         return self._identical_failures[key]
+
+    @staticmethod
+    def _op_file_key(op: dict) -> tuple:
+        return (str(op.get("op", "")).casefold(),
+                str(op.get("file", "")).casefold())
+
+    def unresolved_write_failures(self) -> int:
+        """B4: failures whose (op, file) was NOT re-landed since. The
+        confab guard's partial-success footer counts THESE, not the
+        cumulative write_failures — a failed op the model fixed by
+        retrying is no longer an unstaged change, and stamping the
+        honesty note over a fully staged change set gaslights the
+        reply (round-1 review 2026-10-25)."""
+        return len(self._open_failures)
 
     @staticmethod
     def _realized_target_key(op: dict) -> tuple:
@@ -1470,6 +1540,19 @@ class EditSession:
                                  "before re-sending"})
                 break
             sub_file = str(sub.get("file") or file_default)
+            if sub.get("_shape_error"):
+                # L4: an entry the mapper could not map. Per-index
+                # failure (the OTHER entries run), charged as waste like
+                # any unusable call, and the error names the index.
+                self.thrash_units += 1
+                self.write_failures += 1
+                self.last_write_outcome = "correctable"
+                results.append({"idx": idx, "op": "",
+                                "section": str(sub.get("section", "")),
+                                "ok": False,
+                                "error": f"unusable ops[] entry: "
+                                         f"{sub['_shape_error']}"})
+                continue
             if not sub_file:
                 self.thrash_units += 1
                 self.write_failures += 1
@@ -1824,6 +1907,13 @@ class EditSession:
             self._identical_failures = {
                 k: v for k, v in self._identical_failures.items()
                 if file_name not in k}
+        # B4 (round-1 review 2026-10-25): this commit LANDED an op, so any
+        # earlier failure of the same (op, file) — the classic
+        # old_text-mismatch-then-fix retry — is recovered. Drop its key
+        # from the confab guard's open set; failures on OTHER targets stay
+        # open and still stamp the footer.
+        if raw_op is not None:
+            self._open_failures.discard(self._op_file_key(raw_op))
         details = self._details_for(name, result)
         # Stacked edits to the same file replace its staged entry so the
         # draft UI shows the cumulative result, not intermediate states.
@@ -2109,12 +2199,22 @@ class EditSession:
         # coverage criterion sees the source deletion). Target row is the
         # authoritative "section now lives here"; this one records the
         # removal. Ids stay sequential across both rows.
+        #
+        # The move is ATOMIC (round-1 review 2026-10-25, L1): one raw op
+        # performs both halves, so the source row must NOT replay it —
+        # replaying twice hit "Section not found in <src>" and reported a
+        # bogus stale row on EVERY keep-all resolve. The row is therefore
+        # display-only, and both rows share a _unit key: resolve treats
+        # the unit as kept when ANY row of it is kept and as rejected
+        # only when ALL rows are rejected — a half-move is not a thing.
         diff_from = result.get("diff_from") or {}
         if diff_from:
             src_name = str(diff_from.get("file") or "")
             before_s = str(diff_from.get("before", ""))
             after_s = str(diff_from.get("after", ""))
             added_s, removed_s = diff_counts(before_s, after_s)
+            unit = f"move:{section.casefold()}:{src_name.casefold()}"
+            record["_unit"] = unit
             self.edit_records.append({
                 "id": f"e{len(self.edit_records)}",
                 "file": src_name,
@@ -2129,7 +2229,9 @@ class EditSession:
                 "superseded": False,
                 "supersededBy": "",
                 "_key": None,
-                "_raw_op": op,
+                "_unit": unit,
+                "_display_only": True,
+                "_raw_op": None,
             })
 
     _RECORD_KEYS = ("id", "file", "section", "key", "op", "summary",

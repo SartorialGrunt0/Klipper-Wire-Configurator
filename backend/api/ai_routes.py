@@ -1305,9 +1305,9 @@ LIST_HARDWARE_SPEC = {
         "[output_pin casing_light]. type must be EXACTLY one of: 'led' "
         "(also lights/rgb), 'fan', 'stepper' (includes [tmc2240 "
         "stepper_x]; the extruder's own stepper is NOT a member — a "
-        "note in the result names it], 'driver' (stepper drivers "
-        "like [tmc2209 ...]), 'extruder' (hotend/nozzle too), "
-        "'heater' (bed too), 'probe', 'accelerometer', "
+        "note in the result names it], 'driver'/'drivers' (stepper "
+        "drivers like [tmc2209 ...]), 'extruder' (also 'hotend'/'nozzle'), "
+        "'heater'/'heaters'/'bed', 'probe', 'accelerometer', "
         "'mcu'/'board', 'servo', 'display', 'filament_sensor', "
         "'endstop', 'macro' (gcode_macro/delayed_gcode only); or "
         "any literal section type ('bed_mesh', 'idle_timeout'). "
@@ -4469,14 +4469,15 @@ async def chat_proxy(req: ChatRequest):
             if (edit_session is not None
                     and edit_session.edit_attempts
                     and (not edit_session.pending_edits
-                         or edit_session.write_failures)):
+                         or edit_session.unresolved_write_failures())):
                 logger.warning(
                     "Confab guard | write attempts=%d outcome=%s staged=%d"
-                    " failures=%d | appending trace-truth note",
+                    " failures=%d unresolved=%d | appending trace-truth note",
                     edit_session.edit_attempts,
                     edit_session.last_write_outcome,
                     len(edit_session.pending_edits),
                     edit_session.write_failures,
+                    edit_session.unresolved_write_failures(),
                 )
                 # The trace distinguishes a USER decision from technical
                 # failures — the note must not conflate them (a blanket
@@ -4491,11 +4492,13 @@ async def chat_proxy(req: ChatRequest):
                     )
                 elif edit_session.pending_edits:
                     # Step 4 (2026-10-17): partial success over FAILED
-                    # calls. The completion-kickback gives the model its
-                    # chance to fix the failures; if it still closes
-                    # "all done", the trace stamps the reply — the cards
-                    # show what staged, the note states what did not.
-                    _fails = edit_session.write_failures
+                    # calls. If the model still closes "all done", the
+                    # trace stamps the reply — the cards show what
+                    # staged, the note states what did not. Counts
+                    # UNRESOLVED failures only (B4, round-1 review
+                    # 2026-10-25): a failed op the model re-landed by
+                    # retrying is staged and must not appear in the note.
+                    _fails = edit_session.unresolved_write_failures()
                     note = (
                         "\n\n---\n*Note: "
                         + f"{_fails} edit call"
