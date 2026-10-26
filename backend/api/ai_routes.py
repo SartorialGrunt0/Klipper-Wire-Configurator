@@ -32,6 +32,7 @@ from services.ai_edit_tools import (
     EDIT_TOOL_NAMES,
     EDIT_TOOL_SPECS,
     EditSession,
+    cap_grant_per_applied_write,
     create_approval,
     find_approval_for_request,
     format_approval_result,
@@ -2850,6 +2851,15 @@ MAX_MCP_TOOL_TURNS = 10
 # user saw. The runaway guard is now the thrash budget + the absolute
 # per-request op ceiling below, not the turn cap.
 MAX_MCP_TOOL_TURNS_EDIT = 50
+# Work-earned cap credit (2026-10-26): this flat cap stays FULLY
+# chargeable to everything (reads, searches, failed writes), but each
+# config_edit/config_write call that applied at least one op raises the
+# cap for the rest of the request (cap_grant_per_applied_write(),
+# default +5/call, KWC_CAP_GRANT_PER_APPLIED_WRITE; 0 = flat A/B arm).
+# The 160-section dogfood proved the flat number charges correct work:
+# two runs died at exactly 50 mid-batch (live log 2026-10-26). Guarding
+# against a runaway stays the thrash budget + _identical_failures +
+# MAX_TOOL_OPS_PER_REQUEST below, none of which the credit relaxes.
 # Per-message tool-call slice bound (the `tool_calls[:N]` execution
 # window). Non-edit requests stay at 10; an edit-capable request gets 20
 # per message so one batched multi-edit turn is never silently truncated.
@@ -3626,6 +3636,9 @@ async def chat_proxy(req: ChatRequest):
                 usage_events.append(initial_usage)
 
             tool_turns = 0
+            # Credit tracker for the work-earned cap extension (below):
+            # write calls already paid into turn_cap.
+            credited_write_calls = 0
             current_messages = list(messages)
             executed_tool_names: list[str] = []
             executed_tool_calls: list[dict] = []
@@ -3686,7 +3699,33 @@ async def chat_proxy(req: ChatRequest):
 
             turn_cap = (MAX_MCP_TOOL_TURNS_EDIT if edit_capable
                         else MAX_MCP_TOOL_TURNS)
-            while tool_turns < turn_cap:
+            while True:
+                # Work-earned cap credit (2026-10-26): every write CALL
+                # that applied at least one op raises the edit arm's cap
+                # by cap_grant_per_applied_write(). The flat cap stays
+                # fully chargeable to reads/searches/failed writes, so a
+                # model that never lands an edit still dies at 50; one
+                # that is getting work done extends its own budget. The
+                # 500-op runaway ceiling and the thrash budget below are
+                # unchanged and cap the extension. CREDIT IS EARNED
+                # BEFORE the cap is re-checked: the dogfood run committed
+                # a batch on its 50th call — an exhausted write must
+                # still buy its extension (a while-condition credit
+                # would exit first and drop it).
+                if (edit_capable and edit_session is not None
+                        and edit_session.applied_write_calls
+                        > credited_write_calls):
+                    new_credit = (edit_session.applied_write_calls
+                                  - credited_write_calls)
+                    credited_write_calls = edit_session.applied_write_calls
+                    turn_cap += cap_grant_per_applied_write() * new_credit
+                    logger.info(
+                        "Cap credit granted | applied write calls=%d "
+                        "turn_cap=%d requestId=%s",
+                        credited_write_calls, turn_cap,
+                        req.requestId or 'none')
+                if tool_turns >= turn_cap:
+                    break
                 if stop_event is not None and stop_event.is_set():
                     raise ChatStoppedError()
                 # Invisible runaway ceiling (2026-10-16): an absolute
@@ -3726,6 +3765,14 @@ async def chat_proxy(req: ChatRequest):
                     # needed — after the model burned its writes driving
                     # the wrong way.
                     tool_turns = 0
+                    # apply_steer() zeroed the session's credit counter;
+                    # rebase the cap with it so the tracker and the cap
+                    # never drift (the model re-earnes credit with the
+                    # steer's new work — "the human bought another
+                    # round", not "the human banked the old extension").
+                    turn_cap = (MAX_MCP_TOOL_TURNS_EDIT if edit_capable
+                                else MAX_MCP_TOOL_TURNS)
+                    credited_write_calls = 0
                     steers_applied += len(_steers)
                     _progress_entry = _chat_progress.get(req.requestId)
                     if _progress_entry is not None:

@@ -708,6 +708,188 @@ def test_session_steer_resets_thrash_budget():
     assert session.edit_attempts == 0
 
 
+# ── work-earned cap credit (2026-10-26) ────────────────────────────────
+
+def test_session_applied_write_calls_counter(monkeypatch):
+    """Credit counts write CALLS that applied >=1 op: a batch counts
+    once, failures and fully-failed batches count zero, steer resets."""
+    monkeypatch.delenv('KWC_THRASH_BUDGET', raising=False)
+    session = EditSession(_ctx())
+    assert session.applied_write_calls == 0
+    # Successful single op = +1.
+    session.execute({'name': 'config_edit', 'arguments': _ok_edit_args('max_accel')})
+    assert session.applied_write_calls == 1
+    # Failed write = +0.
+    session.execute({'name': 'config_edit', 'arguments': _failing_edit_args(0)})
+    assert session.applied_write_calls == 1
+    # Batch applying 2 ops = +1 CALL, not +2.
+    session.execute({'name': 'config_edit', 'arguments': {
+        'file': 'printer.cfg', 'ops': [
+            {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity', 'value': '300'},
+            {'op': 'set_param', 'section': 'printer', 'key': 'max_accel', 'value': '4000'}]}})
+    assert session.applied_write_calls == 2
+    # Fully-failed batch = +0.
+    session.execute({'name': 'config_edit', 'arguments': {
+        'file': 'printer.cfg', 'ops': [
+            {'op': 'set_param', 'section': 'nope1', 'key': 'k', 'value': '1'},
+            {'op': 'set_param', 'section': 'nope2', 'key': 'k', 'value': '1'}]}})
+    assert session.applied_write_calls == 2
+    # Partial batch STILL applied work = +1.
+    session.execute({'name': 'config_edit', 'arguments': {
+        'file': 'printer.cfg', 'ops': [
+            {'op': 'set_param', 'section': 'nope3', 'key': 'k', 'value': '1'},
+            {'op': 'set_param', 'section': 'printer', 'key': 'max_z_velocity', 'value': '10'}]}})
+    assert session.applied_write_calls == 3
+    session.apply_steer()
+    assert session.applied_write_calls == 0
+
+
+def test_cap_grant_env_override(monkeypatch):
+    from services.ai_edit_tools import (
+        CAP_GRANT_PER_APPLIED_WRITE_DEFAULT, cap_grant_per_applied_write)
+    monkeypatch.delenv('KWC_CAP_GRANT_PER_APPLIED_WRITE', raising=False)
+    assert cap_grant_per_applied_write() == CAP_GRANT_PER_APPLIED_WRITE_DEFAULT
+    monkeypatch.setenv('KWC_CAP_GRANT_PER_APPLIED_WRITE', '0')
+    assert cap_grant_per_applied_write() == 0
+    monkeypatch.setenv('KWC_CAP_GRANT_PER_APPLIED_WRITE', 'junk')
+    assert cap_grant_per_applied_write() == CAP_GRANT_PER_APPLIED_WRITE_DEFAULT
+
+
+def _read_batch(b: int, n: int = 2) -> dict:
+    """One turn emitting n UNIQUE reads (distinct args stay past the
+    repeat guard; each burns the flat cap without earning credit)."""
+    blocks = '\n'.join(
+        '```tool\n' + json.dumps({'name': 'read_user_config',
+                                  'arguments': {
+                                      'filename': 'printer.cfg',
+                                      'section': f'nope{b}_{i}'}})
+        + '\n```' for i in range(n))
+    return {'choices': [{'message': {'content': 'Reading.\n\n' + blocks}}]}
+
+
+def _ok_edit_call(key: str, value: str = '3000') -> dict:
+    return {'choices': [{'message': {'content': 'Editing.\n\n'
+            + '```tool\n' + json.dumps({'name': 'config_edit',
+                                        'arguments': _ok_edit_args(key, value)})
+            + '\n```'}}]}
+
+
+def test_flag_on_applied_writes_extend_the_turn_cap(edit_flag, monkeypatch):
+    """The 160-section dogfood shape: reads interleaved with committed
+    edits. Flat cap 6; without credit the loop would break mid-script
+    and the tail reads + reply never run. With credit, the applied edit
+    buys +5 and the full script completes with the work staged. Cap
+    pinned small so the test stays fast (behavior test, not a
+    default-value test)."""
+    monkeypatch.setattr(ai_routes, 'MAX_MCP_TOOL_TURNS_EDIT', 6)
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '0')  # thrash must not interfere
+    monkeypatch.delenv('KWC_CAP_GRANT_PER_APPLIED_WRITE', raising=False)
+    replies = [
+        _read_batch(0, n=3),        # calls 1-3
+        _ok_edit_call('max_accel'), # call 4 — earns +5 (cap 6 -> 11)
+        _read_batch(1, n=3),        # calls 5-7  (past flat cap 6)
+        _read_batch(2, n=3),        # calls 8-10
+        _final_reply('max_accel is now 3000.'),
+    ]
+    scripted = _install(monkeypatch, replies)
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'comment every section'}]))
+    assert response.status_code == 200
+    body = response.json()
+    # Without the credit the loop would have broken with 7 executed
+    # calls; the full 10 ran and the reply is the scripted final.
+    assert body['mcpToolTurns'] == 10
+    assert body['pendingEdits'][0]['summary'].startswith('set [printer] max_accel')
+    assert len(scripted.payloads) == 5
+
+
+def test_flag_on_no_credit_dies_at_the_flat_cap(edit_flag, monkeypatch):
+    """The guard half: a model that burns the whole flat cap on searches
+    and only tries an edit AFTER the budget is spent never earns credit
+    — the loop exits at the cap and the edit never executes."""
+    monkeypatch.setattr(ai_routes, 'MAX_MCP_TOOL_TURNS_EDIT', 6)
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '0')
+    monkeypatch.delenv('KWC_CAP_GRANT_PER_APPLIED_WRITE', raising=False)
+    replies = [
+        _read_batch(0, n=3),     # calls 1-3
+        _read_batch(1, n=3),     # calls 4-6 = flat cap
+        _ok_edit_call('max_accel'),  # must NEVER execute
+        _final_reply('done'),
+    ]
+    scripted = _install(monkeypatch, replies)
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'comment every section'}]))
+    assert response.status_code == 200
+    body = response.json()
+    assert body['mcpToolTurns'] == 6
+    # 3 payloads: initial + batch 2 + the bottom-of-loop re-query whose
+    # reply (the edit) is discarded by the cap break — the loop re-queries
+    # before re-checking the cap, so one provider round is spent and
+    # thrown away. The EDIT NEVER EXECUTED is the assertion that matters.
+    assert len(scripted.payloads) == 3
+    assert body['pendingEdits'] is None
+
+
+def test_flag_on_failed_writes_never_earn_credit(edit_flag, monkeypatch):
+    """Same shape as the extension test, but the edit FAILS: zero
+    credit, so the loop dies at the flat cap mid-script."""
+    monkeypatch.setattr(ai_routes, 'MAX_MCP_TOOL_TURNS_EDIT', 6)
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '0')
+    monkeypatch.delenv('KWC_CAP_GRANT_PER_APPLIED_WRITE', raising=False)
+    replies = [
+        _read_batch(0, n=3),
+        _text_tool_call('config_edit', _failing_edit_args(0)),  # fails: +0
+        _read_batch(1, n=3),   # calls 5-7
+        _read_batch(2, n=3),   # must NEVER execute
+        _final_reply('done'),
+    ]
+    scripted = _install(monkeypatch, replies)
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'comment every section'}]))
+    assert response.status_code == 200
+    body = response.json()
+    # Without credit: cap 6, loop breaks with 7 executed (last batch
+    # ran because the counter is checked at the loop top).
+    assert body['mcpToolTurns'] == 7
+    assert len(scripted.payloads) == 4
+    assert body['pendingEdits'] is None
+
+
+def test_flag_on_runaway_ceiling_bounds_the_credit(edit_flag, monkeypatch):
+    """The credit relaxes the TURN cap, never the absolute per-request
+    op ceiling: writes keep granting credit but 12 executed calls stop
+    the loop silently."""
+    monkeypatch.setattr(ai_routes, 'MAX_MCP_TOOL_TURNS_EDIT', 6)
+    monkeypatch.setattr(ai_routes, 'MAX_TOOL_OPS_PER_REQUEST', 12)
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '0')
+    monkeypatch.delenv('KWC_CAP_GRANT_PER_APPLIED_WRITE', raising=False)
+    replies = []
+    for b in range(13):
+        # Distinct add_section targets: a repeated (file, section, key)
+        # would hit the duplicate-target guard (no credit) and break
+        # the test's point. 13 rounds so the ceiling (12) is what
+        # stops the loop — a scripted-replies-exhausted stop would
+        # prove nothing.
+        replies.append({'choices': [{'message': {'content': 'Adding.\n\n'
+                + '```tool\n' + json.dumps({'name': 'config_edit',
+                                            'arguments': {
+                                                'file': 'printer.cfg',
+                                                'op': 'add_section',
+                                                'section': f'gcode_macro c{b}',
+                                                'text': 'gcode:\n  G4 P1'}})
+                + '\n```'}}]})
+    replies.append(_final_reply('done'))
+    scripted = _install(monkeypatch, replies)
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'set a lot of keys'}]))
+    assert response.status_code == 200
+    body = response.json()
+    # Credit would allow 6 + 5*n indefinitely; the ceiling stops it at
+    # the first loop-top check with >= 12 executed calls.
+    assert len(body['toolCalls']) <= 12 + 1
+    assert len(body['toolCalls']) >= 12
+
+
 def test_flag_on_thrash_soft_lands_and_suppresses_prose_nudge(edit_flag, monkeypatch):
     """End-to-end: past the budget the turn still ends with prose (never an
     error), and the prose nudge is suppressed — the loop just told the

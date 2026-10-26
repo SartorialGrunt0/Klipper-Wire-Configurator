@@ -653,6 +653,34 @@ def thrash_budget() -> int:
         return THRASH_BUDGET_DEFAULT
 
 
+# ── work-earned tool-cap credit (2026-10-26) ──────────────────────────
+# The flat edit turn cap charged WORK: a 160-section comment-every-section
+# dogfood died at exactly tool_turns=50 mid-batch with a stub final reply
+# (live log 06:05/06:12). Same manufacturing defect the THRASH budget
+# fixed for the write cap — the flat number punishes correct work. The
+# economy is now: the flat cap is still fully chargeable to EVERYTHING
+# (reads, searches, failed writes), but every config_edit/config_write
+# CALL that applied at least one op raises the edit turn cap by this
+# grant. A model that only searches and fails never earns credit and
+# still dies at the flat cap; a model getting work done extends its own
+# budget. Batches grant per CALL, not per op (a 32-op batch = +5, not
+# +160) — call-granting keeps the runaway math boring while the 500-op
+# per-request ceiling and the thrash budget stay the real guards.
+# `KWC_CAP_GRANT_PER_APPLIED_WRITE` overrides; 0 = flat cap (A/B arm).
+CAP_GRANT_PER_APPLIED_WRITE_DEFAULT = 5
+
+
+def cap_grant_per_applied_write() -> int:
+    """Tool-turn cap units granted per applied write call (<=0 = flat)."""
+    raw = _os.environ.get("KWC_CAP_GRANT_PER_APPLIED_WRITE", "").strip()
+    if not raw:
+        return CAP_GRANT_PER_APPLIED_WRITE_DEFAULT
+    try:
+        return int(raw)
+    except ValueError:
+        return CAP_GRANT_PER_APPLIED_WRITE_DEFAULT
+
+
 
 
 # ── Change-set display helpers (post-hoc review, 2026-10-02) ───────────
@@ -1005,6 +1033,12 @@ class EditSession:
         # Fact source for the over-budget directive (and the Step-4
         # confab guard): per-call write failures, not units.
         self.write_failures = 0
+        # Work-earned cap credit (2026-10-26): write CALLS (batches
+        # count once) that applied at least one op this request. The
+        # loop raises the edit turn cap by cap_grant_per_applied_write()
+        # per unit — accepted work buys back limit, pure search/failure
+        # never does. Reset wholesale by apply_steer.
+        self.applied_write_calls = 0
         # R1 batch tagging: targets (op+file+section) that FAILED earlier
         # this request. A batch entry succeeding one of these is a
         # failed-then-retried op — the one batch shape whose realized
@@ -1236,6 +1270,7 @@ class EditSession:
         self.thrash_units = 0
         self.read_calls = 0
         self.write_failures = 0
+        self.applied_write_calls = 0
         self._failed_targets.clear()
         self._open_failures.clear()
         self._last_file = None
@@ -1672,6 +1707,10 @@ class EditSession:
         if kickback is not None:
             return kickback, None
         results, _cur, last_result = self._batch_engine(name, batch, commit=True)
+        # Work-earned cap credit: per CALL, when the batch applied at
+        # least one op (a fully-failed batch earns nothing).
+        if last_result is not None:
+            self.applied_write_calls += 1
         # Live-staging details: commit() already advanced session state,
         # so the details for the LAST touched file carry the CUMULATIVE
         # net text — exactly what the editor pane consumes mid-request.
@@ -1803,6 +1842,8 @@ class EditSession:
             return kick, None
 
         self.commit(new_state, name, result, raw_op=op)
+        # Work-earned cap credit: this call applied one op.
+        self.applied_write_calls += 1
         return _lean_success_content(name, result), self._details_for(name, result)
 
     def prepare(

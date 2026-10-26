@@ -333,7 +333,15 @@ up*. The current design charges waste only:
   writes are blocked. Steering resets it.
 - Turn caps of 10 (read-only) / 50 (edit-capable) plus an invisible absolute
   ceiling of 500 executed tool calls per request that announces nothing and
-  only ever logs a harness-bug line.
+  only ever logs a harness-bug line. The edit cap is the one number that
+  still charges *everything* — so an **accepted write buys it back**: every
+  `config_edit`/`config_write` call that applied at least one op raises the
+  cap by +5 for the rest of the request (`KWC_CAP_GRANT_PER_APPLIED_WRITE`,
+  0 = flat A/B arm). A model that only searches and fails still dies at the
+  flat cap; a model getting work done extends its own budget (the
+  160-section comment-every-section dogfood died at exactly 50 mid-batch).
+  Batches grant per call, not per op. Steering rebases the cap with the
+  session counters.
 - A malformed tool call is never executed and never quoted back: mechanical
   recovery is attempted first (fenced calls, smart quotes, python-call
   shapes), then one format-correction re-prompt, then the empty-reply
