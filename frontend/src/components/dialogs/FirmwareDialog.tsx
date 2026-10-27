@@ -1712,10 +1712,10 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
               <button
                 onClick={() => void (flashJobActive ? handleCancelJob(activeTarget) : handleFlash(activeTarget))}
                 disabled={flashJobActive ? false : flashButtonDisabled}
-                className={`inline-flex min-w-[5.75rem] justify-center rounded-md px-4 py-2 text-xs font-semibold text-black transition-colors ${
+                className={`inline-flex min-w-[5.75rem] justify-center rounded-md px-4 py-2 text-xs font-semibold transition-colors ${
                   flashJobActive
-                    ? 'bg-red-500 hover:bg-red-400'
-                    : 'bg-emerald-500 hover:bg-emerald-400 disabled:bg-[var(--color-bg-tertiary)] disabled:text-[var(--color-text-secondary)] disabled:hover:bg-[var(--color-bg-tertiary)]'
+                    ? 'bg-red-500 text-black hover:bg-red-400'
+                    : 'bg-green-600 text-white hover:bg-green-700 disabled:bg-[var(--color-bg-tertiary)] disabled:text-[var(--color-text-secondary)] disabled:hover:bg-[var(--color-bg-tertiary)]'
                 }`}
               >
                 {flashLabel}
@@ -2175,7 +2175,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
               <button
                 type="button"
                 onClick={() => void confirmFlash()}
-                className="inline-flex min-w-[5.75rem] justify-center rounded-md bg-emerald-500 px-4 py-2 text-xs font-semibold text-black transition-colors hover:bg-emerald-400"
+                className="inline-flex min-w-[5.75rem] justify-center rounded-md bg-green-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-green-700"
               >
                 Flash
               </button>
