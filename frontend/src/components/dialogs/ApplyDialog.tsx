@@ -348,7 +348,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
       className="w-full flex items-start gap-2 px-2 py-1.5 text-left rounded-md hover:bg-[var(--color-bg-primary)] disabled:cursor-default disabled:opacity-60"
     >
       <span
-        className={`mt-1 w-2 h-2 rounded-full shrink-0 ${kind === 'error' ? 'bg-[var(--color-error)]' : 'bg-[var(--color-warning)]'}`}
+        className={`mt-1 w-2 h-2 rounded-full shrink-0 ${kind === 'error' ? 'bg-red-500' : 'bg-[var(--color-warning)]'}`}
       />
       <span className="flex-1 min-w-0">
         <span className="block text-xs text-[var(--color-text-primary)] truncate">{f.message}</span>
@@ -897,7 +897,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                         {findings.length > 0 && (
                           <span className={`text-[10px] px-1.5 py-0.5 rounded-full text-white ${
                             errorCount > 0
-                              ? 'bg-[var(--color-error)]'
+                              ? 'bg-red-600'
                               : 'bg-[var(--color-warning)]'
                           }`}>
                             {findings.length} finding{findings.length !== 1 ? 's' : ''}
