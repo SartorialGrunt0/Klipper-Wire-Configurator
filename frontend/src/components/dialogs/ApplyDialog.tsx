@@ -895,10 +895,10 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                           </span>
                         )}
                         {findings.length > 0 && (
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full text-white ${
                             errorCount > 0
-                              ? 'bg-red-500/20 text-red-400'
-                              : 'bg-[var(--color-warning)]/20 text-[var(--color-warning)]'
+                              ? 'bg-[var(--color-error)]'
+                              : 'bg-[var(--color-warning)]'
                           }`}>
                             {findings.length} finding{findings.length !== 1 ? 's' : ''}
                           </span>
@@ -938,7 +938,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                         <div className="mt-1.5 rounded-lg border border-[var(--color-bg-tertiary)] overflow-hidden">
                           <div className="flex items-center justify-between px-2 py-1 bg-[var(--color-bg-primary)]">
                             <span className="text-[10px] font-semibold text-[var(--color-text-secondary)]">
-                              Validation findings ({findings.length})
+                              Validation findings
                             </span>
                             <span className="text-[10px] text-[var(--color-text-secondary)]">
                               click a finding to jump to it
