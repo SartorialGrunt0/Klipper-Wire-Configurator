@@ -189,6 +189,16 @@ body {
   }
 }
 
+/* Native checkboxes/radios inherit the browser's `accent-color`, which on
+   most systems is the OS theme colour — so the same checked box read green
+   in one menu (native input) and blue in another (the toolbar's custom
+   accent squares). Pin every native control to the app accent so checked =
+   blue with a white check everywhere, matching the custom squares. */
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--color-accent);
+}
+
 /* Scrollbar styling */
 ::-webkit-scrollbar {
   width: 8px;
