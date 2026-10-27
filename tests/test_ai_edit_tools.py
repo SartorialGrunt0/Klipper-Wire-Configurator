@@ -30,7 +30,8 @@ from main import app  # noqa: E402
 from services.ai_edit_tools import (  # noqa: E402
     EDIT_TOOL_NAMES,
     EDIT_TOOL_SPECS,
-    EDIT_WRITE_CAP_DEFAULT,
+    READ_GRACE,
+    THRASH_BUDGET_DEFAULT,
     EditSession,
 )
 
@@ -115,7 +116,7 @@ def edit_flag(monkeypatch):
     are product behavior and the skill gate is unlocked per-request via
     editSkill=True in _chat_payload. Kept so gate-flow tests can still
     clear stray experiment env."""
-    monkeypatch.delenv('KWC_EDIT_WRITE_CAP', raising=False)
+    monkeypatch.delenv('KWC_THRASH_BUDGET', raising=False)
 
 
 class _ScriptedClient:
@@ -515,12 +516,13 @@ def test_flag_on_edit_applies_and_returns_pending_edits(edit_flag, monkeypatch):
     assert '"diff"' not in str(result_msgs[0]['content'])
 
 
-# ── Phase-5 per-request write-attempt cap (soft landing) ────────────────
-# The cap targets THRASH (a model re-issuing writes after kickbacks with
-# nothing staged), never legitimate multi-op work. Crossing it must be a
-# soft landing: the call is refused without touching state, the model is
-# ordered to stop editing and report, and the conversation still ends with
-# prose — plus the staged set so far, which stays intact.
+# ── per-request THRASH budget (soft landing; 2026-10-16 rework) ────────
+# The budget charges WASTE (failed writes, reads past grace, correction
+# and empty re-prompts), never successful work. Crossing it is a soft
+# landing: the call is refused without touching state, the model gets
+# facts + honesty clauses — NEVER a stop order (the old "no further write
+# calls will be" text manufactured the prose-fallback symptom) — and the
+# conversation still ends with prose plus the staged set, intact.
 
 def _failing_edit_args(i: int) -> dict:
     """A write call that always kickbacks (unknown section)."""
@@ -528,90 +530,378 @@ def _failing_edit_args(i: int) -> dict:
             'key': 'max_accel', 'value': '3000'}
 
 
-def test_session_write_cap_soft_lands(monkeypatch):
-    monkeypatch.delenv('KWC_EDIT_WRITE_CAP', raising=False)
+def _ok_edit_args(key: str, value: str = '3000') -> dict:
+    """A write call that stages successfully."""
+    return {'file': 'printer.cfg', 'op': 'set_param', 'section': 'printer',
+            'key': key, 'value': value}
+
+
+def test_session_failed_writes_charge_until_thrash_budget_spent(monkeypatch):
+    monkeypatch.delenv('KWC_THRASH_BUDGET', raising=False)
     session = EditSession(_ctx())
-    for i in range(EDIT_WRITE_CAP_DEFAULT):
+    # Default budget: failures charge one unit each; while within it the
+    # calls run and kick back normally.
+    for i in range(THRASH_BUDGET_DEFAULT):
         content, details = session.execute(
             {'name': 'config_edit', 'arguments': _failing_edit_args(i)})
-        assert 'WRITE LIMIT REACHED' not in content
+        assert 'WASTE BUDGET SPENT' not in content
         assert 'FAILED' in content and details is None
     assert session.last_write_outcome == 'correctable'
+    assert session.thrash_units == THRASH_BUDGET_DEFAULT
+    assert session.write_failures == THRASH_BUDGET_DEFAULT
 
+    # One more failure spends over the budget...
     content, details = session.execute(
         {'name': 'config_edit', 'arguments': _failing_edit_args(99)})
     assert details is None
-    assert 'WRITE LIMIT REACHED' in content
-    assert 'Stop calling write tools' in content
+    assert 'FAILED' in content
+    assert session.thrash_units == THRASH_BUDGET_DEFAULT + 1
+
+    # ...and the NEXT write call soft-lands with the facts.
+    content, details = session.execute(
+        {'name': 'config_edit', 'arguments': _failing_edit_args(100)})
+    assert details is None
+    assert 'WASTE BUDGET SPENT' in content
+    assert f'{THRASH_BUDGET_DEFAULT + 1} failed write calls' in content
+    # Design law: facts + honesty clauses, NEVER a stop order.
+    assert 'no further write calls' not in content
+    assert 'Stop calling write tools' not in content
+    assert 'Never claim a change was staged' in content
     assert session.last_write_outcome == 'budget'
     assert session.pending_edits == []
-    assert session.edit_attempts == EDIT_WRITE_CAP_DEFAULT + 1
+    # edit_attempts stays informational: every call counted, gating or not.
+    # +2: the (budget+1)th failure ran, the soft-landed call never reached
+    # the apply path but was still an attempt (informational count).
+    assert session.edit_attempts == THRASH_BUDGET_DEFAULT + 2
 
 
-def test_session_write_cap_keeps_earlier_staged_work(monkeypatch):
-    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '2')
+def test_session_successful_writes_never_charge(monkeypatch):
+    """The load-bearing inversion: 60 SUCCESSFUL ops spend zero waste —
+    work is free, the reviewable state change is the point."""
+    monkeypatch.delenv('KWC_THRASH_BUDGET', raising=False)
     session = EditSession(_ctx())
-    # A real staged edit, then enough failures to cross the cap.
-    session.execute({'name': 'config_edit', 'arguments': {
-        'file': 'printer.cfg', 'op': 'set_param', 'section': 'printer',
-        'key': 'max_accel', 'value': '3000'}})
+    for i in range(60):
+        content, details = session.execute({'name': 'config_edit', 'arguments': {
+            'file': 'printer.cfg', 'op': 'add_section',
+            'section': f'gcode_macro bulk{i}', 'text': 'gcode:\n  G4 P1'}})
+        assert 'WASTE BUDGET SPENT' not in content
+        assert details is not None
+    assert session.thrash_units == 0
+    assert session.edit_attempts == 60
+    assert len(session.edit_records) == 60
+
+
+def test_session_read_grace_charges_only_overflow():
+    session = EditSession(_ctx())
+    for _ in range(READ_GRACE):
+        assert session.charge_read() is False
+    assert session.thrash_units == 0
+    assert session.charge_read() is True   # 11th read
+    assert session.charge_read() is True   # 12th read
+    assert session.thrash_units == 2
+    assert session.read_calls == READ_GRACE + 2
+
+
+def test_session_blocked_identical_call_charges():
+    """A call refused by the 3x identical-failure ladder is wasted work:
+    it charges like any other failure."""
+    session = EditSession(_ctx())
+    args = {'file': 'printer.cfg', 'op': 'set_param', 'section': 'nope',
+            'key': 'max_accel', 'value': '3000'}
+    for _ in range(3):
+        session.execute({'name': 'config_edit', 'arguments': args})
+    assert session.thrash_units == 3
+    content, details = session.execute({'name': 'config_edit',
+                                        'arguments': args})
+    assert 'BLOCKED' in content and details is None
+    assert session.thrash_units == 4
+
+
+def test_session_charge_waste_api():
+    session = EditSession(_ctx())
+    session.charge_waste()          # malformed re-prompt (loop-side)
+    session.charge_waste()          # empty re-prompt (loop-side)
+    assert session.thrash_units == 2
+
+
+def test_session_thrash_budget_keeps_earlier_staged_work(monkeypatch):
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '2')
+    session = EditSession(_ctx())
+    # A real staged edit — FREE — then enough failures to spend the budget.
+    session.execute({'name': 'config_edit', 'arguments':
+                     _ok_edit_args('max_accel')})
+    assert session.thrash_units == 0
     session.execute({'name': 'config_edit', 'arguments': _failing_edit_args(1)})
+    session.execute({'name': 'config_edit', 'arguments': _failing_edit_args(2)})
+    assert session.thrash_units == 2
+    # Within budget (2 <= 2) the next call still runs...
     content, _ = session.execute(
-        {'name': 'config_edit', 'arguments': _failing_edit_args(2)})
-    assert 'WRITE LIMIT REACHED' in content
-    # The approved set so far is untouched by the cap.
+        {'name': 'config_edit', 'arguments': _failing_edit_args(3)})
+    assert 'WASTE BUDGET SPENT' not in content and 'FAILED' in content
+    # ...and the one after it soft-lands.
+    content, _ = session.execute(
+        {'name': 'config_edit', 'arguments': _failing_edit_args(4)})
+    assert 'WASTE BUDGET SPENT' in content
+    # The staged work is untouched by the budget, and the directive says
+    # so with exact counts.
     payload = session.pending_edits_payload()
     assert len(payload) == 1 and 'max_accel: 3000' in payload[0]['newText']
+    assert '1 file change already staged remains awaiting' in content
+    assert '3 failed write calls' in content
 
 
-def test_session_write_cap_env_override_and_disable(monkeypatch):
-    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '2')
+def test_session_thrash_budget_env_override_and_disable(monkeypatch):
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '2')
     session = EditSession(_ctx())
-    for i in range(2):
+    for i in range(3):
         session.execute({'name': 'config_edit', 'arguments': _failing_edit_args(i)})
     content, _ = session.execute(
         {'name': 'config_edit', 'arguments': _failing_edit_args(3)})
-    assert 'WRITE LIMIT REACHED' in content
+    assert 'WASTE BUDGET SPENT' in content
 
     # 0 = uncapped (the escape/A-B arm) — the guards, not the budget, then
     # own the loop.
-    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '0')
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '0')
     session = EditSession(_ctx())
-    for i in range(EDIT_WRITE_CAP_DEFAULT + 3):
+    for i in range(THRASH_BUDGET_DEFAULT + 3):
         content, _ = session.execute(
             {'name': 'config_edit', 'arguments': _failing_edit_args(i)})
-    assert 'WRITE LIMIT REACHED' not in content
+    assert 'WASTE BUDGET SPENT' not in content
     assert session.last_write_outcome == 'correctable'
 
 
-def test_prepare_obeys_write_cap(monkeypatch):
+def test_prepare_obeys_thrash_budget(monkeypatch):
     # The approval path shares the session counter: a card is never opened
     # for a write the budget has already refused.
-    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '1')
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '1')
     session = EditSession(_ctx())
     content, result, state = session.prepare(
         {'name': 'config_edit', 'arguments': _failing_edit_args(0)})
     assert result is None and state is None and 'FAILED' in content
+    # Budget check runs at call entry (<= cap): the failure above spent
+    # exactly 1 of 1, so one more call still runs — and spends over.
     content, result, state = session.prepare(
         {'name': 'config_edit', 'arguments': _failing_edit_args(1)})
+    assert result is None and state is None and 'FAILED' in content
+    # Now spent over: the next prepare() soft-lands, no card state.
+    content, result, state = session.prepare(
+        {'name': 'config_edit', 'arguments': _failing_edit_args(2)})
     assert result is None and state is None
-    assert 'WRITE LIMIT REACHED' in content
+    assert 'WASTE BUDGET SPENT' in content
     assert session.last_write_outcome == 'budget'
 
 
-def test_flag_on_write_cap_soft_lands_and_suppresses_prose_nudge(edit_flag, monkeypatch):
-    """End-to-end: past the cap the turn still ends with prose (never an
-    error), and the prose nudge is suppressed — the loop just ORDERED the
-    model to summarize, so a ```cfg block in that answer is the requested
+def test_session_steer_resets_thrash_budget():
+    """A steer resets waste accounting: fresh budget, fresh read count,
+    fresh failure facts (pinning what batch accounting changes cover)."""
+    session = EditSession(_ctx())
+    for i in range(3):
+        session.execute({'name': 'config_edit', 'arguments': _failing_edit_args(i)})
+    for _ in range(READ_GRACE + 2):
+        session.charge_read()
+    session.charge_waste()
+    assert session.thrash_units > 0
+    session.apply_steer()
+    assert session.thrash_units == 0
+    assert session.read_calls == 0
+    assert session.write_failures == 0
+    assert session.edit_attempts == 0
+
+
+# ── work-earned cap credit (2026-10-26) ────────────────────────────────
+
+def test_session_applied_write_calls_counter(monkeypatch):
+    """Credit counts write CALLS that applied >=1 op: a batch counts
+    once, failures and fully-failed batches count zero, steer resets."""
+    monkeypatch.delenv('KWC_THRASH_BUDGET', raising=False)
+    session = EditSession(_ctx())
+    assert session.applied_write_calls == 0
+    # Successful single op = +1.
+    session.execute({'name': 'config_edit', 'arguments': _ok_edit_args('max_accel')})
+    assert session.applied_write_calls == 1
+    # Failed write = +0.
+    session.execute({'name': 'config_edit', 'arguments': _failing_edit_args(0)})
+    assert session.applied_write_calls == 1
+    # Batch applying 2 ops = +1 CALL, not +2.
+    session.execute({'name': 'config_edit', 'arguments': {
+        'file': 'printer.cfg', 'ops': [
+            {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity', 'value': '300'},
+            {'op': 'set_param', 'section': 'printer', 'key': 'max_accel', 'value': '4000'}]}})
+    assert session.applied_write_calls == 2
+    # Fully-failed batch = +0.
+    session.execute({'name': 'config_edit', 'arguments': {
+        'file': 'printer.cfg', 'ops': [
+            {'op': 'set_param', 'section': 'nope1', 'key': 'k', 'value': '1'},
+            {'op': 'set_param', 'section': 'nope2', 'key': 'k', 'value': '1'}]}})
+    assert session.applied_write_calls == 2
+    # Partial batch STILL applied work = +1.
+    session.execute({'name': 'config_edit', 'arguments': {
+        'file': 'printer.cfg', 'ops': [
+            {'op': 'set_param', 'section': 'nope3', 'key': 'k', 'value': '1'},
+            {'op': 'set_param', 'section': 'printer', 'key': 'max_z_velocity', 'value': '10'}]}})
+    assert session.applied_write_calls == 3
+    session.apply_steer()
+    assert session.applied_write_calls == 0
+
+
+def test_cap_grant_env_override(monkeypatch):
+    from services.ai_edit_tools import (
+        CAP_GRANT_PER_APPLIED_WRITE_DEFAULT, cap_grant_per_applied_write)
+    monkeypatch.delenv('KWC_CAP_GRANT_PER_APPLIED_WRITE', raising=False)
+    assert cap_grant_per_applied_write() == CAP_GRANT_PER_APPLIED_WRITE_DEFAULT
+    monkeypatch.setenv('KWC_CAP_GRANT_PER_APPLIED_WRITE', '0')
+    assert cap_grant_per_applied_write() == 0
+    monkeypatch.setenv('KWC_CAP_GRANT_PER_APPLIED_WRITE', 'junk')
+    assert cap_grant_per_applied_write() == CAP_GRANT_PER_APPLIED_WRITE_DEFAULT
+
+
+def _read_batch(b: int, n: int = 2) -> dict:
+    """One turn emitting n UNIQUE reads (distinct args stay past the
+    repeat guard; each burns the flat cap without earning credit)."""
+    blocks = '\n'.join(
+        '```tool\n' + json.dumps({'name': 'read_user_config',
+                                  'arguments': {
+                                      'filename': 'printer.cfg',
+                                      'section': f'nope{b}_{i}'}})
+        + '\n```' for i in range(n))
+    return {'choices': [{'message': {'content': 'Reading.\n\n' + blocks}}]}
+
+
+def _ok_edit_call(key: str, value: str = '3000') -> dict:
+    return {'choices': [{'message': {'content': 'Editing.\n\n'
+            + '```tool\n' + json.dumps({'name': 'config_edit',
+                                        'arguments': _ok_edit_args(key, value)})
+            + '\n```'}}]}
+
+
+def test_flag_on_applied_writes_extend_the_turn_cap(edit_flag, monkeypatch):
+    """The 160-section dogfood shape: reads interleaved with committed
+    edits. Flat cap 6; without credit the loop would break mid-script
+    and the tail reads + reply never run. With credit, the applied edit
+    buys +5 and the full script completes with the work staged. Cap
+    pinned small so the test stays fast (behavior test, not a
+    default-value test)."""
+    monkeypatch.setattr(ai_routes, 'MAX_MCP_TOOL_TURNS_EDIT', 6)
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '0')  # thrash must not interfere
+    monkeypatch.delenv('KWC_CAP_GRANT_PER_APPLIED_WRITE', raising=False)
+    replies = [
+        _read_batch(0, n=3),        # calls 1-3
+        _ok_edit_call('max_accel'), # call 4 — earns +5 (cap 6 -> 11)
+        _read_batch(1, n=3),        # calls 5-7  (past flat cap 6)
+        _read_batch(2, n=3),        # calls 8-10
+        _final_reply('max_accel is now 3000.'),
+    ]
+    scripted = _install(monkeypatch, replies)
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'comment every section'}]))
+    assert response.status_code == 200
+    body = response.json()
+    # Without the credit the loop would have broken with 7 executed
+    # calls; the full 10 ran and the reply is the scripted final.
+    assert body['mcpToolTurns'] == 10
+    assert body['pendingEdits'][0]['summary'].startswith('set [printer] max_accel')
+    assert len(scripted.payloads) == 5
+
+
+def test_flag_on_no_credit_dies_at_the_flat_cap(edit_flag, monkeypatch):
+    """The guard half: a model that burns the whole flat cap on searches
+    and only tries an edit AFTER the budget is spent never earns credit
+    — the loop exits at the cap and the edit never executes."""
+    monkeypatch.setattr(ai_routes, 'MAX_MCP_TOOL_TURNS_EDIT', 6)
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '0')
+    monkeypatch.delenv('KWC_CAP_GRANT_PER_APPLIED_WRITE', raising=False)
+    replies = [
+        _read_batch(0, n=3),     # calls 1-3
+        _read_batch(1, n=3),     # calls 4-6 = flat cap
+        _ok_edit_call('max_accel'),  # must NEVER execute
+        _final_reply('done'),
+    ]
+    scripted = _install(monkeypatch, replies)
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'comment every section'}]))
+    assert response.status_code == 200
+    body = response.json()
+    assert body['mcpToolTurns'] == 6
+    # 3 payloads: initial + batch 2 + the bottom-of-loop re-query whose
+    # reply (the edit) is discarded by the cap break — the loop re-queries
+    # before re-checking the cap, so one provider round is spent and
+    # thrown away. The EDIT NEVER EXECUTED is the assertion that matters.
+    assert len(scripted.payloads) == 3
+    assert body['pendingEdits'] is None
+
+
+def test_flag_on_failed_writes_never_earn_credit(edit_flag, monkeypatch):
+    """Same shape as the extension test, but the edit FAILS: zero
+    credit, so the loop dies at the flat cap mid-script."""
+    monkeypatch.setattr(ai_routes, 'MAX_MCP_TOOL_TURNS_EDIT', 6)
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '0')
+    monkeypatch.delenv('KWC_CAP_GRANT_PER_APPLIED_WRITE', raising=False)
+    replies = [
+        _read_batch(0, n=3),
+        _text_tool_call('config_edit', _failing_edit_args(0)),  # fails: +0
+        _read_batch(1, n=3),   # calls 5-7
+        _read_batch(2, n=3),   # must NEVER execute
+        _final_reply('done'),
+    ]
+    scripted = _install(monkeypatch, replies)
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'comment every section'}]))
+    assert response.status_code == 200
+    body = response.json()
+    # Without credit: cap 6, loop breaks with 7 executed (last batch
+    # ran because the counter is checked at the loop top).
+    assert body['mcpToolTurns'] == 7
+    assert len(scripted.payloads) == 4
+    assert body['pendingEdits'] is None
+
+
+def test_flag_on_runaway_ceiling_bounds_the_credit(edit_flag, monkeypatch):
+    """The credit relaxes the TURN cap, never the absolute per-request
+    op ceiling: writes keep granting credit but 12 executed calls stop
+    the loop silently."""
+    monkeypatch.setattr(ai_routes, 'MAX_MCP_TOOL_TURNS_EDIT', 6)
+    monkeypatch.setattr(ai_routes, 'MAX_TOOL_OPS_PER_REQUEST', 12)
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '0')
+    monkeypatch.delenv('KWC_CAP_GRANT_PER_APPLIED_WRITE', raising=False)
+    replies = []
+    for b in range(13):
+        # Distinct add_section targets: a repeated (file, section, key)
+        # would hit the duplicate-target guard (no credit) and break
+        # the test's point. 13 rounds so the ceiling (12) is what
+        # stops the loop — a scripted-replies-exhausted stop would
+        # prove nothing.
+        replies.append({'choices': [{'message': {'content': 'Adding.\n\n'
+                + '```tool\n' + json.dumps({'name': 'config_edit',
+                                            'arguments': {
+                                                'file': 'printer.cfg',
+                                                'op': 'add_section',
+                                                'section': f'gcode_macro c{b}',
+                                                'text': 'gcode:\n  G4 P1'}})
+                + '\n```'}}]})
+    replies.append(_final_reply('done'))
+    scripted = _install(monkeypatch, replies)
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'set a lot of keys'}]))
+    assert response.status_code == 200
+    body = response.json()
+    # Credit would allow 6 + 5*n indefinitely; the ceiling stops it at
+    # the first loop-top check with >= 12 executed calls.
+    assert len(body['toolCalls']) <= 12 + 1
+    assert len(body['toolCalls']) >= 12
+
+
+def test_flag_on_thrash_soft_lands_and_suppresses_prose_nudge(edit_flag, monkeypatch):
+    """End-to-end: past the budget the turn still ends with prose (never an
+    error), and the prose nudge is suppressed — the loop just told the
+    model to rework/report, so a ```cfg block in that answer is the
     report, not an inert draft to nudge back into another write.
 
-    Cap pinned to 3 (behavior test, not a default-value test — the e2e
+    Budget pinned to 2 (behavior test, not a default-value test — the e2e
     loop is bounded by MAX_MCP_TOOL_TURNS_EDIT, so scripting
-    EDIT_WRITE_CAP_DEFAULT calls would exhaust the turn cap first)."""
-    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '3')
-    cap = 3
+    THRASH_BUDGET_DEFAULT failures would exhaust turns first)."""
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '2')
     replies = [_text_tool_call('config_edit', _failing_edit_args(i))
-               for i in range(cap + 1)]
+               for i in range(4)]
     replies.append(_final_reply(
         'I could not apply that:\n\n```cfg\n[printer]\nmax_accel: 9999\n```'))
     scripted = _install(monkeypatch, replies)
@@ -619,21 +909,22 @@ def test_flag_on_write_cap_soft_lands_and_suppresses_prose_nudge(edit_flag, monk
         [{'role': 'user', 'content': 'set max_accel to 9999'}]))
     assert response.status_code == 200
     body = response.json()
-    # Attempts 1..cap ran; the (cap+1)th was refused with the directive.
-    assert body['editAttempts'] == cap + 1
+    # Calls 1-3 ran (3 failures spent the 2-unit budget); the 4th soft-landed.
+    assert body['editAttempts'] == 4
     assert body['pendingEdits'] is None
-    assert 'WRITE LIMIT REACHED' in str(scripted.payloads[-1]['messages'])
+    assert 'WASTE BUDGET SPENT' in str(scripted.payloads[-1]['messages'])
+    assert 'no further write calls' not in str(scripted.payloads[-1]['messages'])
     # One provider call per scripted reply — a nudge would add another turn.
-    assert len(scripted.payloads) == cap + 2
+    assert len(scripted.payloads) == 5
     assert 'Call the tool NOW' not in str(scripted.payloads[-1]['messages'])
 
 
-def test_flag_on_without_cap_still_nudges_inert_draft(edit_flag, monkeypatch):
-    """Control for the test above: with the cap disabled the same scripted
+def test_flag_on_without_thrash_budget_still_nudges_inert_draft(edit_flag, monkeypatch):
+    """Control for the test above: with the budget disabled the same scripted
     run ends on a CORRECTABLE outcome, so the cfg-block nudge DOES fire —
     the suppression is attributable to the 'budget' outcome, not to the
     fixture being inert."""
-    monkeypatch.setenv('KWC_EDIT_WRITE_CAP', '0')
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '0')
     replies = [_text_tool_call('config_edit', _failing_edit_args(i))
                for i in range(3)]
     replies.append(_final_reply(
@@ -643,6 +934,93 @@ def test_flag_on_without_cap_still_nudges_inert_draft(edit_flag, monkeypatch):
         [{'role': 'user', 'content': 'set max_accel to 9999'}]))
     assert response.status_code == 200
     assert 'Call the tool NOW' in str(scripted.payloads[-1]['messages'])
+
+
+def test_flag_on_over_budget_directive_names_reads(monkeypatch):
+    """The directive's facts come from the trace: reads past grace are
+    counted and named, so 'rework' has a concrete referent."""
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '1')
+    sections = ['printer'] + [f'stepper_{c}' for c in 'xy']
+    reads = [{'name': 'read_user_config',
+              'arguments': {'filename': 'printer.cfg', 'section': s}}
+             for s in sections]
+    # Pad to GRACE+3 distinct reads with doc queries.
+    reads += [{'name': 'search_user_configs',
+               'arguments': {'query': f'theme{i}'}} for i in range(9)]
+    assert len(reads) == READ_GRACE + 2
+    blocks = '\n'.join(
+        f'```tool\n{json.dumps(c)}\n```' for c in reads)
+    scripted = _install(monkeypatch, [
+        {'choices': [{'message': {'content': blocks}}]},
+        _text_tool_call('config_edit', _failing_edit_args(7)),
+        _final_reply('Reworking now.'),
+    ])
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'comment every section'}]))
+    assert response.status_code == 200
+    last_msgs = str(scripted.payloads[-1]['messages'])
+    assert 'WASTE BUDGET SPENT' in last_msgs
+    assert '2 read past the 10-read allowance' in last_msgs
+
+
+def test_flag_on_sixty_op_request_completes_in_one(monkeypatch):
+    """The standing repro inverted: 60 successful ops in ONE request.
+    The old 20-write cap made this arithmetically impossible; with waste-
+    only budgeting, successful ops are free and every row stages."""
+    monkeypatch.delenv('KWC_THRASH_BUDGET', raising=False)
+    def _batch(start: int) -> dict:
+        blocks = '\n'.join(
+            '```tool\n' + json.dumps({'name': 'config_edit', 'arguments': {
+                'file': 'printer.cfg', 'op': 'add_section',
+                'section': f'gcode_macro bulk{i}',
+                'text': 'gcode:\n  G4 P1'}})
+            + '\n```' for i in range(start, start + 20))
+        return {'choices': [{'message': {'content': blocks}}]}
+    scripted = _install(monkeypatch, [
+        _batch(0), _batch(20), _batch(40),
+        _final_reply('Added all 60 macros.'),
+    ])
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'add 60 macros'}]))
+    assert response.status_code == 200
+    body = response.json()
+    assert body['editAttempts'] == 60
+    change_set = body['changeSet']
+    assert len(change_set['edits']) == 60
+    assert not any(e['superseded'] for e in change_set['edits'])
+    assert 'WASTE BUDGET SPENT' not in json.dumps(body['toolCalls'])
+    assert len(scripted.payloads) == 4
+
+
+def test_flag_on_runaway_ceiling_stops_silent(monkeypatch):
+    """The invisible ceiling stops the loop WITHOUT telling the model
+    (no budget text, no directive) — it is a harness bug guard, not a
+    budget. Ceiling pinned to 12 executed calls; batches of 5 UNIQUE
+    reads (distinct args keep every call executing, past the repeat
+    guard). Reads past grace charge, but the budget is disabled so only
+    the ceiling can stop the loop."""
+    monkeypatch.setattr(ai_routes, 'MAX_TOOL_OPS_PER_REQUEST', 12)
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '0')  # budget must not interfere
+    def _batch(b: int) -> dict:
+        blocks = '\n'.join(
+            '```tool\n' + json.dumps({'name': 'read_user_config',
+                                      'arguments': {
+                                          'filename': 'printer.cfg',
+                                          'section': f'nope{b}_{i}'}})
+            + '\n```' for i in range(5))
+        return {'choices': [{'message': {'content': 'Reading.\n\n' + blocks}}]}
+    replies = [_batch(b) for b in range(3)]
+    replies.append(_final_reply('done'))
+    scripted = _install(monkeypatch, replies)
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'read everything'}]))
+    assert response.status_code == 200
+    # 3 batches x 5 = 15 executed: the 4th iteration sees 15 >= 12 and
+    # breaks at the loop top before another provider round.
+    body = response.json()
+    assert len(body['toolCalls']) == 15
+    assert len(scripted.payloads) <= 5
+    assert 'WASTE BUDGET SPENT' not in json.dumps(body['toolCalls'])
 
 
 def test_flag_on_kickback_loop_converges_in_two(edit_flag, monkeypatch):
@@ -1750,6 +2128,24 @@ _HW_MAIN = (
     '[idle_timeout]\ntimeout: 600\n')
 
 
+def test_list_hardware_overflow_lists_every_member():
+    """BULK-02 bank re-run (2026-10-17): the class-sweep law says cover
+    EVERY listed member, but the overflow branch printed only the first
+    _MATCH_CAP headers — the bank's 82 gcode_macro hits showed 30 and
+    printer.cfg's RESET_ACCEL was invisible to a law-abiding sweep.
+    Bodies stay capped; the MEMBER LIST must never be."""
+    from services.hardware_lookup import list_hardware, _MATCH_CAP
+    n = _MATCH_CAP + 5
+    cfg = "".join(f"[gcode_macro MACRO_{i}]\ngcode:\n    M117 {i}\n\n"
+                  for i in range(n))
+    cfg += "[gcode_macro LAST_ONE]\ngcode:\n    M117 tail\n"
+    out = list_hardware({'printer.cfg': cfg}, 'macro')
+    assert f"{n + 1} matches" in out
+    # every member listed in the sweep checklist, cap included
+    assert f"MACRO_{n - 1}" in out and "LAST_ONE" in out
+    assert "sweep checklist" in out
+
+
 def test_list_hardware_led_class_is_structural():
     from services.hardware_lookup import list_hardware
     out = list_hardware({'printer.cfg': _HW_MAIN, 'leds.cfg': _HW_LEDS},
@@ -1779,6 +2175,99 @@ def test_list_hardware_stepper_suffix_and_literal_type():
     literal = list_hardware(files, 'idle_timeout')
     assert '[idle_timeout]' in literal
     assert 'timeout: 600' in literal
+
+
+_HW_MIXED = (
+    '[mcu]\nserial: /dev/tty0\n'
+    '[mcu EBBCan]\ncanbus_uuid: aa\n'
+    '[stepper_x]\nstep_pin: PF13\n'
+    '[extruder]\nstep_pin: EBBCan:PD13\nrotation_distance: 5.78\n'
+    '[extruder_stepper my_extra]\nextruder: extruder\n'
+    '[tmc2209 extruder]\nuart_pin: PD12\n'
+    '[tmc2240 stepper_x]\ncs_pin: PG0\n'
+    '[heater_bed]\nheater_pin: PA0\n'
+    '[heater_fan hotend_fan]\npin: EBBCan:PA0\n'
+    '[multi_endstops stepper_z]\nstep_pin: PB3\n'
+    '[temperature_sensor mcu_temp]\nsensor_type: temperature_mcu\n'
+    '[gcode_macro FOO]\ngcode:\n    M106\n'
+    '[delayed_gcode boot]\ngcode:\n    M400\n'
+    '[respond]\n'
+    '[virtual_sdcard]\npath: /tmp\n')
+
+
+def test_list_hardware_stepper_class_excludes_extruder_with_note():
+    """Sir 2026-10-24: [extruder] drives a stepper motor but folding it
+    into the 'stepper' class would make every stepper sweep acquire the
+    filament path. Deterministic observation footer instead — names the
+    near-miss, never adds the member."""
+    from services.hardware_lookup import list_hardware
+    out = list_hardware({'printer.cfg': _HW_MIXED}, 'stepper')
+    assert '[stepper_x]' in out
+    assert '## [extruder]' not in out
+    assert '# Note: [extruder]' in out
+    assert "NOT in the sweep above" in out
+    # no extruder in the project -> no note at all
+    plain = list_hardware({'printer.cfg': _HW_MAIN}, 'stepper')
+    assert 'Note:' not in plain
+
+
+def test_list_hardware_driver_class_and_natural_aliases():
+    """'driver'/'drivers' had no alias (only the literal group name
+    'stepper_driver' worked); hotend/nozzle/bed were unknown classes."""
+    from services.hardware_lookup import list_hardware
+    files = {'printer.cfg': _HW_MIXED}
+    for alias in ('driver', 'drivers'):
+        out = list_hardware(files, alias)
+        assert '[tmc2209 extruder]' in out and '[tmc2240 stepper_x]' in out
+        assert '[stepper_x]' not in out  # motors are not drivers
+    for alias in ('hotend', 'nozzle'):
+        out = list_hardware(files, alias)
+        assert '## [extruder]' in out and 'heater_bed' not in out
+    bed = list_hardware(files, 'bed')
+    assert '[heater_bed]' in bed
+    assert '[heater_fan hotend_fan]' not in bed
+
+
+def test_list_hardware_heater_class_excludes_heater_fan():
+    """The old 'heater' whole-word token swept [heater_fan ...], which
+    is a fan. The heater GROUP covers every real heater type."""
+    from services.hardware_lookup import list_hardware
+    out = list_hardware({'printer.cfg': _HW_MIXED}, 'heater')
+    assert '[heater_bed]' in out
+    assert '## [heater_fan hotend_fan]' not in out
+    fans = list_hardware({'printer.cfg': _HW_MIXED}, 'fan')
+    assert '[heater_fan hotend_fan]' in fans
+
+
+def test_list_hardware_macro_class_excludes_respond_and_vsd():
+    """The macro class used to ride the whole 'gcode' component_group,
+    so 'update every macro' claimed [respond] and [virtual_sdcard].
+    Macro membership is now base-type: gcode_macro/delayed_gcode."""
+    from services.hardware_lookup import list_hardware
+    for alias in ('macro', 'macros'):
+        out = list_hardware({'printer.cfg': _HW_MIXED}, alias)
+        assert '[gcode_macro FOO]' in out and '[delayed_gcode boot]' in out
+        assert '## [respond]' not in out
+        assert '## [virtual_sdcard]' not in out
+
+
+def test_list_hardware_endstop_matches_multi_endstops():
+    from services.hardware_lookup import list_hardware
+    out = list_hardware({'printer.cfg': _HW_MIXED}, 'endstop')
+    assert '[multi_endstops stepper_z]' in out
+
+
+def test_list_hardware_mcu_class_excludes_temp_sensor():
+    """The 'mcu' name token matched [temperature_sensor mcu_temp] —
+    a board sweep must not claim a temperature sensor."""
+    from services.hardware_lookup import list_hardware
+    for alias in ('mcu', 'board'):
+        out = list_hardware({'printer.cfg': _HW_MIXED}, alias)
+        assert '## [mcu]' in out and '[mcu EBBCan]' in out
+        assert '## [temperature_sensor mcu_temp]' not in out
+    # the temp sensor stays reachable via its own class
+    temps = list_hardware({'printer.cfg': _HW_MIXED}, 'temperature_sensor')
+    assert '[temperature_sensor mcu_temp]' in temps
 
 
 def test_list_hardware_unknown_type_and_summary():
@@ -2339,3 +2828,490 @@ def test_apply_between_failures_clears_stale_repeat_pressure():
     c4, d4 = es.execute(rename)
     assert 'BLOCKED' not in c4, c4
     assert d4 is not None, c4
+
+
+# ── Step 2: batch ops[] envelope (2026-10-16) ─────────────────────────
+def _batch_args(entries, file='printer.cfg'):
+    return {'name': 'config_edit',
+            'arguments': {'file': file, 'ops': entries}}
+
+
+def test_batch_sequential_evolution():
+    """Each entry sees the state the previous entry left: set then
+    re-set the SAME key in one batch — last write wins, no duplicate
+    veto mid-batch."""
+    session = EditSession(_ctx())
+    content, details = session.execute(_batch_args([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'},
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '400'},
+    ]))
+    assert 'applied 2 of 2 ops' in content
+    assert details is not None
+    assert 'max_velocity: 400' in details['newText']
+    assert 'max_velocity: 300' not in details['newText']
+
+
+def test_batch_per_index_feedback_format():
+    """The plan's pinned shape: failed entries are named by index with
+    the lean single-path error; applied entries stay committed."""
+    session = EditSession(_ctx())
+    content, details = session.execute(_batch_args([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'},
+        {'op': 'set_param', 'section': 'nope_missing', 'key': 'k',
+         'value': '1'},
+    ]))
+    assert 'applied 1 of 2 ops' in content
+    assert 'op[1]' in content
+    assert 'op[0]' not in content.split('Failed ops')[1]
+    assert details is not None  # partial commit still stages details
+
+
+def test_batch_identical_failures_render_once():
+    """BULK-05 bank autopsies (2026-10-23): a 26-op sweep where every op
+    hit the SAME error rendered the identical sentence 26 times (~2.6KB
+    of repeated text per call). Identical (op, section, error) failures
+    now collapse into ONE line naming the index range."""
+    session = EditSession(_ctx())
+    content, _ = session.execute(_batch_args([
+        {'op': 'set_param', 'section': 'nope_missing', 'key': f'k{i}',
+         'value': '1'} for i in range(26)
+    ]))
+    assert 'applied 0 of 26 ops' in content
+    fails_block = content.split('Failed ops')[1]
+    # one merged line, named by index range (the name appears twice on
+    # that line only because the error text quotes the section itself)
+    assert fails_block.strip().count('\n') == 1
+    assert 'op[0-25]' in fails_block
+    assert '(26 ops)' in fails_block
+
+
+def test_batch_mixed_failures_group_only_identical():
+    """Non-identical failures stay on their own lines; only exact
+    repeats merge, and the merge keeps the fix-ONLY-these contract."""
+    session = EditSession(_ctx())
+    content, _ = session.execute(_batch_args([
+        {'op': 'set_param', 'section': 'nope_a', 'key': 'k1', 'value': '1'},
+        {'op': 'set_param', 'section': 'nope_b', 'key': 'k2', 'value': '1'},
+        {'op': 'set_param', 'section': 'nope_b', 'key': 'k3', 'value': '1'},
+    ]))
+    fails_block = content.split('Failed ops')[1]
+    assert 'nope_a' in fails_block
+    assert 'op[1-2]' in fails_block  # ops 1-2 collapsed onto one line
+    assert 'op[0]' in fails_block
+    assert '(2 ops)' in fails_block
+
+
+def test_batch_validation_kickback_names_the_findings():
+    """BULK-04 bank re-run (2026-10-17): a failed batch entry said only
+    'failed validation after merging' — the concrete newErrors
+    ('Unknown parameter uart_pins…') surfaced ONLY on the single-op
+    path. Gemma re-sent the invented params 50+ times (the fix loop had
+    nothing to read) and burned the waste budget. The per-index kickback
+    must carry the findings."""
+    session = EditSession(_ctx())
+    content, _ = session.execute(_batch_args([
+        {'op': 'add_section', 'section': 'tmc2209 stepper_x',
+         'text': 'uart_pins: PC1\nrun_current: 0.8\ndriver_mod: td2_mod'},
+    ]))
+    assert 'op[0]' in content
+    assert 'uart_pin' in content          # the required-param finding
+    assert 'Unknown parameter' in content  # the unknown-param finding
+
+
+def test_batch_continue_on_failure_rows_land_per_op():
+    """3 entries, middle one bad: rows land for the good ones only, one
+    change-set row PER SUB-OP (never an envelope row)."""
+    session = EditSession(_ctx())
+    content, _ = session.execute(_batch_args([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'},
+        {'op': 'delete_section', 'section': 'ghost_section'},
+        {'op': 'add_section', 'section': 'gcode_macro batched',
+         'text': 'gcode:\n  G4 P1'},
+    ]))
+    assert 'applied 2 of 3 ops' in content
+    assert 'op[1]' in content
+    assert len(session.committed_ops) == 2
+    assert {e['op'] for e in session.committed_ops} == {
+        'set_param', 'add_section'}
+    # raw_op carries the SUB-OP, not the envelope
+    assert all('ops' not in e['raw_op'] for e in session.committed_ops)
+
+
+def test_batch_stringified_recovery_direct():
+    """Zed's deserialize_maybe_stringified: 'ops' arrives as a JSON
+    STRING (small-model emission). One relaxed parse; applies normally."""
+    session = EditSession(_ctx())
+    entries = json.dumps([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'}])
+    content, details = session.execute(
+        {'name': 'config_edit',
+         'arguments': {'file': 'printer.cfg', 'ops': entries}})
+    assert 'applied 1 of 1 ops' in content
+    assert details is not None and 'max_velocity: 300' in details['newText']
+
+
+def test_batch_stringified_recovery_text_protocol(monkeypatch):
+    """End-to-end through the text fence: the model emits ops as a
+    string inside the fence JSON."""
+    args = {'file': 'printer.cfg', 'ops': json.dumps([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'},
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_accel',
+         'value': '4000'}])}
+    block = '```tool\n' + json.dumps(
+        {'name': 'config_edit', 'arguments': args}) + '\n```'
+    _install(monkeypatch, [
+        {'choices': [{'message': {'content': 'Sure.\n\n' + block}}]},
+        _final_reply('Both changed.'),
+    ])
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'max_velocity 300 and max_accel 4000'}]))
+    assert response.status_code == 200
+    body = response.json()
+    assert body['editAttempts'] == 2
+    assert len(body['changeSet']['edits']) == 2
+
+
+def test_batch_accounting_is_per_op():
+    """edit_attempts moves per INDEX (work), the thrash charge moves per
+    FAILURE (waste): 2 good + 1 bad = +3 attempts, +1 waste unit."""
+    monkeypatch_env = None  # document: default budget
+    session = EditSession(_ctx())
+    before = session.thrash_units
+    content, _ = session.execute(_batch_args([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'},
+        {'op': 'set_param', 'section': 'ghost', 'key': 'k', 'value': '1'},
+        {'op': 'add_section', 'section': 'gcode_macro b2',
+         'text': 'gcode:\n  G4 P1'},
+    ]))
+    assert 'applied 2 of 3' in content
+    assert session.edit_attempts == 3
+    assert session.thrash_units == before + 1
+
+
+def test_batch_budget_recheck_stops_remaining_entries(monkeypatch):
+    """Budget spent MID-batch (from earlier waste): the remaining
+    entries stop un-attempted with a factual note; nothing charges,
+    nothing applies."""
+    monkeypatch.setenv('KWC_THRASH_BUDGET', '1')
+    session = EditSession(_ctx())
+    session.charge_waste(2)  # budget SPENT (over the 1-unit allowance)
+    content, details = session.execute(_batch_args([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'},
+        {'op': 'add_section', 'section': 'gcode_macro never',
+         'text': 'gcode:\n  G4 P1'},
+    ]))
+    # The CALL-level budget check fires first (both single and batch
+    # shapes): the model gets the WASTE BUDGET directive, zero applied.
+    assert 'WASTE BUDGET SPENT' in content
+    assert details is None
+    assert 'never' not in session.state.files['printer.cfg']
+
+
+def test_batch_oversize_guard_charged_once():
+    """MAX_OPS_PER_CALL is generation-limit insurance, not a work
+    budget: rejected as ONE failure (1 attempt, 1 waste unit)."""
+    from services.ai_edit_tools import MAX_OPS_PER_CALL
+    session = EditSession(_ctx())
+    entries = [{'op': 'set_param', 'section': 'printer',
+                'key': 'max_velocity', 'value': str(300 + i)}
+               for i in range(MAX_OPS_PER_CALL + 1)]
+    content, details = session.execute(_batch_args(entries))
+    assert details is None
+    assert 'the limit is' in content
+    assert session.edit_attempts == 1
+    assert session.thrash_units == 1
+
+
+def test_batch_bad_shape_kickback():
+    session = EditSession(_ctx())
+    content, details = session.execute(
+        {'name': 'config_edit',
+         'arguments': {'file': 'printer.cfg', 'ops': 'not json at all'}})
+    assert details is None
+    assert "must be a non-empty list" in content
+    content2, details2 = session.execute(
+        {'name': 'config_edit',
+         'arguments': {'file': 'printer.cfg', 'ops': []}})
+    assert details2 is None and "must be a non-empty list" in content2
+
+
+def test_single_op_back_compat_unchanged():
+    """The envelope is ADDITIVE: every single-op call works exactly as
+    before (op=..., no ops)."""
+    session = EditSession(_ctx())
+    content, details = session.execute(
+        {'name': 'config_edit', 'arguments': {
+            'file': 'printer.cfg', 'op': 'set_param',
+            'section': 'printer', 'key': 'max_velocity', 'value': '300'}})
+    assert details is not None and 'max_velocity: 300' in details['newText']
+    assert 'ops —' not in content  # NOT the batch shape's wording
+
+
+def test_prepare_batch_parity_full_apply_opens_aggregated_result():
+    """prepare() (gate path) runs the SAME engine: a fully applied batch
+    yields (content, aggregated result, preview state) with the session
+    UNTOUCHED until commit; the aggregated result carries op='batch' and
+    the cumulative diff."""
+    session = EditSession(_ctx())
+    content, result, preview = session.prepare(_batch_args([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'},
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_accel',
+         'value': '4000'},
+    ]))
+    assert 'applied 2 of 2 ops' in content
+    assert result is not None and result['op'] == 'batch'
+    assert preview is not None
+    assert 'max_velocity: 300' in preview.files['printer.cfg']
+    assert 'max_velocity: 300' not in session.state.files['printer.cfg']
+    assert result['diff'] and '+max_velocity: 300' in result['diff']
+
+
+def test_prepare_batch_partial_opens_no_card():
+    """A partially applied batch never opens a card over work the user
+    hasn't seen whole: kickback names the failed indices, nothing
+    staged."""
+    session = EditSession(_ctx())
+    content, result, preview = session.prepare(_batch_args([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'},
+        {'op': 'set_param', 'section': 'ghost', 'key': 'k', 'value': '1'},
+    ]))
+    assert result is None and preview is None
+    assert 'op[1]' in content
+    assert 'No card opened' in content
+    assert session.pending_edits == []
+
+
+def test_batch_revalidate_commit_lands_rows_per_subop():
+    """Gate-mode approve of a batch card: revalidate_and_commit replays
+    the SUB-OPS sequentially and commits one change-set row each —
+    committed_ops never sees the envelope (replay/undo shape)."""
+    session = EditSession(_ctx())
+    batch = EditSession.tool_call_to_op(
+        'config_edit', {'file': 'printer.cfg', 'ops': [
+            {'op': 'set_param', 'section': 'printer',
+             'key': 'max_velocity', 'value': '300'},
+            {'op': 'set_param', 'section': 'printer',
+             'key': 'max_accel', 'value': '4000'}]})
+    result = session.revalidate_and_commit(batch, None)
+    assert result['status'] != 'error'
+    assert len(session.committed_ops) == 2
+    assert 'max_velocity: 300' in session.state.files['printer.cfg']
+    assert 'max_accel: 4000' in session.state.files['printer.cfg']
+
+
+def test_batch_replay_undo_per_row():
+    """Mixed-batch undo inherits row-per-op: dropping ONE committed
+    sub-op's row from a keep-set replay leaves the other sub-op applied
+    (resolve_change_chain replays raw_ops, batch never entered it)."""
+    from services.ai_edit_tools import resolve_change_chain
+    session = EditSession(_ctx())
+    session.execute(_batch_args([
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_velocity',
+         'value': '300'},
+        {'op': 'set_param', 'section': 'printer', 'key': 'max_accel',
+         'value': '4000'},
+    ]))
+    assert len(session.edit_records) == 2
+    ids = [r['id'] for r in session.edit_records]
+    # Undo the FIRST row only: keep the second.
+    outcome = resolve_change_chain(
+        [(session, [ids[1]], 'req-1')], _ctx())
+    assert outcome['status'] == 'ok'
+    text = outcome['files']['printer.cfg']['content']
+    assert 'max_accel: 4000' in text
+    assert 'max_velocity: 300' not in text
+
+
+def test_comment_section_row_carries_canonical_header():
+    """BULK-02 bank run (2026-10-17): commenting '[gcode_macro PRINT_START]'
+    via the BARE macro name recorded the changeSet row as bare
+    'PRINT_START' — the recorder re-resolved the raw op against the
+    POST-apply state, where the header it just '#'ed is invisible. The
+    engine now carries the pre-apply canonical header through the result;
+    the row must show the FULL header (coverage criteria prefix-filter on
+    'gcode_macro')."""
+    session = EditSession(_ctx())
+    content, details = session.execute({
+        'name': 'config_edit',
+        'arguments': {'file': 'printer.cfg', 'op': 'comment_section',
+                      'section': 'PRINT_START'},
+    })
+    assert details is not None
+    rows = session.change_set_payload()['edits']
+    assert rows[-1]['op'] == 'comment_section'
+    assert rows[-1]['section'] == 'gcode_macro PRINT_START'
+    assert rows[-1]['superseded'] is False
+    # A follow-up uncomment of the SAME bare name supersedes the comment
+    # row (canonical identity), never a case/name-variant double row.
+    session.execute({
+        'name': 'config_edit',
+        'arguments': {'file': 'printer.cfg', 'op': 'uncomment_section',
+                      'section': 'PRINT_START'},
+    })
+    rows = session.change_set_payload()['edits']
+    ops = [(r['op'], r['section'], r['superseded']) for r in rows]
+    assert ('comment_section', 'gcode_macro PRINT_START', False) in ops
+
+
+def test_batch_surfaces_parity():
+    """The batching law reaches ALL FOUR model-facing surfaces (plan):
+    schema, tool snippet, both nudges, protocol prompt."""
+    from api.ai_routes import _EDIT_TOOL_SNIPPETS
+    from services.ai_edit_tools import (
+        EDIT_NUDGE_TEXT, EDIT_NUDGE_TEXT_NATIVE, EDIT_PROTOCOL_PROMPT,
+        EDIT_TOOL_SPECS)
+    schema = json.dumps(EDIT_TOOL_SPECS)
+    assert '"ops"' in schema
+    assert 'ops' in _EDIT_TOOL_SNIPPETS['config_edit']
+    assert '"ops"' in EDIT_NUDGE_TEXT
+    assert '"ops"' in EDIT_NUDGE_TEXT_NATIVE
+    assert 'ops[]' in EDIT_PROTOCOL_PROMPT
+    # Anti-elision law present where bodies are written
+    assert 'elide' in EDIT_PROTOCOL_PROMPT
+
+
+# ── realized-change reporting (R1, plan 2026-10-18) ─────────────────────
+#
+# Success results used to report INTENT ("{name} applied — {summary}")
+# while the realized per-line truth rode only on the UI details record.
+# Collateral damage (eaten comment blocks, absorbed blanks, swallowed
+# neighbours) was therefore invisible to the model: recognition gap.
+# R1: ops report the REALIZED change — mini-diff when small, an honest
+# collapse with verbatim removed lines when big.
+
+MACRO_CFG = """[printer]
+kinematics: cartesian
+max_velocity: 200
+max_accel: 1000
+
+[gcode_macro LEVEL_BED]
+gcode:
+    G28
+    #rename_existing: _BED_MESH_CALIBRATE
+    M106 S255
+
+# a trailing note the delete must name
+
+[firmware_retraction]
+retract_length: 0.6
+retract_speed: 20
+"""
+
+
+def _macro_ctx():
+    return {'printer.cfg': {'content': MACRO_CFG}}
+
+
+class TestRealizedChangeReporting:
+    def test_small_patch_shows_mini_diff(self):
+        session = EditSession(_ctx())
+        content, _ = session.execute({
+            'name': 'config_edit',
+            'arguments': {'file': 'printer.cfg', 'op': 'set_param',
+                          'section': 'printer', 'key': 'max_accel',
+                          'value': '3000'},
+        })
+        assert 'Realized change:' in content
+        assert '-max_accel: 1000' in content
+        assert '+max_accel: 3000' in content
+        # STAGED sentence keeps its place; the block rides along.
+        assert 'STAGED' in content
+
+    def test_eaten_comment_line_is_nameable_after_delete(self):
+        session = EditSession(_macro_ctx())
+        content, _ = session.execute({
+            'name': 'config_edit',
+            'arguments': {'file': 'printer.cfg', 'op': 'delete_section',
+                          'section': 'gcode_macro LEVEL_BED'},
+        })
+        assert 'Realized' in content
+        # Whatever the span semantics do to the trailing note, the
+        # model must be able to SEE it in the removed lines.
+        assert '# a trailing note the delete must name' in content
+
+    def test_delete_reports_counts_not_whole_block(self):
+        session = EditSession(_macro_ctx())
+        content, _ = session.execute({
+            'name': 'config_edit',
+            'arguments': {'file': 'printer.cfg', 'op': 'delete_section',
+                          'section': 'firmware_retraction'},
+        })
+        assert 'Realized' in content
+        assert '-retract_speed: 20' not in content.split('Realized')[1] or \
+            'removed' in content
+        # header + first/last removed line nameable, block not dumped
+        assert 'firmware_retraction' in content
+
+    def test_big_rewrite_collapses_with_removed_lines(self):
+        body20 = 'gcode:\n' + '\n'.join(f'    # step {i}' for i in range(1, 21))
+        session = EditSession(_macro_ctx())
+        content, _ = session.execute({
+            'name': 'config_edit',
+            'arguments': {'file': 'printer.cfg', 'op': 'replace_section',
+                          'section': 'gcode_macro LEVEL_BED',
+                          'text': body20},
+        })
+        assert 'Realized change:' not in content
+        assert 'Realized: +' in content and 'removed' in content
+        # the old body stays nameable through the collapse
+        assert '#rename_existing: _BED_MESH_CALIBRATE' in content
+
+    def test_batch_clean_ops_stay_lean(self):
+        session = EditSession(_ctx())
+        content, _ = session.execute({
+            'name': 'config_edit',
+            'arguments': {'file': 'printer.cfg', 'ops': [
+                {'op': 'set_param', 'section': 'printer',
+                 'key': 'max_accel', 'value': '3000'},
+                {'op': 'set_param', 'section': 'printer',
+                 'key': 'max_velocity', 'value': '300'},
+            ]},
+        })
+        assert 'Realized' not in content
+
+    def test_batch_retried_op_gets_realized_block(self):
+        session = EditSession(_macro_ctx())
+        # 1) first call fails (anchor miss on a wrong key)
+        session.execute({
+            'name': 'config_edit',
+            'arguments': {'file': 'printer.cfg', 'op': 'set_param',
+                          'section': 'gcode_macro LEVEL_BED',
+                          'key': 'nonexistent', 'value': 'x'},
+        })
+        # 2) retried corrected in a batch -> THIS entry shows realized
+        content, _ = session.execute({
+            'name': 'config_edit',
+            'arguments': {'file': 'printer.cfg', 'ops': [
+                {'op': 'set_param', 'section': 'gcode_macro LEVEL_BED',
+                 'key': 'description', 'value': 'leveled start'},
+            ]},
+        })
+        assert 'Realized' in content
+
+    def test_approval_result_carries_realized_block(self):
+        from services.ai_edit_tools import format_approval_result
+        before = MACRO_CFG
+        after = before.replace('max_accel: 1000', 'max_accel: 3000')
+        content, _ = format_approval_result('config_edit', {
+            'decision': 'approved',
+            'summary': 'set [printer] max_accel = 3000',
+            'advisories': [],
+            'details': {'file': 'printer.cfg', 'op': 'set_param',
+                        'summary': 'set [printer] max_accel = 3000',
+                        'newText': after, 'advisories': [],
+                        'diff': {'file': 'printer.cfg',
+                                 'before': before, 'after': after}},
+        })
+        assert 'APPROVED' in content
+        assert 'Realized change:' in content
+        assert '-max_accel: 1000' in content

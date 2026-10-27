@@ -118,7 +118,7 @@ def edit_flag(monkeypatch):
     """No-op since the Phase-6 flag removal (2026-09-24): the write tools
     are product behavior; each payload below carries editSkill=True
     because these tests script write calls directly."""
-    monkeypatch.delenv('KWC_EDIT_WRITE_CAP', raising=False)
+    monkeypatch.delenv('KWC_THRASH_BUDGET', raising=False)
 
 
 SET_ACCEL = {'file': 'printer.cfg', 'op': 'set_param',
@@ -670,6 +670,9 @@ def test_staged_edits_are_published_live_on_the_progress_rail(
     from api.printer_memory_routes import PrinterMemory
     slow = _SlowClient([
         _text_tool_call('config_edit', SET_ACCEL),
+        # The loop closes on this prose reply (completion kickback
+        # removed 2026-10-23); the assertion snapshot is taken on that
+        # FINAL query, while the request is still open.
         _final_reply('Staged.'),
     ])
     monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())

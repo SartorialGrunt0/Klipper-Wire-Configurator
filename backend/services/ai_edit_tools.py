@@ -60,10 +60,12 @@ Other argument shapes:
 patch any exact lines in a named section (config params OR macro gcode): {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "patch_section", "section": "<section or gcode_macro NAME>", "old_text": "<line copied verbatim>", "new_text": "<replacement>"}} — new_text REPLACES old_text: repeat the anchor lines inside new_text when adding lines; comment out a line: new_text = '# ' + the line; uncomment a line: old_text = the '#'-prefixed line, new_text = without the '#'
 comment out or restore a WHOLE section (header + body): {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "comment_section", "section": "<section>"}} / {"op": "uncomment_section", "section": "<section>"}
 rename a section or macro: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "rename_section", "section": "<current header>", "new_section": "<new header>"}} — the body is kept exactly; never rename by delete_section + add_section
+move a section into another file: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "move_section", "section": "<section>", "to_file": "<target.cfg>"}} — the body is carried exactly and removed from the source in the same op; to_file is created if new; never move by delete_section + add_section
 delete a whole file: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "delete_file"}} — remove its [include] line first if it has one
 include a file: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "add_include", "target_file": "new.cfg"}}
 remove or comment out an include: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "op": "comment_include", "target_file": "<path as written in the include line>"}} — comment_include keeps the line as '#[include ...]', remove_include deletes it; these ops work on ANY include line, including ones at the top of a file outside any section
 create a NEW file only: {"name": "config_write", "arguments": {"file": "new.cfg", "content": "<full file text>"}}
+batch many changes to one file in ONE call: {"name": "config_edit", "arguments": {"file": "<file.cfg>", "ops": [{"op": "set_param", "section": "<section>", "key": "<param>", "value": "<new value>"}, {"op": "add_section", "section": "<name>", "text": "<body>"}]}} — applied in order; if one entry fails the others still apply and the result names the failed index
 set_param value must be ONE LINE — multi-line values (e.g. gcode:) are dropped by some tool-call channels and must go through replace_section or patch_section."""
 
 EDIT_NUDGE_TEXT_NATIVE = """Call the tool NOW using your tool-calling interface (do not read \
@@ -76,12 +78,36 @@ value must be ONE LINE; for multi-line params (gcode:) use replace_section
 patch any exact lines in a named section (config params OR macro gcode): {"file": "<file.cfg>", "op": "patch_section", "section": "<section or gcode_macro NAME>", "old_text": "<line copied verbatim>", "new_text": "<replacement>"} — new_text REPLACES old_text: repeat the anchor lines inside new_text when adding lines; comment out a line: new_text = '# ' + the line; uncomment a line: old_text = the '#'-prefixed line, new_text = without the '#'
 comment out or restore a WHOLE section (header + body): {"file": "<file.cfg>", "op": "comment_section", "section": "<section>"} / {"op": "uncomment_section", "section": "<section>"}
 rename a section or macro: {"file": "<file.cfg>", "op": "rename_section", "section": "<current header>", "new_section": "<new header>"} — the body is kept exactly; never rename by delete_section + add_section
+move a section into another file: {"file": "<file.cfg>", "op": "move_section", "section": "<section>", "to_file": "<target.cfg>"} — the body is carried exactly and removed from the source in the same op; to_file is created if new; never move by delete_section + add_section
 delete a whole file: {"file": "<file.cfg>", "op": "delete_file"} — remove its [include] line first if it has one
 include a file: {"file": "<file.cfg>", "op": "add_include", "target_file": "<new.cfg>"}
 remove or comment out an include: {"file": "<file.cfg>", "op": "comment_include", "target_file": "<path as written in the include line>"} — comment_include keeps the line as '#[include ...]', remove_include deletes it; these ops work on ANY include line, including ones at the top of a file outside any section
-create a NEW file only: {"file": "<new.cfg>", "content": "<full file text>"}"""
+create a NEW file only: {"file": "<new.cfg>", "content": "<full file text>"}
+batch many changes to one file in ONE call: {"file": "<file.cfg>", "ops": [{"op": "set_param", "section": "<section>", "key": "<param>", "value": "<new value>"}, {"op": "add_section", "section": "<name>", "text": "<body>"}]} — applied in order; if one entry fails the others still apply and the result names the failed index"""
 
 EDIT_TOOL_NAMES = frozenset({"config_edit", "config_write"})
+
+
+def parse_maybe_stringified(value):
+    """Zed's `deserialize_maybe_stringified` pattern: small models emit
+    array-typed tool args as a JSON STRING — ``"ops": "[{\\"op\\": ...}]"``.
+    One relaxed parse attempt when a bracket-looking string arrives;
+    anything that is not a JSON list passes through UNCHANGED (fail-open:
+    a weird string in a value field stays a value). Applied at the single
+    chokepoint every protocol's arguments funnel through
+    (:meth:`EditSession.tool_call_to_op`), so the native and text paths
+    get the recovery identically and cannot drift.
+    """
+    if isinstance(value, str):
+        candidate = value.strip()
+        if candidate.startswith("["):
+            try:
+                parsed = json.loads(candidate, strict=False)
+            except (json.JSONDecodeError, ValueError):
+                return value
+            if isinstance(parsed, list):
+                return parsed
+    return value
 
 CONFIG_EDIT_SPEC = {
     "name": "config_edit",
@@ -94,6 +120,9 @@ CONFIG_EDIT_SPEC = {
         "text body), replace_section (rewrite a section's body), "
         "delete_section, rename_section (rename a section header, e.g. a "
         "macro — the body is kept exactly; needs new_section), "
+        "move_section (move a section into another file, creating it if "
+        "needed — the body is carried exactly and removed from the source "
+        "in the same op; needs to_file; never move by delete+add), "
         "patch_section (replace old_text with new_text "
         "inside ANY named section — config params or macro gcode alike; "
         "quote lines exactly as read returned them), "
@@ -120,12 +149,14 @@ CONFIG_EDIT_SPEC = {
                 "type": "string",
                 "enum": [
                     "set_param", "add_section", "replace_section",
-                    "delete_section", "rename_section", "patch_section",
+                    "delete_section", "move_section", "rename_section",
+                    "patch_section",
                     "comment_section", "uncomment_section",
                     "delete_file",
                     "add_include", "remove_include", "comment_include",
                 ],
-                "description": "The operation to apply",
+                "description": ("The operation to apply (single-op call). "
+                                "Omit it when passing an ops[] batch."),
             },
             "section": {
                 "type": "string",
@@ -134,6 +165,15 @@ CONFIG_EDIT_SPEC = {
             "new_section": {
                 "type": "string",
                 "description": "New section header for rename_section (brackets optional), e.g. 'gcode_macro BED_MESH_CALIBRATE'",
+            },
+            "to_file": {
+                "type": "string",
+                "description": (
+                    "Destination file for move_section, e.g. 'fans.cfg' — "
+                    "created if it does not exist (then needs an [include]). "
+                    "The section body is carried exactly and removed from "
+                    "file in the same op; never move by delete+add."
+                ),
             },
             "key": {
                 "type": "string",
@@ -175,8 +215,31 @@ CONFIG_EDIT_SPEC = {
                 "description": ("File to include/un-include/comment-out "
                                 "(add_include / remove_include / comment_include)"),
             },
+            "ops": {
+                "type": "array",
+                "description": (
+                    "Batch: list of operation objects, applied SEQUENTIALLY "
+                    "in ONE call — each op sees the state the previous one "
+                    "left. Each entry uses the same fields as a single-op "
+                    "call: {\"op\": ..., \"section\": ..., \"key\": ..., "
+                    "\"value\": ..., \"text\": ..., \"old_text\": ..., "
+                    "\"new_text\": ..., \"new_section\": ..., "
+                    "\"to_file\": ..., \"target_file\": ...} (file applies "
+                    "to every entry). "
+                    "When changing multiple separate locations in one file, "
+                    "use ONE call with multiple entries in ops[] instead of "
+                    "multiple calls. If one op fails the rest still apply; "
+                    "the result lists failed ops by index. NEVER abbreviate "
+                    "or elide body content in text/new_text — send it "
+                    "complete or use a narrower op."
+                ),
+            },
         },
-        "required": ["file", "op"],
+        # 'op' XOR 'ops' is validated at runtime (one clear kickback names
+        # the shape) instead of required[]: JSON Schema can't express the
+        # XOR portably, and required=['file','op'] would reject a valid
+        # ops-only batch on strict providers.
+        "required": ["file"],
     },
 }
 
@@ -217,7 +280,12 @@ description of the change; make the tool call instead.
 
 Rules:
 - Read before you edit: read_user_config the file or section first so
-  anchors, keys, and current values are exact.
+  anchors, keys, and current values are exact. Batch the reads:
+  sections=['a','b'] fetches several sections and files=['a.cfg','b.cfg']
+  several whole files in ONE call. For "every reference"/rename jobs,
+  search_user_configs returns a per-file REFERENCES checklist (section +
+  line per occurrence) — work through the list, then re-search until the
+  counts read 0.
 - NEVER ask the user which file to edit or wait for confirmation of the
   target — the answer is discoverable with tools. Call list_user_configs
   to see the project's files and search_user_configs to find where a
@@ -238,11 +306,27 @@ Rules:
   and stage it with config_edit only when the user clearly asked to add or
   save it (then add it to printer.cfg). Never reply "not found in your
   config" to a fix-this request, and never ask where it should live.
-- One config_edit operation per call; chain calls for multi-part changes.
+- When changing multiple separate locations in one file, use ONE call
+  with multiple entries in ops[] instead of multiple calls:
+  {"file": "printer.cfg", "ops": [{"op": "set_param", "section": "...",
+  "key": "...", "value": "..."}, {"op": "add_section", ...}]}. Ops apply
+  in order; if one entry fails the others still apply and the result
+  names the failed index — fix ONLY the failed entries and re-send them.
+  NEVER abbreviate or elide body content in text/new_text — send it
+  complete or use a narrower op. A single change stays a single-op call.
 - When config_edit returns validation errors, read them, adjust, and
   retry with a CORRECTED change — never repeat the same failed call. On a
   patch_section anchor miss the result includes the section's current text;
   quote lines exactly as they appear there.
+- To MOVE a section into another file, use ONE op per section:
+  {"file": "printer.cfg", "op": "move_section", "section": "fan_generic Aux_Fan",
+  "to_file": "fans.cfg"}. The server carries the body across and removes it
+  from the source in the SAME op — never move by delete_section + add_section,
+  which makes you retype the body (comments and commented-out blocks get
+  dropped) and can leave a duplicate section, which Klipper refuses to load.
+  to_file is created if it does not exist and then needs an [include]
+  (add_include in a follow-up op, or in the same ops[] batch). Several
+  sections = one move_section entry per section.
 - Warnings returned as advisories do not block the change; mention them
   to the user when relevant. EXCEPTION: gcode the command registry flags
   as unknown comes back UNSTAGED the first time — fix the command (the
@@ -293,6 +377,59 @@ def _lean_error_content(name: str, result: dict) -> str:
     return "\n".join(lines)
 
 
+def _ops_result_content(name: str, results: list[dict]) -> str:
+    """Model-facing batch result: applied/failed counts + per-index
+    lean errors (Zed shape: 'edit at index N did not match'). Applied
+    ops STAY committed — partial progress is real progress (plan law)."""
+    n = len(results)
+    applied = [r for r in results if r.get('ok')]
+    failed = [r for r in results if not r.get('ok')]
+    head = (f"{name} applied {len(applied)} of {n} ops — "
+            f"{'all ops committed' if not failed else 'applied ops are committed; failed ops are not'}")
+    head += "\nChanges are STAGED for the user's review (not saved)."
+    # R1 context economy: a clean 26-edit batch stays lean — only ops the
+    # model had to FIX (failed-then-retried) carry their realized diff,
+    # so a swallowed line shows exactly where a retry already happened
+    # (the engine tags those entries' 'diff'; see _batch_engine).
+    for r in applied:
+        block = _realized_change_block(r.get("op", ""), r.get("diff"))
+        if block:
+            head += (f"\nRealized for op[{r.get('idx', '?')}] "
+                     f"{r.get('op', '')}"
+                     + (f" [{r.get('section')}]" if r.get('section') else "")
+                     + " (an op of this kind failed earlier this request):"
+                     + block)
+    if failed:
+        head += "\nFailed ops (fix ONLY these and re-send them):"
+        # BULK-05 bank autopsies (2026-10-24): a 26-op sweep where every
+        # op hit the same error rendered the identical sentence 26x
+        # (~2.6KB per call, and every failed op charges the waste
+        # budget while the text floods the context). Identical
+        # (op, section, error) failures collapse into one line naming
+        # the index range; distinct failures keep their own lines.
+        def _where(r: dict) -> str:
+            return (f" {r.get('op', '')}"
+                    + (f" [{r.get('section')}]" if r.get('section') else ""))
+        groups: list[tuple[list[int], dict]] = []
+        for r in failed:
+            key = (r.get('op', ''), r.get('section') or '',
+                   r.get('error', 'failed'))
+            if groups and (groups[-1][1].get('op', ''),
+                           groups[-1][1].get('section') or '',
+                           groups[-1][1].get('error', 'failed')) == key:
+                groups[-1][0].append(r.get('idx', 0))
+            else:
+                groups.append(([r.get('idx', 0)], r))
+        for idxs, r in groups[:10]:
+            if len(idxs) == 1:
+                span = f"op[{idxs[0]}]"
+            else:
+                span = f"op[{idxs[0]}-{idxs[-1]}]"
+            head += (f"\n- {span}{_where(r)}: {r.get('error', 'failed')}"
+                     + (f" ({len(idxs)} ops)" if len(idxs) > 1 else ""))
+    return head
+
+
 def _advisory_lines(advisories: list) -> str:
     """Render the model-facing advisory block (' with N advisories' + one
     line each). Shared by BOTH write paths so the approval gate and the
@@ -308,6 +445,10 @@ def _advisory_lines(advisories: list) -> str:
 def _lean_success_content(name: str, result: dict) -> str:
     status = result.get("status", "applied")
     head = f"{name} applied — {result.get('summary', '')}"
+    # R1: the summary is what the model ASKED for; the realized block is
+    # what the engine DID. Eaten comment blocks and absorbed blanks hide
+    # here (recognition gap) — show the diff, not the intent.
+    head += _realized_change_block(result.get("op", ""), result.get("diff"))
     advisories = result.get("advisories") or []
     runtime = _runtime_section_directive(result)
     if status == "applied_with_advisory" and advisories:
@@ -460,32 +601,86 @@ def _include_needed_directive(result: dict) -> str:
     )
 
 
-# ── per-request write-attempt cap (Phase-5 convergence pass) ─────────
-# The cap exists for THRASH, not for legitimate multi-op work: a model that
-# keeps re-issuing writes after kickbacks burns the whole turn budget with
-# nothing to show (live: a 17-attempt loop; 20-call turns in the 09-23 bank).
-# Hitting it is a SOFT landing, never an error — the model is told to stop
-# editing and report honestly, whatever is already staged still stands, and
-# the user still gets the human approval cards for it.
-# `KWC_EDIT_WRITE_CAP` overrides the default; 0 (or negative) disables it.
-# Sir 2026-09-27: raised 5 -> 20. Real multi-op work (rename + fix every
-# caller + verify) kept hitting the 5-write wall mid-task, which reads to
-# the user as "the tools don't work". Thrash is still guarded by the
-# identical-call hard-stop (3x) and the request turn cap
-# (MAX_MCP_TOOL_TURNS_EDIT), so the budget cap only ever punishes
-# legitimate work.
-EDIT_WRITE_CAP_DEFAULT = 20
+# ── per-request THRASH budget (large-edit rework, 2026-10-16) ─────────
+# The old flat write cap charged WORK: every write attempt cost one unit,
+# so a legitimate 62-section request was arithmetically impossible in one
+# prompt and the "WRITE LIMIT REACHED ... no further write calls will be"
+# directive MANUFACTURED the prose-fallback symptom (it taught the model to
+# give up — the Hermes early-abandonment lesson). The semantics are now
+# inverted: the budget charges WASTE, never work.
+#
+# Charged (`thrash_units`):
+#   - each FAILED write attempt (+1)
+#   - each read past a grace allowance (`READ_GRACE`) per request (+1 each)
+#   - each malformed-call correction re-prompt (+1)
+#   - each empty re-prompt (+1)
+# FREE:
+#   - each SUCCESSFUL write op — a state change is reviewable work, and the
+#     oscillation family that a write cap used to (badly) guard is covered
+#     deterministically by _duplicate_of_committed + supersede keys.
+#
+# `edit_attempts` survives as an INFORMATIONAL counter (successful ops still
+# increment it; the response payload, confab guard, and BULK criteria read
+# it) but it no longer gates anything.
+#
+# Hitting the thrash budget is a SOFT landing, never a stop order: the
+# directive states facts (what failed, what was over-read) and keeps the
+# honesty clauses, but never claims further writes are blocked — pressure
+# is invisible until truly spent, and a wrong soft note is a useless hint,
+# never a changed path (fail-open).
+#
+# `KWC_THRASH_BUDGET` overrides the default; 0 (or negative) disables it.
+THRASH_BUDGET_DEFAULT = 50
+# Reads are cheap for the model's understanding but expensive in context
+# growth; the grace allowance covers a normal read->edit->verify loop, and
+# only the overflow past it counts as thrash.
+READ_GRACE = 10
+# Upper bound on ops[] entries per call. Generation-limit insurance for
+# small models (a 60-op JSON blob risks max_tokens truncation, and a
+# truncated batch is a malformed-call round-trip), NOT a work budget —
+# gemma's own BULK-01 run needs 4 calls of ~16 to cover 62 sections.
+MAX_OPS_PER_CALL = 32
 
 
-def write_cap() -> int:
-    """Write attempts allowed per request (<=0 = uncapped)."""
-    raw = _os.environ.get("KWC_EDIT_WRITE_CAP", "").strip()
+def thrash_budget() -> int:
+    """Waste units allowed per request (<=0 = uncapped)."""
+    raw = _os.environ.get("KWC_THRASH_BUDGET", "").strip()
     if not raw:
-        return EDIT_WRITE_CAP_DEFAULT
+        return THRASH_BUDGET_DEFAULT
     try:
         return int(raw)
     except ValueError:
-        return EDIT_WRITE_CAP_DEFAULT
+        return THRASH_BUDGET_DEFAULT
+
+
+# ── work-earned tool-cap credit (2026-10-26) ──────────────────────────
+# The flat edit turn cap charged WORK: a 160-section comment-every-section
+# dogfood died at exactly tool_turns=50 mid-batch with a stub final reply
+# (live log 06:05/06:12). Same manufacturing defect the THRASH budget
+# fixed for the write cap — the flat number punishes correct work. The
+# economy is now: the flat cap is still fully chargeable to EVERYTHING
+# (reads, searches, failed writes), but every config_edit/config_write
+# CALL that applied at least one op raises the edit turn cap by this
+# grant. A model that only searches and fails never earns credit and
+# still dies at the flat cap; a model getting work done extends its own
+# budget. Batches grant per CALL, not per op (a 32-op batch = +5, not
+# +160) — call-granting keeps the runaway math boring while the 500-op
+# per-request ceiling and the thrash budget stay the real guards.
+# `KWC_CAP_GRANT_PER_APPLIED_WRITE` overrides; 0 = flat cap (A/B arm).
+CAP_GRANT_PER_APPLIED_WRITE_DEFAULT = 5
+
+
+def cap_grant_per_applied_write() -> int:
+    """Tool-turn cap units granted per applied write call (<=0 = flat)."""
+    raw = _os.environ.get("KWC_CAP_GRANT_PER_APPLIED_WRITE", "").strip()
+    if not raw:
+        return CAP_GRANT_PER_APPLIED_WRITE_DEFAULT
+    try:
+        return int(raw)
+    except ValueError:
+        return CAP_GRANT_PER_APPLIED_WRITE_DEFAULT
+
+
 
 
 # ── Change-set display helpers (post-hoc review, 2026-10-02) ───────────
@@ -525,6 +720,81 @@ def diff_counts(before: str, after: str) -> tuple[int, int]:
 def diff_text(file_name: str, before: str, after: str) -> str:
     """Compact unified diff for ONE op — what a collapsed row unfolds."""
     return "\n".join(_unified_diff_lines(file_name, before, after))
+
+
+# ── realized-change reporting (R1, plan 2026-10-18) ─────────────────────
+# Success results reported INTENT ("applied — {summary}") while the
+# realized per-line truth rode only on the UI details record ("never
+# sent to the model", _details_for). Collateral the span semantics
+# produce — a swallowed trailing comment block, absorbed blanks, an
+# eaten neighbour line — was invisible: recognition gap, not attention
+# gap (live reports 2026-10-15). Principle: ops report the REALIZED
+# change, not the intended change. Small diffs ride in full (n=1
+# context); big ones collapse to counts + the removed lines verbatim,
+# because the removed side is exactly where collateral hides.
+REALIZED_DIFF_MAX_LINES = 12   # changed lines <= this -> full mini-diff
+REALIZED_DIFF_MAX_BYTES = 2048  # appended diff bytes per call (context
+                                # economy on 26-edit requests)
+_REALIZED_LINE_WIDTH = 80
+
+
+def _realized_change_block(op_kind: str, diff: dict | None) -> str:
+    """Model-facing 'what actually happened' block for a SUCCESSFUL op.
+
+    ``{delete_section, delete_file}`` never dump the whole block: header
+    + first/last removed line + count. Anything within
+    REALIZED_DIFF_MAX_LINES changed lines shows the mini-diff; larger
+    changes collapse to ``+A/−R`` counts + removed lines verbatim,
+    truncated to REALIZED_DIFF_MAX_BYTES. Returns '' when there is
+    nothing to report (no diff record, or a no-change apply).
+    """
+    if not isinstance(diff, dict):
+        return ""
+    before = str(diff.get("before", ""))
+    after = str(diff.get("after", ""))
+    if before == after:
+        return ""
+    added, removed = diff_counts(before, after)
+    if not (added or removed):
+        return ""
+    removed_lines = [ln[1:] for ln in _unified_diff_lines("", before, after)
+                     if ln.startswith("-") and not ln.startswith("---")]
+    if op_kind in ("delete_section", "delete_file"):
+        # Small delete: every removed line verbatim (a swallowed
+        # trailing comment/blank must be NAMEABLE, not just counted).
+        # Large delete: header + boundary lines + count — never re-ship
+        # a whole deleted body.
+        if removed_lines and len(removed_lines) <= REALIZED_DIFF_MAX_LINES:
+            shown = ", ".join(_truncate_realized(q) for q in removed_lines)
+        else:
+            edges = removed_lines[:1] + removed_lines[-1:]
+            shown = ", ".join(_truncate_realized(q) for q in edges)
+        return (f"\nRealized: −{removed} removed, +{added} added — "
+                f"lines: {shown}")
+    if added + removed <= REALIZED_DIFF_MAX_LINES:
+        mini = difflib.unified_diff(before.splitlines(), after.splitlines(),
+                                    n=1, lineterm="")
+        body = "\n".join(mini)
+        if body and len(body.encode("utf-8")) <= REALIZED_DIFF_MAX_BYTES:
+            return f"\nRealized change:\n---\n{body}\n---"
+    # Collapse: the counts plus EVERY removed line the byte budget fits.
+    parts: list[str] = []
+    used = 0
+    for line in removed_lines:
+        q = _truncate_realized(line)
+        if parts and used + len(q) + 2 > REALIZED_DIFF_MAX_BYTES:
+            break
+        parts.append(q)
+        used += len(q) + 2
+    shown = ", ".join(parts) if parts else "(over byte cap)"
+    return (f"\nRealized: +{added} added, −{removed} removed — "
+            f"removed lines: {shown}")
+
+
+def _truncate_realized(line: str) -> str:
+    line = line if len(line) <= _REALIZED_LINE_WIDTH else \
+        line[:_REALIZED_LINE_WIDTH - 1] + "…"
+    return f"'{line}'"
 
 
 def resolve_change_chain(chain, context_files: dict | None = None,
@@ -603,10 +873,35 @@ def resolve_change_chain(chain, context_files: dict | None = None,
     kept_ok: set[tuple] = set()
     for session, kept_ids, request_id in entries:
         kept_set = None if kept_ids is None else {str(i) for i in kept_ids}
+        # Unit resolution (L1): a row's _unit (move_section's two rows)
+        # is kept when ANY row of the unit is kept — the client's per-row
+        # keep of one half means keep the whole atomic op. A unit with NO
+        # kept row is rejected: its replayable row reports stale only when
+        # the client is keeping SOME of the request (keeping nothing at
+        # all = reject-all, and reject-all must not raise stale noise).
+        unit_kept: dict[str, bool] = {}
+        if kept_set is not None:
+            for rec in session.edit_records:
+                unit = rec.get("_unit")
+                if unit:
+                    unit_kept[unit] = (unit_kept.get(unit, False)
+                                       or rec["id"] in kept_set)
         for rec in session.edit_records:
-            if kept_set is not None and rec["id"] not in kept_set:
-                continue
             raw_op = rec.get("_raw_op") or {}
+            unit = rec.get("_unit")
+            if rec.get("_display_only"):
+                # Transcript/display row (move source half): never
+                # replayed, never stale. The replayable twin covers it.
+                continue
+            if kept_set is not None:
+                if unit:
+                    # Atomic unit: kept when ANY row is kept; rejected
+                    # silently when none is (a user choice is never
+                    # 'stale' — stale means KEPT but no longer applies).
+                    if not unit_kept.get(unit, False):
+                        continue
+                elif rec["id"] not in kept_set:
+                    continue
             if not raw_op:
                 stale.append({"id": rec["id"], "requestId": request_id or "",
                               "file": rec["file"],
@@ -726,6 +1021,35 @@ class EditSession:
         # over a refreshed context on later approve re-validations.
         self.committed_ops: list[dict] = []
         self.edit_attempts = 0
+        # ── THRASH accounting (2026-10-16, see THRASH_BUDGET_DEFAULT) ──
+        # Waste actually spent this request: failed write attempts, reads
+        # past READ_GRACE, malformed-correction + empty re-prompts.
+        # Successful writes NEVER charge. Reset wholesale by apply_steer.
+        self.thrash_units = 0
+        # Read executions this request (grace is applied in charge_read();
+        # repeat-dead reads never reach the session — REPEAT_READ_FEEDBACK
+        # kills them in ai_routes before execution, unchanged).
+        self.read_calls = 0
+        # Fact source for the over-budget directive (and the Step-4
+        # confab guard): per-call write failures, not units.
+        self.write_failures = 0
+        # Work-earned cap credit (2026-10-26): write CALLS (batches
+        # count once) that applied at least one op this request. The
+        # loop raises the edit turn cap by cap_grant_per_applied_write()
+        # per unit — accepted work buys back limit, pure search/failure
+        # never does. Reset wholesale by apply_steer.
+        self.applied_write_calls = 0
+        # R1 batch tagging: targets (op+file+section) that FAILED earlier
+        # this request. A batch entry succeeding one of these is a
+        # failed-then-retried op — the one batch shape whose realized
+        # diff rides (plan: clean batch ops stay lean).
+        self._failed_targets: set[tuple] = set()
+        # B4: (op, file) keys of write calls that FAILED and have not
+        # been re-landed since. Drives the confab guard's partial-success
+        # footer — see _note_failure / commit(). Cleared by a successful
+        # commit of the same (op, file), by steer, and by the budget
+        # reset alongside _failed_targets.
+        self._open_failures: set[tuple] = set()
         # Classification of the most recent write-tool outcome:
         #   None         — no write call yet this request
         #   'success'    — staged (partial success counts; see 'correctable')
@@ -768,12 +1092,11 @@ class EditSession:
         return bool(self.state.files)
 
     @staticmethod
-    def tool_call_to_op(name: str, args: dict) -> dict | None:
-        """Map a model-facing tool call to the internal ProjectState op.
-
-        Shared by execute() (auto-approve path) and prepare() (approval
-        path) so the two can never drift.
-        """
+    def _single_op(name: str, args: dict) -> dict | None:
+        """Map ONE model-facing arg dict (single-op shape) to the internal
+        ProjectState op. Split out of tool_call_to_op when ops[] arrived —
+        batch entries run through this same mapper so single and batch
+        semantics can never drift."""
         if name == "config_write":
             return {
                 "op": "new_file",
@@ -782,12 +1105,16 @@ class EditSession:
             }
         if name == "config_edit":
             op: dict = {"op": str(args.get("op", ""))}
-            for arg_key in ("file", "section", "new_section", "key", "text",
-                            "old_text", "new_text", "target_file"):
+            for arg_key in ("file", "section", "new_section", "to_file", "key",
+                            "text", "old_text", "new_text", "target_file"):
                 if arg_key in args and args[arg_key] is not None:
                     op[arg_key] = str(args[arg_key])
             if "value" in args and args["value"] is not None:
-                op["value"] = str(args["value"])
+                # str() over repr() for non-str values (the old behavior);
+                # a list/dict value on set_param is a model error the
+                # op layer rejects, not something to silently stringify.
+                val = args["value"]
+                op["value"] = val if isinstance(val, str) else str(val)
             # Field-synonym normalization (live r3 TRIDENT-15 2026-09-19:
             # gemma routes both intents through its preferred field name —
             # set_param arrived with new_text='300' (no value), and
@@ -802,6 +1129,54 @@ class EditSession:
                 op["text"] = op["new_text"]
             return op
         return None
+
+    @staticmethod
+    def tool_call_to_op(name: str, args: dict) -> dict | None:
+        """Map a model-facing tool call to the internal ProjectState op.
+
+        Shared by execute() (auto-approve path) and prepare() (approval
+        path) so the two can never drift. Batch shape: an ``ops`` entry
+        (list, or a stringified list — see parse_maybe_stringified) maps
+        to ``{"batch": True, "file": ..., "ops": [single-op dicts]}``;
+        every entry runs through _single_op with the top-level `file`
+        merged in (entries may override it). None = unknown tool or an
+        unusable batch shape (the caller kickbacks).
+        """
+        if name == "config_edit" and "ops" in args and args["ops"] is not None:
+            ops_arg = parse_maybe_stringified(args["ops"])
+            if not isinstance(ops_arg, list) or not ops_arg:
+                return None
+            file_default = str(args.get("file", "") or "")
+            mapped: list[dict] = []
+            # Round-1 review 2026-10-25, L4: ONE malformed entry must not
+            # abort the whole batch. Unusable entries map to a per-index
+            # shape-error op that the engine reports at its index (the
+            # other entries run); the kickback names the index instead of
+            # the misleading 'ops must be a non-empty list' claim.
+            for entry_idx, entry in enumerate(ops_arg):
+                if not isinstance(entry, dict):
+                    mapped.append({
+                        "op": "", "_shape_error":
+                            f"entry is {type(entry).__name__}, not an "
+                            "operation object — re-send this entry as "
+                            '{"op": ..., "section": ..., ...}'})
+                    continue
+                entry_args = dict(entry)
+                if not entry_args.get("file"):
+                    entry_args["file"] = file_default
+                single = EditSession._single_op(name, entry_args)
+                if single is None or single.get("op") == "new_file":
+                    mapped.append({
+                        "op": "", "_shape_error":
+                            "not a config_edit operation"
+                            + (" (config_write does not belong in ops[]; "
+                               "call it on its own)"
+                               if single and single.get("op") == "new_file"
+                               else "")})
+                    continue
+                mapped.append(single)
+            return {"batch": True, "file": file_default, "ops": mapped}
+        return EditSession._single_op(name, args)
 
     @staticmethod
     def _op_target(op: dict) -> tuple | None:
@@ -836,7 +1211,8 @@ class EditSession:
             resolved = op
         return self._op_target(resolved)
 
-    def _duplicate_of_committed(self, op: dict) -> dict | None:
+    def _duplicate_of_committed(self, op: dict,
+                                up_to: int | None = None) -> dict | None:
         """If this op re-overwrites a target already committed THIS
         request, return the committed result; else None.
 
@@ -855,11 +1231,17 @@ class EditSession:
         not read the model's second attempt as flip-flopping. Nothing else
         clears the ledger, so the oscillation family stays closed between
         steers.
+
+        ``up_to`` (batch engine, 2026-10-16): only entries committed
+        BEFORE index up_to count as evidence — re-writing a target the
+        same batch just applied is the batch contract (sequential
+        evolution), not flip-flopping.
         """
         target = self._resolved_op_target(op)
         if target is None:
             return None
-        for entry in reversed(self.committed_ops):
+        limit = (len(self.committed_ops) if up_to is None else up_to)
+        for entry in reversed(self.committed_ops[:limit]):
             if entry.get("epoch", 0) != self._steer_epoch:
                 continue
             if self._resolved_op_target(entry.get("raw_op") or {}) == target:
@@ -873,16 +1255,24 @@ class EditSession:
         means the previous instruction round is over, so: the duplicate-
         target ledger reopens (the model may legitimately re-edit a target
         the user just changed), the identical-failure ledger clears (the
-        same call may now be exactly what the user wants), and the write
-        budget resets — otherwise steering is useless precisely when it is
-        needed, after the model burned its writes driving the wrong way
-        (Sir, 2026-10-02). Bounded by the human doing the steering; the
-        tool-turn budget is reset by the loop itself.
+        same call may now be exactly what the user wants), the write
+        counter resets, and the THRASH budget resets with the read count —
+        otherwise steering is useless precisely when it is needed, after
+        the model burned its waste driving the wrong way (Sir, 2026-10-02;
+        thrash counters included 2026-10-16 since batch accounting changes
+        what a "reset" covers). Bounded by the human doing the steering;
+        the tool-turn budget is reset by the loop itself.
         """
         self._steer_epoch += 1
         self._identical_failures.clear()
         self._registry_kicks.clear()
         self.edit_attempts = 0
+        self.thrash_units = 0
+        self.read_calls = 0
+        self.write_failures = 0
+        self.applied_write_calls = 0
+        self._failed_targets.clear()
+        self._open_failures.clear()
         self._last_file = None
 
     @staticmethod
@@ -895,11 +1285,48 @@ class EditSession:
 
     def _note_failure(self, name: str, args: dict) -> int:
         """Count a FAILED call; returns how many times THIS exact call
-        has now failed (1 = first)."""
+        has now failed (1 = first). Also tags the target as
+        failed-earlier (R1): a later batch entry landing the same
+        (op, file, section) is a retried op and shows its realized diff."""
         key = self._call_key(name, args)
         self._identical_failures[key] = \
             self._identical_failures.get(key, 0) + 1
+        if isinstance(args, dict):
+            self._note_failed_target(args)
+            # B4 (round-1 review 2026-10-25): the (op, file) view of the
+            # failure for the confab guard. The old_text-mismatch / wrong-
+            # section-name retry re-lands the same op on the same file —
+            # commit() clears this key, so a RECOVERED request no longer
+            # stamps the "N edit calls failed and are NOT staged" footer
+            # over a fully staged change set.
+            self._open_failures.add(self._op_file_key(args))
         return self._identical_failures[key]
+
+    @staticmethod
+    def _op_file_key(op: dict) -> tuple:
+        return (str(op.get("op", "")).casefold(),
+                str(op.get("file", "")).casefold())
+
+    def unresolved_write_failures(self) -> int:
+        """B4: failures whose (op, file) was NOT re-landed since. The
+        confab guard's partial-success footer counts THESE, not the
+        cumulative write_failures — a failed op the model fixed by
+        retrying is no longer an unstaged change, and stamping the
+        honesty note over a fully staged change set gaslights the
+        reply (round-1 review 2026-10-25)."""
+        return len(self._open_failures)
+
+    @staticmethod
+    def _realized_target_key(op: dict) -> tuple:
+        """(op, file, section) identity for the R1 failed-then-retried
+        tag. Casefolded like the duplicate guard; no resolve step —
+        false-positives here only cost one extra diff block."""
+        return (str(op.get("op", "")).casefold(),
+                str(op.get("file", "")).casefold(),
+                str(op.get("section", "")).strip().strip("[]").casefold())
+
+    def _note_failed_target(self, op: dict) -> None:
+        self._failed_targets.add(self._realized_target_key(op))
 
     def _repeat_directive(self, name: str, count: int) -> str:
         if count == 1:
@@ -923,29 +1350,73 @@ class EditSession:
             "why. Never tell the user a blocked change was staged."
         )
 
-    def _over_write_budget(self) -> str | None:
-        """Lean soft-landing directive once this request's write cap is hit.
+    def charge_waste(self, units: int = 1) -> None:
+        """Charge waste units from OUTSIDE the write path (the loop calls
+        this for malformed-correction and empty re-prompts — the loop
+        knows those round-trips were spent; the session cannot see them).
+        Fail-open by contract: this only ever moves a counter."""
+        self.thrash_units = max(0, self.thrash_units + units)
 
-        Returns None while the request is still within budget. On cap this
-        is a STOP order for further writes, never an error and never a state
-        change: the model must report what it changed and what it could NOT
-        apply, so the turn ends with the approved set so far plus an honest
-        summary (plan Phase 5 — "never hard-fail the conversation").
+
+    def charge_read(self) -> bool:
+        """One executed read call (loop-side, after the repeat guard —
+        repeat-dead reads never execute and never charge). The first
+        READ_GRACE reads are free; every read past the grace is +1 waste
+        unit. Returns True when the read was charged."""
+        self.read_calls += 1
+        if self.read_calls > READ_GRACE:
+            self.thrash_units += 1
+            return True
+        return False
+
+    def _over_thrash_budget(self) -> str | None:
+        """Lean soft-landing directive once this request's THRASH budget
+        is spent.
+
+        Returns None while the request is still within budget. On overage
+        the write call is not applied and the model gets FACTS, never a
+        stop order (2026-10-16 rework): the old "no further write calls
+        will be. Stop calling write tools." text is exactly what taught
+        models to abandon bulk requests into prose promises (the Hermes
+        early-abandonment lesson). The directive names the failure/reading
+        pattern, keeps the honesty clauses, and says nothing about what
+        the harness will or will not accept next — a wrong note here is a
+        useless note, never a changed path.
         """
-        cap = write_cap()
-        if cap <= 0 or self.edit_attempts <= cap:
+        cap = thrash_budget()
+        if cap <= 0 or self.thrash_units <= cap:
             return None
         self.last_write_outcome = "budget"
-        # Review fix 2026-09-26: the count printed here included the
-        # just-rejected call ("6 of 5 used"), which reads as nonsense.
-        # State the cap, not the over-count.
+        # Every charge is +1, so the correction/re-prompt units are exact
+        # by subtraction — no separate counters to drift.
+        over_reads = max(0, self.read_calls - READ_GRACE)
+        reprompt_units = max(
+            0, self.thrash_units - self.write_failures - over_reads)
+        facts = []
+        if self.write_failures:
+            facts.append(f"{self.write_failures} failed write call"
+                         + ("" if self.write_failures == 1 else "s"))
+        if over_reads:
+            facts.append(f"{over_reads} read past the {READ_GRACE}-read "
+                         "allowance")
+        if reprompt_units:
+            facts.append(f"{reprompt_units} correction/re-prompt round-"
+                         "trip" + ("" if reprompt_units == 1 else "s"))
+        staged = len(self.pending_edits)
+        staged_note = (f" {staged} file change"
+                       + ("" if staged == 1 else "s")
+                       + " already staged "
+                       + ("remains" if staged == 1 else "remain")
+                       + " awaiting the user's review."
+                       if staged else "")
         return (
-            f"\n\nWRITE LIMIT REACHED — the {cap}-write cap for this "
-            "request is used up, so this call was NOT applied "
-            "and no further write calls will be. Stop calling write tools. "
-            "Tell the user what you changed, what you could NOT apply, and "
-            "what you would try next. Never claim a change was staged "
-            "unless a tool result said so."
+            "\n\nWASTE BUDGET SPENT — this call was not applied. This "
+            f"request has spent its {cap}-unit allowance on wasted round-"
+            f"trips: {'; '.join(facts)}.{staged_note} "
+            "Rework the approach with what the tool results already in "
+            "this conversation tell you. Tell the user what you changed, "
+            "what you could NOT apply, and what you would try next. "
+            "Never claim a change was staged unless a tool result said so."
         )
 
     def _repetition_blocked(self, name: str, args: dict) -> str | None:
@@ -1054,6 +1525,246 @@ class EditSession:
         )
         return "\n".join(lines)
 
+    def _batch_engine(self, name: str, batch: dict, *, commit: bool):
+        """Shared per-index engine for the batch shape — execute() and
+        prepare() run through the SAME loop (paths must not drift).
+
+        Sequential application: each entry applies to the state the
+        previous entry left. Continue-on-failure: a bad entry never
+        aborts the rest; with commit=True applied entries COMMIT
+        (partial progress = real progress, rows land); with commit=False
+        the session is untouched and only the preview state advances.
+        Accounting per INDEX: edit_attempts++ and the thrash charge move
+        per entry; the budget is re-checked per index;
+        _duplicate_of_committed re-checks per index (the call-level
+        duplicate guard must not veto a legitimate in-batch target);
+        _repetition_blocked stays per-CALL at the caller. Each committed
+        sub-op records its OWN change-set row with the SUB-OP as
+        ``raw_op`` — batch envelopes never enter committed_ops, so
+        replay/undo/resolve_change_chain keep the row-per-op shape
+        (PR #36 ghost family).
+
+        Returns ``(results, cur_state, last_result)``.
+        """
+        file_default = batch.get("file", "")
+        ops = batch.get("ops") or []
+        baseline = self.baseline
+        # Duplicate guard boundary: entries may legitimately re-write a
+        # target THIS batch just applied (sequential evolution is the
+        # contract — set 300 then 400 in one batch means final=400). Only
+        # targets committed BEFORE this call are flip-flop evidence.
+        dup_boundary = len(self.committed_ops)
+        results: list[dict] = []
+        cur = self.state
+        last_result: dict | None = None
+        for idx, sub in enumerate(ops):
+            self.edit_attempts += 1
+            # Budget re-checked per index (plan Step 2): successful ops
+            # never charge, so overage mid-batch comes from accumulated
+            # failures; the remaining entries stop un-attempted with a
+            # factual note — never a stop-order tone, and the applied
+            # rows above stay committed.
+            if self._over_thrash_budget() is not None:
+                for rest in range(idx, len(ops)):
+                    results.append({
+                        "idx": rest, "op": ops[rest].get("op", ""),
+                        "section": str(ops[rest].get("section", "")),
+                        "ok": False,
+                        "error": "not attempted — this request's waste "
+                                 "budget is spent; rework the approach "
+                                 "before re-sending"})
+                break
+            sub_file = str(sub.get("file") or file_default)
+            if sub.get("_shape_error"):
+                # L4: an entry the mapper could not map. Per-index
+                # failure (the OTHER entries run), charged as waste like
+                # any unusable call, and the error names the index.
+                self.thrash_units += 1
+                self.write_failures += 1
+                self.last_write_outcome = "correctable"
+                results.append({"idx": idx, "op": "",
+                                "section": str(sub.get("section", "")),
+                                "ok": False,
+                                "error": f"unusable ops[] entry: "
+                                         f"{sub['_shape_error']}"})
+                continue
+            if not sub_file:
+                self.thrash_units += 1
+                self.write_failures += 1
+                self.last_write_outcome = "correctable"
+                results.append({"idx": idx, "op": sub.get("op", ""), "ok": False,
+                                "error": "missing file — pass file= on the "
+                                         "call or on the entry"})
+                continue
+            sub = dict(sub)
+            sub["file"] = sub_file
+            dup = self._duplicate_of_committed(sub, up_to=dup_boundary)
+            if dup is not None:
+                # Per-index duplicate: this entry's target was already
+                # committed — skip it (the OTHER entries are independent).
+                prev = dup.get("result", {})
+                results.append({"idx": idx, "op": sub.get("op", ""),
+                                "section": str(sub.get("section", "")),
+                                "ok": False,
+                                "error": f"target already applied and staged "
+                                         f"in this request "
+                                         f"({prev.get('summary', 'previous change')})"})
+                continue
+            new_state, result = cur.apply(baseline, sub)
+            if result["status"] == "error":
+                self.thrash_units += 1
+                self.write_failures += 1
+                self.last_write_outcome = "correctable"
+                count = self._note_failure(name, {"i": idx, **sub})
+                hint = _lean_error_content(name, result).splitlines()
+                err = (hint[0][len(f"{name} FAILED: "):] if hint[0].startswith(f"{name} FAILED: ")
+                       else hint[0]) if hint else "failed"
+                # Per-index validation detail (BULK-04 bank re-run
+                # 2026-10-17): the single-op path surfaces the concrete
+                # newErrors ('Unknown parameter uart_pins — Klipper
+                # reads no such option'), but the batch shape stripped
+                # them to 'failed validation after merging' — gemma
+                # re-sent the same invented params 50+ times and burned
+                # the whole waste budget. A model cannot fix a finding
+                # it cannot see; cap at 3 per entry so a 10-failure
+                # batch stays lean.
+                sub_errs = (result.get("newErrors") or [])[:3]
+                if sub_errs:
+                    err += "\n" + "\n".join(
+                        f"  - [{e.get('section', '')}] "
+                        f"{e.get('param', '')}: {e.get('message', '')}"
+                        .rstrip()
+                        for e in sub_errs)
+                if count >= 2:
+                    err += " (this exact entry already failed — do not re-send it unchanged)"
+                results.append({"idx": idx, "op": sub.get("op", ""),
+                                "section": str(sub.get("section", "")),
+                                "ok": False, "error": err})
+                continue
+            kick = self._registry_kickback(name, sub, result)
+            if kick is not None:
+                # Unknown gcode entry: NOT staged, NOT charged (the
+                # deliberate re-send is the plugin claim — same rule as
+                # the single path). The correction round is re-sending
+                # that entry.
+                self.last_write_outcome = "correctable"
+                lines = [l for l in kick.splitlines() if l.startswith("- ")]
+                results.append({"idx": idx, "op": sub.get("op", ""),
+                                "section": str(sub.get("section", "")),
+                                "ok": False,
+                                "error": "introduces gcode the command "
+                                         "registry does not recognize: "
+                                         + "; ".join(
+                                             l[2:].strip() for l in lines[:2])})
+                continue
+            cur = new_state
+            last_result = result
+            if commit:
+                self.commit(new_state, name, result, raw_op=sub)
+            entry = {"idx": idx, "op": sub.get("op", ""),
+                     "section": str(sub.get("section", "")),
+                     "ok": True}
+            # R1: this entry fixed an earlier failure on the SAME target
+            # — show what it actually changed (clean entries stay lean).
+            if self._realized_target_key(sub) in self._failed_targets:
+                entry["diff"] = result.get("diff")
+                self._failed_targets.discard(self._realized_target_key(sub))
+            results.append(entry)
+        return results, cur, last_result
+
+    def _check_batch_call(self, name: str, args: dict) -> str | None:
+        """Per-CALL checks for the batch shape (both paths, same call):
+        whole-batch identical-retry ladder (the per-INDEX ladder lives in
+        _batch_engine) + the pathological-size guard. Returns the kickback
+        text or None. A rejected call is charged once as waste."""
+        blocked = self._repetition_blocked(name, args)
+        if blocked is not None:
+            self.last_write_outcome = "correctable"
+            self.thrash_units += 1
+            self.write_failures += 1
+            return blocked
+        ops_arg = parse_maybe_stringified(args.get("ops"))
+        ops = ops_arg if isinstance(ops_arg, list) else []
+        if len(ops) > MAX_OPS_PER_CALL:
+            # Generation-limit insurance for small models, NOT a work
+            # budget (see MAX_OPS_PER_CALL). Charged as a failure (waste).
+            # (tool_call_to_op already rejected a non-list/empty ops
+            # before this check runs; empty never reaches here.)
+            self.edit_attempts += 1
+            self.thrash_units += 1
+            self.write_failures += 1
+            self.last_write_outcome = "correctable"
+            return (f"{name} FAILED: this call carries {len(ops)} "
+                    f"ops — the limit is {MAX_OPS_PER_CALL} per call; "
+                    "split the work across several calls.")
+        return None
+
+    def _execute_batch(self, name: str, batch: dict, args: dict) -> tuple[str, dict | None]:
+        """Run one ops[] batch call (auto-approve path): per-call checks,
+        then the shared engine with commit=True. Sequential, continue-on-
+        failure, per-index feedback — see _batch_engine."""
+        kickback = self._check_batch_call(name, args)
+        if kickback is not None:
+            return kickback, None
+        results, _cur, last_result = self._batch_engine(name, batch, commit=True)
+        # Work-earned cap credit: per CALL, when the batch applied at
+        # least one op (a fully-failed batch earns nothing).
+        if last_result is not None:
+            self.applied_write_calls += 1
+        # Live-staging details: commit() already advanced session state,
+        # so the details for the LAST touched file carry the CUMULATIVE
+        # net text — exactly what the editor pane consumes mid-request.
+        details = (self._details_for(name, last_result)
+                   if last_result is not None else None)
+        return _ops_result_content(name, results), details
+
+    def _prepare_batch(self, name: str, batch: dict, args: dict):
+        """Gate-mode batch: the SAME engine as execute() with
+        commit=False — the session is untouched until the user decides.
+
+        A FULLY applied batch hands an aggregated result + the preview
+        state to the approval machinery (one card, one decision, one
+        commit of the whole batch). A PARTIALLY applied batch does NOT
+        open a card: committing "the batch" would double-apply the
+        already-previewed half, so the honest kickback lists the failed
+        indices and the model re-sends only those ops. The dormant-gate
+        contract holds: the card is the single commit point and never
+        opens over work the user has not seen whole.
+        Returns ``(content, result, preview_state)`` like prepare()."""
+        kickback = self._check_batch_call(name, args)
+        if kickback is not None:
+            return kickback, None, None
+        results, cur, last_result = self._batch_engine(name, batch, commit=False)
+        failed = [r for r in results if not r.get("ok")]
+        applied = [r for r in results if r.get("ok")]
+        if not applied or last_result is None:
+            # Nothing applied: pure per-index kickback, no card.
+            return _ops_result_content(name, results), None, None
+        if failed:
+            # Mixed batch in gate mode: NO card over partially applied
+            # work (see docstring). Nothing staged; fix and re-send the
+            # failed indices only.
+            return (_ops_result_content(name, results)
+                    + "\nNo card opened — fix the failed ops and re-send "
+                      "a batch of ONLY those ops (nothing was staged)."), None, None
+        # Fully applied batch: one aggregated card result + preview.
+        touched = last_result.get("file", "")
+        agg_result = {
+            "status": last_result.get("status", "applied"),
+            "file": touched,
+            "op": "batch",
+            "summary": f"batch: {len(applied)} changes to {touched}",
+            "advisories": last_result.get("advisories", []),
+            # Cumulative net diff the user reviews: difflib over the
+            # whole batch's before/after — per-op diffs would each
+            # re-show shared context and mislead the review surface.
+            "diff": diff_text(
+                touched,
+                self.state.files.get(touched, ""),
+                cur.files.get(touched, "")),
+        }
+        return _ops_result_content(name, results), agg_result, cur
+
     def execute(self, tool_call: dict) -> tuple[str, dict | None]:
         """Run one write tool call (auto-approve path). Returns
         (lean content, details-or-None).
@@ -1064,19 +1775,36 @@ class EditSession:
         """
         name = tool_call.get("name", "")
         args = tool_call.get("arguments", {}) or {}
-        self.edit_attempts += 1
 
-        budget = self._over_write_budget()
+        budget = self._over_thrash_budget()
         if budget is not None:
+            self.edit_attempts += 1
             return budget, None
 
         op = self.tool_call_to_op(name, args)
         if op is None:
+            self.edit_attempts += 1
+            if "ops" in args:
+                # An ops arg arrived but mapped to nothing usable.
+                return (f"{name} FAILED: 'ops' must be a non-empty list of "
+                        "operation objects, e.g. "
+                        '[{"op": "set_param", "section": "printer", '
+                        '"key": "max_accel", "value": "3000"}]. Nothing '
+                        "was applied."), None
             return f"Unknown write tool: {name}", None
+        if op.get("batch"):
+            # Per-op accounting (plan Step 2): the batch engine increments
+            # edit_attempts per INDEX — a call-level increment on top of
+            # N index increments would miscount work.
+            return self._execute_batch(name, op, args)
 
+        self.edit_attempts += 1
         blocked = self._repetition_blocked(name, args)
         if blocked is not None:
+            # A refused repeat is a wasted call — charge the waste.
             self.last_write_outcome = "correctable"
+            self.thrash_units += 1
+            self.write_failures += 1
             return blocked, None
 
         dup = self._duplicate_of_committed(op)
@@ -1095,18 +1823,27 @@ class EditSession:
             # retry. user_gated now only comes from explicit user
             # decisions (duplicate target, decline, timeout, stop).
             self.last_write_outcome = "correctable"
+            # A failed write is the archetype of chargeable waste (the
+            # success path above stays FREE — reviewable work, not thrash).
+            self.thrash_units += 1
+            self.write_failures += 1
             count = self._note_failure(name, args)
-            return (_lean_error_content(name, result)
+            lean_err = _lean_error_content(name, result)
+            return (lean_err
                     + self._repeat_directive(name, count)), None
 
         kick = self._registry_kickback(name, args, result)
         if kick is not None:
             # Correctable: unknown gcode gets one pre-staging correction
-            # round before any card/stage (Sir 2026-09-20).
+            # round before any card/stage (Sir 2026-09-20). NOT charged:
+            # the deliberate re-send is the model's plugin claim, not
+            # thrash (same reasoning as the duplicate kickback).
             self.last_write_outcome = "correctable"
             return kick, None
 
         self.commit(new_state, name, result, raw_op=op)
+        # Work-earned cap credit: this call applied one op.
+        self.applied_write_calls += 1
         return _lean_success_content(name, result), self._details_for(name, result)
 
     def prepare(
@@ -1123,16 +1860,30 @@ class EditSession:
         """
         name = tool_call.get("name", "")
         args = tool_call.get("arguments", {}) or {}
-        self.edit_attempts += 1
 
-        budget = self._over_write_budget()
+        budget = self._over_thrash_budget()
         if budget is not None:
+            self.edit_attempts += 1
             return budget, None, None
 
         op = self.tool_call_to_op(name, args)
         if op is None:
+            self.edit_attempts += 1
+            if "ops" in args:
+                # An ops arg arrived but mapped to nothing usable — same
+                # kickback as execute() (paths must not drift).
+                return (f"{name} FAILED: 'ops' must be a non-empty list of "
+                        "operation objects, e.g. "
+                        '[{"op": "set_param", "section": "printer", '
+                        '"key": "max_accel", "value": "3000"}]. Nothing '
+                        "was applied."), None, None
             return f"Unknown write tool: {name}", None, None
+        if op.get("batch"):
+            # Per-op accounting (see execute()): batch increments
+            # edit_attempts per INDEX, never a call-level +1 on top.
+            return self._prepare_batch(name, op, args)
 
+        self.edit_attempts += 1
         # Review fix 2026-09-26: execute() refuses an identical call that
         # already failed 3+ times; prepare() (the product/approval path)
         # was missing the same guard, so a looping model reached the
@@ -1141,6 +1892,8 @@ class EditSession:
         blocked = self._repetition_blocked(name, args)
         if blocked is not None:
             self.last_write_outcome = "correctable"
+            self.thrash_units += 1
+            self.write_failures += 1
             return blocked, None, None
 
         dup = self._duplicate_of_committed(op)
@@ -1154,9 +1907,13 @@ class EditSession:
         if result["status"] == "error":
             # Correctable kickback (see execute() — the commented-param
             # refusals are gone, so no write error is user-gated).
+            # Failed write = charged waste (paths must not drift).
             self.last_write_outcome = "correctable"
+            self.thrash_units += 1
+            self.write_failures += 1
             count = self._note_failure(name, args)
-            return (_lean_error_content(name, result)
+            lean_err = _lean_error_content(name, result)
+            return (lean_err
                     + self._repeat_directive(name, count)), None, None
 
         kick = self._registry_kickback(name, args, result)
@@ -1191,13 +1948,43 @@ class EditSession:
             self._identical_failures = {
                 k: v for k, v in self._identical_failures.items()
                 if file_name not in k}
+        # B4 (round-1 review 2026-10-25): this commit LANDED an op, so any
+        # earlier failure of the same (op, file) — the classic
+        # old_text-mismatch-then-fix retry — is recovered. Drop its key
+        # from the confab guard's open set; failures on OTHER targets stay
+        # open and still stamp the footer.
+        if raw_op is not None:
+            self._open_failures.discard(self._op_file_key(raw_op))
         details = self._details_for(name, result)
         # Stacked edits to the same file replace its staged entry so the
         # draft UI shows the cumulative result, not intermediate states.
+        # A move_section touches TWO files (target + source), so both
+        # entries are refreshed under the same rule — a stale source entry
+        # would show the section still in its old home.
+        src_file = str((result.get("diff_from") or {}).get("file") or "")
+        touched = [file_name] + ([src_file] if src_file and src_file != file_name else [])
+        # `created` must SURVIVE the per-file replacement below: five
+        # move_section ops into one new file create it on the first and
+        # merely edit it on the rest, so only the first carries the flag —
+        # and the staged entry the UI/harness sees is the last one.
+        was_created = {
+            e["file"] for e in self.pending_edits if e.get("created")
+        }
         self.pending_edits = [
-            e for e in self.pending_edits if e["file"] != file_name
+            e for e in self.pending_edits if e["file"] not in touched
         ]
-        self.pending_edits.append(details)
+        for staged_file in touched:
+            entry = dict(details)
+            entry["file"] = staged_file
+            entry["newText"] = self.state.files.get(staged_file, "")
+            if staged_file == file_name and (result.get("created")
+                                             or staged_file in was_created):
+                entry["created"] = True
+            if staged_file != file_name:
+                entry["summary"] = (
+                    f"source side: section left {staged_file}"
+                    if result.get("op") == "move_section" else entry["summary"])
+            self.pending_edits.append(entry)
         self._last_file = file_name
         self.committed_ops.append(
             {"name": name, "op": result.get("op", name),
@@ -1207,8 +1994,8 @@ class EditSession:
         # Post-hoc review (2026-10-02): one transcript record per op, and
         # the net text we just handed the client for this file.
         self._record_edit(name, result, raw_op)
-        if file_name:
-            self.pushed_files[file_name] = self.state.files.get(file_name, "")
+        for staged_file in touched:
+            self.pushed_files[staged_file] = self.state.files.get(staged_file, "")
 
     def revalidate_and_commit(
         self, op: dict, context_files: dict | None,
@@ -1225,6 +2012,63 @@ class EditSession:
         ``invalidated`` so the card re-renders honestly.
         """
         name = "config_write" if op.get("op") == "new_file" else "config_edit"
+
+        if op.get("batch"):
+            # Batch envelope approve (prepare()/card path): the card was
+            # built over a fully-applied PREVIEW; the decision commits
+            # the SUB-OPS one per change-set row (never the envelope —
+            # committed_ops shape is row-per-op for replay/undo, PR #36
+            # ghost family). Re-validate each sub-op sequentially
+            # against the replayed state, exactly as the engine did at
+            # prepare time; any sub-op that no longer applies after the
+            # user's manual edits invalidates the whole card honestly
+            # (partial approve of a batch the user reviewed as ONE diff
+            # would strand half a preview).
+            subs = [dict(s) for s in (op.get("ops") or [])]
+            file_default = str(op.get("file", "") or "")
+            for sub in subs:
+                sub.setdefault("file", file_default)
+            if context_files:
+                try:
+                    replay = ProjectState.from_context_files(context_files)
+                except Exception as exc:
+                    return {"status": "error",
+                            "error": f"Invalid context refresh: {exc}"}
+                replay_baseline = replay.validate()
+                for prior in self.committed_ops:
+                    replay, prior_result = replay.apply(replay_baseline,
+                                                        prior["raw_op"])
+                    if prior_result["status"] == "error":
+                        return {
+                            "status": "error",
+                            "error": (
+                                "config changed since this proposal — an "
+                                "earlier approved edit no longer applies "
+                                f"({prior_result.get('error', 'anchor lost')})"
+                            ),
+                            "newErrors": prior_result.get("newErrors", []),
+                        }
+            else:
+                replay, replay_baseline = self.state, self.baseline
+            cur = replay
+            staged_results: list[tuple[dict, "ProjectState", dict]] = []
+            for sub in subs:
+                nxt, res = cur.apply(replay_baseline, sub)
+                if res["status"] == "error":
+                    res.setdefault(
+                        "error", "config changed since this proposal")
+                    return res
+                cur = nxt
+                staged_results.append((sub, nxt, res))
+            # All sub-ops re-validated: commit each as its own row.
+            for sub, nxt, res in staged_results:
+                self.commit(nxt, name, res, raw_op=sub)
+            last_res = staged_results[-1][2]
+            last_res["details"] = self._details_for(name, last_res)
+            last_res["summary"] = (f"batch: {len(subs)} changes to "
+                                   f"{last_res.get('file', '')}")
+            return last_res
+
         if not context_files:
             # No refresh info: validate against the current session state.
             new_state, result = self.state.apply(self.baseline, op)
@@ -1302,7 +2146,8 @@ class EditSession:
         """Client-facing staged edits (the UI consumes these; diffs stay
         out of chat tool-call records to keep responses lean)."""
         return [
-            {k: e.get(k) for k in ("file", "op", "summary", "newText", "advisories")}
+            {k: e.get(k) for k in ("file", "op", "summary", "newText",
+                                   "advisories", "created")}
             for e in self.pending_edits
         ]
 
@@ -1324,7 +2169,7 @@ class EditSession:
             return ("set_param", file_name, section,
                     str(op.get("key", "")).casefold())
         if kind in ("replace_section", "add_section", "delete_section",
-                    "comment_section", "uncomment_section"):
+                    "comment_section", "uncomment_section", "move_section"):
             return (kind, file_name, section)
         if kind in ("rename_section", "add_include", "remove_include",
                     "comment_include"):
@@ -1351,6 +2196,15 @@ class EditSession:
             resolved = op
         file_name = result.get("file", "")
         section = str(resolved.get("section", "") or "").strip().strip("[]")
+        # Canonical header from the PRE-apply resolution (BULK-02 bank run
+        # 2026-10-17): for comment_section the post-apply state can no
+        # longer see the header it just '#'ed, so re-resolving the raw op
+        # here loses the 'gcode_macro ' prefix. The engine's resolvedSection
+        # is authoritative when present.
+        canonical = str(result.get("resolvedSection") or "").strip().strip("[]")
+        if canonical:
+            section = canonical
+            resolved = {**resolved, "section": canonical}
         key = (str(resolved.get("key", "") or "")
                if resolved.get("op") == "set_param" else "")
         diff = result.get("diff") or {}
@@ -1381,6 +2235,45 @@ class EditSession:
                     prior["superseded"] = True
                     prior["supersededBy"] = record["id"]
         self.edit_records.append(record)
+        # move_section carries the SOURCE-side diff: emit a second row so
+        # the change set shows both halves of the move (and a trace-based
+        # coverage criterion sees the source deletion). Target row is the
+        # authoritative "section now lives here"; this one records the
+        # removal. Ids stay sequential across both rows.
+        #
+        # The move is ATOMIC (round-1 review 2026-10-25, L1): one raw op
+        # performs both halves, so the source row must NOT replay it —
+        # replaying twice hit "Section not found in <src>" and reported a
+        # bogus stale row on EVERY keep-all resolve. The row is therefore
+        # display-only, and both rows share a _unit key: resolve treats
+        # the unit as kept when ANY row of it is kept and as rejected
+        # only when ALL rows are rejected — a half-move is not a thing.
+        diff_from = result.get("diff_from") or {}
+        if diff_from:
+            src_name = str(diff_from.get("file") or "")
+            before_s = str(diff_from.get("before", ""))
+            after_s = str(diff_from.get("after", ""))
+            added_s, removed_s = diff_counts(before_s, after_s)
+            unit = f"move:{section.casefold()}:{src_name.casefold()}"
+            record["_unit"] = unit
+            self.edit_records.append({
+                "id": f"e{len(self.edit_records)}",
+                "file": src_name,
+                "section": section,
+                "key": "",
+                "op": result.get("op", name),
+                "summary": f"moved section [{section}] out of {src_name}",
+                "added": added_s,
+                "removed": removed_s,
+                "diffText": diff_text(src_name, before_s, after_s),
+                "advisories": [],
+                "superseded": False,
+                "supersededBy": "",
+                "_key": None,
+                "_unit": unit,
+                "_display_only": True,
+                "_raw_op": None,
+            })
 
     _RECORD_KEYS = ("id", "file", "section", "key", "op", "summary",
                     "added", "removed", "diffText", "advisories",
@@ -1786,6 +2679,11 @@ def format_approval_result(name: str, decision: dict) -> tuple[str, dict | None]
         # STAGED/APPROVED sentence differs, so the two write paths cannot
         # drift again.
         content = f"{name} applied — {decision.get('summary', '')}"
+        # R1: same realized-change block as _lean_success_content — the
+        # gate path is the PRODUCT path, so a swallowed line must be as
+        # visible after approval as it is on auto-approve (drift law).
+        content += _realized_change_block(
+            (details or {}).get("op", ""), (details or {}).get("diff"))
         runtime = _runtime_section_directive({"advisories": advisories},
                                              approved=True)
         if advisories:

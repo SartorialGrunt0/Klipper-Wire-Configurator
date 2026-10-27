@@ -32,6 +32,7 @@ from services.ai_edit_tools import (
     EDIT_TOOL_NAMES,
     EDIT_TOOL_SPECS,
     EditSession,
+    cap_grant_per_applied_write,
     create_approval,
     find_approval_for_request,
     format_approval_result,
@@ -289,6 +290,14 @@ SYSTEM_PROMPT = (
     "- Klipper G-code commands and macro names (G28, M104, BED_MESH_CALIBRATE, "
     "SET_FAN_SPEED, PRINT_START, etc.) are NOT tools — never invoke them as "
     "tool calls.\n"
+    "- After edits are applied, the FINAL reply must not re-quote the edited "
+    "config as fenced code blocks — quote section and parameter names inline "
+    "instead. The edited text is already visible to the user in the review "
+    "pane, and pasting a block there is a duplicate that reads as an unsaved "
+    "draft. The restriction covers ONLY content the review pane already "
+    "shows: when nothing was staged and the user asked for a snippet or "
+    "template as text (e.g. 'return it as a cfg block'), include the "
+    "fenced block — it is the only way the user sees what you wrote.\n"
 )
 
 
@@ -1146,8 +1155,12 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
     ),
     "search_user_configs": (
         "Search the user's config files by filename or content keyword "
-        "(query='level_bed'|'skr'|'bed_mesh', limit=N). Use when the user names "
-        "a macro or section without saying which file it is in."
+        "(query='level_bed'|'skr'|'bed_mesh', limit=N; several names at once: "
+        "keywords=['level_bed','old_probe_home']). Every hit lists a "
+        "REFERENCES checklist — each occurrence with section + line number — "
+        "so rename/'every reference' jobs edit from the list and re-search "
+        "until the counts hit 0. Use when the user names a macro or section "
+        "without saying which file it is in."
     ),
     "search_example_configs": "Search example configs by board or printer (query='voron', limit=N)",
     "read_example_config": "Read a full example config file (filename='generic-....cfg')",
@@ -1210,13 +1223,18 @@ _EDIT_TOOL_SNIPPETS: dict[str, str] = {
     "config_edit": (
         "Apply one mechanical edit to the user's config "
         "(file='printer.cfg', op='set_param'|'add_section'|'replace_section' "
-        "|'delete_section'|'rename_section'|'patch_section' "
+        "|'delete_section'|'move_section'|'rename_section'|'patch_section' "
         "|'comment_section'|'uncomment_section'|'delete_file' "
         "|'add_include'"
         "|'remove_include'|'comment_include', section='bed_mesh', key='speed', value='50', "
         "new_section='gcode_macro MY_MACRO' for rename_section (renames the "
         "section header, body kept exactly — ALWAYS use this to rename a "
         "section or macro, never delete+re-add), "
+        "to_file='fans.cfg' for move_section (moves the section into that "
+        "file, creating it if new — the body is carried exactly and removed "
+        "from the source in the same op; ALWAYS use this to move a section "
+        "between files, never delete+re-add, and add its [include] with "
+        "add_include afterwards when to_file is new), "
         "text='body for add/replace_section — replace_section replaces "
         "the ENTIRE body, include every param to keep', old_text='exact lines to "
         "replace', new_text='replacement lines — new_text REPLACES "
@@ -1231,7 +1249,12 @@ _EDIT_TOOL_SNIPPETS: dict[str, str] = {
         "project (remove its [include] line first). value must be ONE LINE — "
         "multi-line values (gcode:) are dropped by some tool-call "
         "channels, write those with replace_section/patch_section. "
-        "One op per call; changes are "
+        "Batch multiple changes to one file in ONE call with "
+        "ops=[{op=..., section=..., ...}, ...] (same fields per entry, "
+        "file applies to all; applied in order, a failed entry is named "
+        "by index while the rest apply) instead of multiple calls; never "
+        "abbreviate or elide body content in text/new_text. A single "
+        "change is a single-op call; changes are "
         "validated and staged "
         "for user review"
     ),
@@ -1282,12 +1305,16 @@ LIST_HARDWARE_SPEC = {
         "whose name contains the keyword and misses e.g. [dotstar] or "
         "[output_pin casing_light]. type must be EXACTLY one of: 'led' "
         "(also lights/rgb), 'fan', 'stepper' (includes [tmc2240 "
-        "stepper_x]), 'extruder', 'heater', 'probe', 'accelerometer', "
+        "stepper_x]; the extruder's own stepper is NOT a member — a "
+        "note in the result names it], 'driver'/'drivers' (stepper "
+        "drivers like [tmc2209 ...]), 'extruder' (also 'hotend'/'nozzle'), "
+        "'heater'/'heaters'/'bed', 'probe', 'accelerometer', "
         "'mcu'/'board', 'servo', 'display', 'filament_sensor', "
-        "'endstop', 'macro'; or any literal section type ('bed_mesh', "
-        "'idle_timeout'). Any other type fails and the result lists "
-        "the valid classes. No type returns a one-line-per-group "
-        "summary of everything present."
+        "'endstop', 'macro' (gcode_macro/delayed_gcode only); or "
+        "any literal section type ('bed_mesh', 'idle_timeout'). "
+        "Any other type fails and the result lists the valid classes. "
+        "No type returns a one-line-per-group summary of everything "
+        "present."
     ),
     "inputSchema": {
         "type": "object",
@@ -1342,7 +1369,8 @@ _LOAD_SKILL_NUDGE_TEXT = (
     "Unless the user explicitly said NOT to change their files, the block "
     "you just wrote in chat text is inert and must be redone through the "
     "tools: call load_skill(name='config-editing') now, then apply the "
-    "change with the edit tool, one operation per call."
+    "change with the edit tool (multiple changes to one file go in ONE "
+    "call's ops list)."
 )
 
 
@@ -1536,9 +1564,10 @@ def _build_mcp_tool_context(edit_capable: bool = False, *,
     parts.append("")
     parts.append(
         "- list_hardware: List EVERY section of a hardware class "
-        "(type='led'|'fan'|'stepper'|'extruder'|'heater'|'probe'|"
-        "'accelerometer'|'mcu'|'servo'|'display'|'filament_sensor'|"
-        "'endstop'|'macro' — exactly one of these, or a literal section "
+        "(type='led'|'fan'|'stepper'|'driver'|'extruder'|"
+        "'heater'|'probe'|'accelerometer'|'mcu'|'servo'|"
+        "'display'|'filament_sensor'|'endstop'|'macro' — "
+        "exactly one of these, or a literal section "
         "type like 'bed_mesh'; any other type fails and lists the "
         "valid ones) from the CURRENT working state, "
         "each with full text + file+line — use before class-wide edits "
@@ -2816,8 +2845,31 @@ def _build_tool_result_message(tool_call: dict, result_text: str) -> str:
 
 MAX_MCP_TOOL_TURNS = 10
 # With the write tools on, multi-edit requests chain read->edit->retry
-# round-trips; 10 exhausted too early (plan Phase 1).
-MAX_MCP_TOOL_TURNS_EDIT = 20
+# round-trips; 10 exhausted too early (plan Phase 1). Raised 20 -> 50
+# (2026-10-16 large-edit rework): a 62-section request batched via ops[]
+# needs ~15-25 CALLS; 20 turned the cap itself into the early-exit the
+# user saw. The runaway guard is now the thrash budget + the absolute
+# per-request op ceiling below, not the turn cap.
+MAX_MCP_TOOL_TURNS_EDIT = 50
+# Work-earned cap credit (2026-10-26): this flat cap stays FULLY
+# chargeable to everything (reads, searches, failed writes), but each
+# config_edit/config_write call that applied at least one op raises the
+# cap for the rest of the request (cap_grant_per_applied_write(),
+# default +5/call, KWC_CAP_GRANT_PER_APPLIED_WRITE; 0 = flat A/B arm).
+# The 160-section dogfood proved the flat number charges correct work:
+# two runs died at exactly 50 mid-batch (live log 2026-10-26). Guarding
+# against a runaway stays the thrash budget + _identical_failures +
+# MAX_TOOL_OPS_PER_REQUEST below, none of which the credit relaxes.
+# Per-message tool-call slice bound (the `tool_calls[:N]` execution
+# window). Non-edit requests stay at 10; an edit-capable request gets 20
+# per message so one batched multi-edit turn is never silently truncated.
+MAX_TOOL_CALLS_PER_MESSAGE = MAX_MCP_TOOL_TURNS
+MAX_TOOL_CALLS_PER_MESSAGE_EDIT = 20
+# Invisible runaway ceiling: absolute executed tool-call cap per request.
+# Never announced to the model (budget pressure stays invisible until the
+# thrash budget itself is spent); hitting it is a harness bug worth a
+# log line, not a budget the model is expected to plan around.
+MAX_TOOL_OPS_PER_REQUEST = 500
 # When a model ends its turn with only a tool call and no visible text
 # (tool-loop exhaustion, an unparseable call format, or a final tool-only
 # response), re-prompt it without tools to force a direct text answer.
@@ -3423,6 +3475,8 @@ def _mirror_user_config_files() -> dict[str, dict]:
     return files
 
 
+
+
 @router.post("/ai/chat")
 async def chat_proxy(req: ChatRequest):
     """Proxy chat messages to the user's configured API provider."""
@@ -3582,6 +3636,9 @@ async def chat_proxy(req: ChatRequest):
                 usage_events.append(initial_usage)
 
             tool_turns = 0
+            # Credit tracker for the work-earned cap extension (below):
+            # write calls already paid into turn_cap.
+            credited_write_calls = 0
             current_messages = list(messages)
             executed_tool_names: list[str] = []
             executed_tool_calls: list[dict] = []
@@ -3642,9 +3699,48 @@ async def chat_proxy(req: ChatRequest):
 
             turn_cap = (MAX_MCP_TOOL_TURNS_EDIT if edit_capable
                         else MAX_MCP_TOOL_TURNS)
-            while tool_turns < turn_cap:
+            while True:
+                # Work-earned cap credit (2026-10-26): every write CALL
+                # that applied at least one op raises the edit arm's cap
+                # by cap_grant_per_applied_write(). The flat cap stays
+                # fully chargeable to reads/searches/failed writes, so a
+                # model that never lands an edit still dies at 50; one
+                # that is getting work done extends its own budget. The
+                # 500-op runaway ceiling and the thrash budget below are
+                # unchanged and cap the extension. CREDIT IS EARNED
+                # BEFORE the cap is re-checked: the dogfood run committed
+                # a batch on its 50th call — an exhausted write must
+                # still buy its extension (a while-condition credit
+                # would exit first and drop it).
+                if (edit_capable and edit_session is not None
+                        and edit_session.applied_write_calls
+                        > credited_write_calls):
+                    new_credit = (edit_session.applied_write_calls
+                                  - credited_write_calls)
+                    credited_write_calls = edit_session.applied_write_calls
+                    turn_cap += cap_grant_per_applied_write() * new_credit
+                    logger.info(
+                        "Cap credit granted | applied write calls=%d "
+                        "turn_cap=%d requestId=%s",
+                        credited_write_calls, turn_cap,
+                        req.requestId or 'none')
+                if tool_turns >= turn_cap:
+                    break
                 if stop_event is not None and stop_event.is_set():
                     raise ChatStoppedError()
+                # Invisible runaway ceiling (2026-10-16): an absolute
+                # executed-call cap per request. NOT announced to the
+                # model and NOT part of the thrash directive — reaching
+                # 500 executed calls means the harness itself has a bug,
+                # so log loudly and stop with what we have.
+                if len(executed_tool_calls) >= MAX_TOOL_OPS_PER_REQUEST:
+                    logger.error(
+                        "Runaway ceiling hit | %d tool calls executed in "
+                        "one request (requestId=%s) — stopping the loop; "
+                        "this is a harness bug, not a budget",
+                        len(executed_tool_calls), req.requestId or 'none',
+                    )
+                    break
 
                 # ── Mid-loop steer injection (turn boundary) ──
                 # A steer is user speech: it lands as the NEXT USER TURN,
@@ -3669,6 +3765,14 @@ async def chat_proxy(req: ChatRequest):
                     # needed — after the model burned its writes driving
                     # the wrong way.
                     tool_turns = 0
+                    # apply_steer() zeroed the session's credit counter;
+                    # rebase the cap with it so the tracker and the cap
+                    # never drift (the model re-earnes credit with the
+                    # steer's new work — "the human bought another
+                    # round", not "the human banked the old extension").
+                    turn_cap = (MAX_MCP_TOOL_TURNS_EDIT if edit_capable
+                                else MAX_MCP_TOOL_TURNS)
+                    credited_write_calls = 0
                     steers_applied += len(_steers)
                     _progress_entry = _chat_progress.get(req.requestId)
                     if _progress_entry is not None:
@@ -3718,6 +3822,10 @@ async def chat_proxy(req: ChatRequest):
                     ):
                         malformed_reprompts += 1
                         tool_turns += 1
+                        # THRASH charge: a format-correction round-trip is
+                        # spent work, whatever it produces (2026-10-16).
+                        if edit_session is not None:
+                            edit_session.charge_waste()
                         logger.warning(
                             "Malformed tool call | re-prompting with format "
                             "correction (%d/%d) preview=%s",
@@ -3789,10 +3897,10 @@ async def chat_proxy(req: ChatRequest):
                                     # decision. Refusal wins. (The commented-
                                     # param refusals this clause originally
                                     # guarded were removed 2026-09-20.)
-                                    # 'budget' (Phase-5 write cap) is the
-                                    # same shield: the loop ORDERED the model
-                                    # to stop editing and report, so a cfg
-                                    # block in that final answer is the report,
+                                    # 'budget' (thrash budget spent) is the
+                                    # same shield: the loop just told the
+                                    # model to rework/report, so a cfg block
+                                    # in that final answer is the report,
                                     # not an inert draft to nudge back.
                                     and edit_session.last_write_outcome
                                     not in ('user_gated', 'budget')
@@ -3978,7 +4086,13 @@ async def chat_proxy(req: ChatRequest):
                 # Execute every tool call in this round first, then build the
                 # follow-up messages in the format the provider expects.
                 results = []
-                for tool_call in tool_calls[:MAX_MCP_TOOL_TURNS]:
+                # Per-message execution window: an edit-capable request
+                # gets a wider slice so ONE batched multi-edit message is
+                # never silently truncated mid-batch (2026-10-16; the
+                # non-edit path keeps 10).
+                _msg_cap = (MAX_TOOL_CALLS_PER_MESSAGE_EDIT if edit_capable
+                            else MAX_TOOL_CALLS_PER_MESSAGE)
+                for tool_call in tool_calls[:_msg_cap]:
                     repeat_key = _repeat_read_key(tool_call)
                     if repeat_key and repeat_key in read_ledger:
                         # Literal repeat of a read already answered this
@@ -4120,6 +4234,14 @@ async def chat_proxy(req: ChatRequest):
                         # Executed for the first time this request: any
                         # literal repeat now gets the lean directive.
                         read_ledger.add(repeat_key)
+                        # THRASH charge (2026-10-16): one executed read
+                        # call. Only reaches here for REPEAT_GUARD_TOOLS
+                        # that actually ran — repeat-dead reads die above
+                        # and never charge, matching "reads past grace"
+                        # as the waste definition (reading different
+                        # things is discovery; the grace covers it).
+                        if edit_session is not None:
+                            edit_session.charge_read()
                     logger.info(
                         "Tool executed | name=%s result_chars=%d",
                         tool_call["name"], len(result_text),
@@ -4223,6 +4345,12 @@ async def chat_proxy(req: ChatRequest):
                 if stop_event is not None and stop_event.is_set():
                     raise ChatStoppedError()
                 empty_reprompts += 1
+                # THRASH charge: the empty round-trip was really spent.
+                # Deliberately NOT refunded when the re-prompt turns out
+                # productive (`empty_reprompts -= 1` below is display/
+                # accounting for the provider-reprompt counter only).
+                if edit_session is not None:
+                    edit_session.charge_waste()
                 logger.warning(
                     "Empty final content | re-prompting without tools (attempt %d/%d)",
                     empty_reprompts, EMPTY_REPROMPT_LIMIT,
@@ -4387,12 +4515,16 @@ async def chat_proxy(req: ChatRequest):
             # partial success, which the cards show honestly).
             if (edit_session is not None
                     and edit_session.edit_attempts
-                    and not edit_session.pending_edits):
+                    and (not edit_session.pending_edits
+                         or edit_session.unresolved_write_failures())):
                 logger.warning(
-                    "Confab guard | write attempts=%d outcome=%s staged=0"
-                    " | appending trace-truth note",
+                    "Confab guard | write attempts=%d outcome=%s staged=%d"
+                    " failures=%d unresolved=%d | appending trace-truth note",
                     edit_session.edit_attempts,
                     edit_session.last_write_outcome,
+                    len(edit_session.pending_edits),
+                    edit_session.write_failures,
+                    edit_session.unresolved_write_failures(),
                 )
                 # The trace distinguishes a USER decision from technical
                 # failures — the note must not conflate them (a blanket
@@ -4404,6 +4536,24 @@ async def chat_proxy(req: ChatRequest):
                         "\n\n---\n*Note: the user chose not to apply the "
                         "proposed change(s); nothing is staged for "
                         "saving.*"
+                    )
+                elif edit_session.pending_edits:
+                    # Step 4 (2026-10-17): partial success over FAILED
+                    # calls. If the model still closes "all done", the
+                    # trace stamps the reply — the cards show what
+                    # staged, the note states what did not. Counts
+                    # UNRESOLVED failures only (B4, round-1 review
+                    # 2026-10-25): a failed op the model re-landed by
+                    # retrying is staged and must not appear in the note.
+                    _fails = edit_session.unresolved_write_failures()
+                    note = (
+                        "\n\n---\n*Note: "
+                        + f"{_fails} edit call"
+                        + ("" if _fails == 1 else "s")
+                        + " failed during this request and "
+                        + ("it is" if _fails == 1 else "they are")
+                        + " NOT staged — the reply may claim more than "
+                          "the change set contains.*"
                     )
                 else:
                     note = (

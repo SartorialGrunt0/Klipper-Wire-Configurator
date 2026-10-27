@@ -503,7 +503,138 @@ def test_replace_section_and_foreign_header_refused():
     assert 'G28' not in st1.files['printer.cfg']
     _, r2 = st.apply(base, {'op': 'replace_section', 'file': 'printer.cfg',
                             'section': 'bed_mesh', 'text': 'speed: 1\n[extruder]\nx: 1'})
-    assert r2['status'] == 'error' and 'foreign header' in r2['error']
+    assert r2['status'] == 'error' and 'header line' in r2['error']
+
+
+def test_replace_section_repeated_own_header_refused():
+    """BULK-01 bank run (2026-10-17): text='# purpose\\n[printer]\\n...'
+    kept its SECOND '[printer]' (only the leading line is stripped), so
+    the staged file carried a duplicated header that the strict=False
+    parser silently merges. Only a leading own-header line is tolerated."""
+    st, base = _state()
+    _, r = st.apply(base, {'op': 'replace_section', 'file': 'printer.cfg',
+                           'section': 'printer',
+                           'text': '# purpose\n[printer]\nkinematics: corexy\n'
+                                   'max_velocity: 200\nmax_accel: 1000\n'
+                                   'max_z_velocity: 5\nmax_z_accel: 100'})
+    assert r['status'] == 'error'
+    assert "repeated '[printer]'" in r['error']
+    # a body whose ONLY header is the leading own-header still strips clean
+    st1, r2 = st.apply(base, {'op': 'replace_section', 'file': 'printer.cfg',
+                              'section': 'printer',
+                              'text': '[printer]\nkinematics: corexy\n'
+                                      'max_velocity: 200\nmax_accel: 1000\n'
+                                      'max_z_velocity: 5\nmax_z_accel: 100'})
+    assert r2['status'] == 'applied'
+    assert st1.files['printer.cfg'].count('[printer]') == 1
+
+
+def test_patch_section_new_text_with_header_refused():
+    """BULK-04 bank run (2026-10-17): new_text smuggled six '[...]'
+    sections inside [printer]'s body and reported success — a raw header
+    line can never live inside another section's scope."""
+    st, base = _state()
+    _, r = st.apply(base, {'op': 'patch_section', 'file': 'printer.cfg',
+                           'section': 'printer',
+                           'old_text': 'kinematics: corexy',
+                           'new_text': 'kinematics: corexy\n\n'
+                                       '[stepper_x]\nstep_pin: PF0'})
+    assert r['status'] == 'error'
+    assert 'must not contain a section header' in r['error']
+    assert 'add_section' in r['error']
+
+
+# ── Own-header anchor (BULK-05 bank autopsies, 2026-10-23/24) ─────────
+# The bulk-comment sweep sends old_text/new_text as the section's OWN
+# header line ('[printer]' -> '[printer]\n# purpose') because there is
+# nothing body-anchored to quote, and the header guard rejected all 26
+# ops on both models. An exact own-header anchor is unambiguous: insert
+# the remainder directly after the header.
+
+def test_patch_section_header_anchor_inserts_comment():
+    """Trace shape from guard3-off-27b BULK-05 op[0]."""
+    st, base = _state()
+    st1, r = st.apply(base, {'op': 'patch_section', 'file': 'printer.cfg',
+                             'section': 'printer',
+                             'old_text': '[printer]',
+                             'new_text': '[printer]\n'
+                                         '# Printer settings and motion limits'})
+    assert r['status'] == 'applied', r
+    text = st1.files['printer.cfg']
+    assert text.count('[printer]') == 1
+    lines = text.split('\n')
+    assert lines[lines.index('[printer]') + 1] == \
+        '# Printer settings and motion limits'
+    # body untouched
+    assert 'kinematics: cartesian' in text
+
+
+def test_patch_section_header_anchor_empty_section():
+    """The deliberate body-less-section trap: a header anchor is the
+    ONLY anchor an empty section has (verify-C)."""
+    st, _ = _state()
+    st0 = ProjectState({'printer.cfg': '[printer]\nkinematics: cartesian\n\n'
+                                       '[pause_resume]\n\n[display_status]\n'})
+    st1, r = st0.apply({}, {'op': 'patch_section', 'file': 'printer.cfg',
+                            'section': 'pause_resume',
+                            'old_text': '[pause_resume]',
+                            'new_text': '[pause_resume]\n# resume helper'})
+    assert r['status'] == 'applied', r
+    text = st1.files['printer.cfg']
+    assert text.count('[pause_resume]') == 1
+    assert '[pause_resume]\n# resume helper' in text
+    assert '[display_status]' in text
+
+
+def test_patch_section_header_anchor_new_text_without_header():
+    """Header anchor whose new_text omits the header: insertion keeps
+    the header (a patch that drops a header is never legitimate)."""
+    st, base = _state()
+    st1, r = st.apply(base, {'op': 'patch_section', 'file': 'printer.cfg',
+                             'section': 'bed_mesh',
+                             'old_text': '[bed_mesh]',
+                             'new_text': '# mesh probing settings'})
+    assert r['status'] == 'applied', r
+    text = st1.files['printer.cfg']
+    assert text.count('[bed_mesh]') == 1
+    assert '[bed_mesh]\n# mesh probing settings' in text
+
+
+def test_patch_section_header_anchor_header_only_is_noop():
+    """old_text == new_text == the header: no-op refusal, not a
+    false-success insert."""
+    st, base = _state()
+    _, r = st.apply(base, {'op': 'patch_section', 'file': 'printer.cfg',
+                           'section': 'printer',
+                           'old_text': '[printer]',
+                           'new_text': '[printer]'})
+    assert r['status'] == 'error'
+    assert 'NO change' in r['error']
+
+
+def test_patch_section_foreign_header_anchor_refused():
+    """Anchor line is a header but NOT the op's section: the mismatch
+    names the anchor's own section rather than silently inserting."""
+    st, base = _state()
+    _, r = st.apply(base, {'op': 'patch_section', 'file': 'printer.cfg',
+                           'section': 'printer',
+                           'old_text': '[stepper_x]',
+                           'new_text': '[stepper_x]\n# note'})
+    assert r['status'] == 'error'
+    assert 'anchor' in r['error'].lower()
+
+
+def test_patch_section_own_header_mid_new_text_still_refused():
+    """Own header at a NON-leading position still duplicates the
+    header in the file — same merge-corruption class replace_section
+    refuses (BULK-01)."""
+    st, base = _state()
+    _, r = st.apply(base, {'op': 'patch_section', 'file': 'printer.cfg',
+                           'section': 'printer',
+                           'old_text': 'kinematics: cartesian',
+                           'new_text': '# c\n[printer]\nkinematics: cartesian'})
+    assert r['status'] == 'error'
+    assert 'must not contain a section header' in r['error']
 
 
 def test_replace_section_header_prefixed_body_is_stripped():
@@ -665,6 +796,28 @@ def test_patch_section_include_misroute_names_right_op():
         'op': 'patch_section', 'file': 'macros.cfg', 'section': '',
         'old_text': 'no include here', 'new_text': ''})
     assert rg2['status'] == 'error' and 'Missing required argument: section' in rg2['error']
+
+
+def test_add_section_new_section_key_alias():
+    """BULK-04 bank re-run (2026-10-17): gemma passed the add_section
+    header under 'new_section' — rename_section's NEW-side key — and
+    hit 'Missing required argument: section' 35 times before giving up
+    on config_edit entirely. Resolve the habit (name his way), value
+    lands verbatim case-preserved; add_section has no new/current pair
+    to confuse, so the alias is unambiguous."""
+    st, base = _state()
+    st1, r = st.apply(base, {'op': 'add_section', 'file': 'printer.cfg',
+                             'new_section': 'verify_heater hotend',
+                             'text': 'max_error: 120'})
+    assert r['status'] == 'applied', r
+    assert '[verify_heater hotend]' in st1.files['printer.cfg']
+    # explicit 'section' still wins when both are present
+    st2, r2 = st.apply(base, {'op': 'add_section', 'file': 'printer.cfg',
+                              'section': 'idle_timeout', 'new_section': 'zzz',
+                              'text': 'timeout: 600'})
+    assert r2['status'] == 'applied', r2
+    assert '[idle_timeout]' in st2.files['printer.cfg']
+    assert 'zzz' not in st2.files['printer.cfg']
 
 
 def test_missing_section_wrong_file_names_the_file():
@@ -1230,6 +1383,89 @@ def test_bare_name_add_section_duplicate_guard_resolves():
     assert '\n[Level_Bed]' not in st.files['printer.cfg']
 
 
+def test_add_section_rejects_foreign_header_in_body():
+    """BULK-04 bank re-run (2026-10-17): 'text' carried the driver section
+    too ('stepper_x…\\n[tmc2209 stepper_x]…'). Klipper's parser splits on
+    ANY header line so the file survived, but the changeSet recorded 3
+    rows for 6 sections and the review pane attributed drivers to
+    steppers. One op, one section — the kickback must say so."""
+    st, base = _state()
+    _, r = st.apply(base, {'op': 'add_section', 'file': 'printer.cfg',
+                           'section': 'verify_heater hotend',
+                           'text': 'max_error: 120\n'
+                                   '[verify_heater heater_bed]\n'
+                                   'max_error: 120'})
+    assert r['status'] == 'error'
+    assert 'verify_heater heater_bed' in r['error']
+    assert 'one add_section op per section' in r['error']
+    assert '[verify_heater heater_bed]' not in st.files['printer.cfg']
+    # the section's OWN header re-pasted keeps its existing message
+    _, r2 = st.apply(base, {'op': 'add_section', 'file': 'printer.cfg',
+                            'section': 'verify_heater extruder',
+                            'text': '[verify_heater extruder]\nmax_error: 60'})
+    assert r2['status'] == 'error'
+    assert 'BODY only' in r2['error']
+    # a '#' comment mentioning a header stays legal (not a header line
+    # per RE_SECTION_HEADER's line-anchored match — leading '# ' protects)
+    _, r3 = st.apply(base, {'op': 'add_section', 'file': 'printer.cfg',
+                            'section': 'verify_heater extruder',
+                            'text': '# like [printer] but for heat\nmax_error: 60'})
+    assert r3['status'] == 'applied', r3
+
+
+def test_bare_section_type_never_hijacks_coincident_family_name():
+    """BULK-04 bank re-run (2026-10-17): '[tmc2209 stepper_x]' made a bare
+    'stepper_x' request resolve onto the DRIVER section — the fallback
+    matched the family header's name part without checking that the
+    request is itself a complete section TYPE. Every fix attempt for the
+    missing [stepper_x] bounced off the driver ('already exists
+    [tmc2209 stepper_x]', unknown-param step_pin on [tmc2209]) and
+    add_section was BLOCKED from creating the real stepper. A complete
+    type name must resolve to NOTHING when absent."""
+    cfg = ("[printer]\nkinematics: corexy\n"
+           "\n"
+           "[tmc2209 stepper_x]\nuart_pin: PC1\nrun_current: 0.80\n")
+    st = ProjectState.from_context_files({'printer.cfg': {'content': cfg}})
+    base = st.validate()
+    # edits do NOT touch the driver
+    for op in ({'op': 'set_param', 'file': 'printer.cfg',
+                'section': 'stepper_x', 'key': 'step_pin', 'value': 'PF0'},
+               {'op': 'replace_section', 'file': 'printer.cfg',
+                'section': 'stepper_x', 'text': 'rotation_distance: 40'}):
+        _, r = st.apply(base, op)
+        assert r['status'] == 'error' and 'not found' in r['error'], r
+        assert '[tmc2209 stepper_x]' in st.files['printer.cfg']
+        assert 'uart_pin: PC1' in st.files['printer.cfg']  # driver intact
+    # the full driver header still resolves/edits normally
+    st1, r1 = st.apply(base, {'op': 'set_param', 'file': 'printer.cfg',
+                              'section': 'tmc2209 stepper_x',
+                              'key': 'run_current', 'value': '0.7'})
+    assert r1['status'] in ('applied', 'applied_with_advisory'), r1
+    # add_section stepper_x CREATES the real section — no duplicate guard
+    # hit against the coinciding driver name
+    st2, r2 = st.apply(base, {'op': 'add_section', 'file': 'printer.cfg',
+                              'section': 'stepper_x',
+                              'text': 'step_pin: PF0\ndir_pin: PF1\n'
+                                      'enable_pin: !PD7\n'
+                                      'rotation_distance: 40\n'
+                                      'microsteps: 16'})
+    assert r2['status'] == 'applied', r2
+    assert '[stepper_x]' in st2.files['printer.cfg']
+
+
+def test_bare_family_name_still_resolves_when_not_a_type():
+    # The fallback's ORIGINAL job: 'Level' is not a section type, so a
+    # unique '[gcode_macro Level]' name-part match must still resolve.
+    st = ProjectState.from_context_files({
+        'printer.cfg': {'content': '[gcode_macro Level]\ngcode:\n    G28\n'}})
+    st1, r = st.apply(st.validate(),
+                      {'op': 'set_param', 'file': 'printer.cfg',
+                       'section': 'Level', 'key': 'description',
+                       'value': 'probe level'})
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    assert 'gcode_macro Level' in r['summary']
+
+
 def test_missing_section_wrong_file_resolves_bare_name():
     # Cross-file hint is resolution-aware: bare name in the wrong file
     # names the other file AND the full header to pass.
@@ -1755,3 +1991,96 @@ def test_patch_section_commented_header_misroute_names_uncomment():
         'section': 'gcode_macro PARK', 'old_text': '    G91',
         'new_text': '    G91  # note: #[like_this] is prose'})
     assert r2['status'] in ('applied', 'applied_with_advisory'), r2
+
+
+# ── move_section (2026-10-20: AMBI-02 live probe) ───────────────────────
+#
+# "Move all my fans to a new file" had no single-call path: the model had
+# to config_write the bodies (retyped → comments dropped) and then
+# delete_section per source (qwen3.8-27b staged the copy for aux_fan.cfg
+# and never staged the delete, reporting success). move_section carries
+# the text server-side so both halves are exact and atomic.
+
+MOVE_CFG = """[printer]
+kinematics: cartesian
+max_velocity: 200
+max_accel: 1000
+
+[temperature_fan exhaust_fan]
+pin: PA1
+sensor_type: temperature_host
+max_temp: 80
+target_temp: 40
+# keep this comment
+#max_power: 1.0
+
+[gcode_macro PRINT_START]
+gcode:
+    G28
+"""
+
+
+def _move_state(extra: dict | None = None):
+    files = {'printer.cfg': {'content': MOVE_CFG}}
+    files.update(extra or {})
+    st = ProjectState.from_context_files(files)
+    return st, st.validate()
+
+
+def test_move_section_into_new_file_is_byte_exact():
+    st, base = _move_state()
+    st1, r = st.apply(base, {'op': 'move_section', 'file': 'printer.cfg',
+                             'section': 'temperature_fan exhaust_fan',
+                             'to_file': 'fans.cfg'})
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    # The section landed byte-exact — comments included (the retyping loss).
+    assert st1.files['fans.cfg'] == (
+        "[temperature_fan exhaust_fan]\npin: PA1\n"
+        "sensor_type: temperature_host\nmax_temp: 80\ntarget_temp: 40\n"
+        "# keep this comment\n#max_power: 1.0\n")
+    # … and left the source in the same op (no duplicate section).
+    assert 'exhaust_fan' not in st1.files['printer.cfg']
+    assert r['needs_include'] == 'fans.cfg'
+    assert r['diff_from']['file'] == 'printer.cfg'
+    assert 'exhaust_fan' not in r['diff_from']['after']
+
+
+def test_move_section_into_existing_file_appends_and_refuses_duplicate():
+    st, base = _move_state({
+        'fans.cfg': {'content': '[fan_generic filter_fan]\npin: PB1\n'}})
+    st1, r = st.apply(base, {'op': 'move_section', 'file': 'printer.cfg',
+                             'section': 'temperature_fan exhaust_fan',
+                             'to_file': 'fans.cfg'})
+    assert r['status'] in ('applied', 'applied_with_advisory'), r
+    assert '[fan_generic filter_fan]' in st1.files['fans.cfg']
+    assert '[temperature_fan exhaust_fan]' in st1.files['fans.cfg']
+    # No include needed — the target already existed.
+    assert 'needs_include' not in r
+
+
+def test_move_section_refuses_duplicate_target_section():
+    """A half-applied copy leaves the same section in two files, which
+    Klipper refuses to load — the move must refuse up front."""
+    st, base = _move_state({
+        'fans.cfg': {'content': '[temperature_fan exhaust_fan]\npin: PA2\n'}})
+    st1, r = st.apply(base, {'op': 'move_section', 'file': 'printer.cfg',
+                             'section': 'temperature_fan exhaust_fan',
+                             'to_file': 'fans.cfg'})
+    assert r['status'] == 'error' and 'already exists' in r['error']
+    # Nothing moved.
+    assert '[temperature_fan exhaust_fan]' in st1.files['printer.cfg']
+
+
+def test_move_section_same_file_and_missing_section_errors():
+    st, base = _move_state()
+    _, r = st.apply(base, {'op': 'move_section', 'file': 'printer.cfg',
+                           'section': 'temperature_fan exhaust_fan',
+                           'to_file': 'printer.cfg'})
+    assert r['status'] == 'error' and 'both source and target' in r['error']
+    _, r2 = st.apply(base, {'op': 'move_section', 'file': 'printer.cfg',
+                            'section': 'fan_generic nope',
+                            'to_file': 'fans.cfg'})
+    assert r2['status'] == 'error' and 'not found' in r2['error'].lower()
+    _, r3 = st.apply(base, {'op': 'move_section', 'file': 'printer.cfg',
+                            'section': 'temperature_fan exhaust_fan'})
+    assert r3['status'] == 'error' and 'to_file' in r3['error']

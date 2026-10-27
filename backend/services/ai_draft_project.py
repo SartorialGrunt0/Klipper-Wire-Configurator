@@ -40,6 +40,18 @@ from services.ai_draft_validation import (
 )
 
 RE_SECTION_HEADER = re.compile(r'^\[([^\]]+)\]\s*$')
+# Parser-aligned header predicate (round-1 review 2026-10-25, L3): BOTH
+# parsers that matter split the file on an INDENTED header line and on a
+# header with a trailing comment — KWC's config_parser matches
+# SECTION_RE against line.strip() with an optional trailing comment, and
+# klippy's own reader strips '#' before matching RawConfigParser.SECTCRE,
+# which itself allows leading whitespace. RE_SECTION Header anchors ']'
+# to EOL against the RAW line, so '  [foo]' and '[foo] # note' slipped
+# past every body guard while the parsers still split there (silent
+# section duplication). Body guards use THIS predicate; RE_SECTION_HEADER
+# stays for _find_section placement scans, which walk real committed
+# files and must keep column-0 semantics.
+RE_HEADER_LINE = re.compile(r'^\s*\[([^\]]+)\]\s*(?:#.*)?$')
 # Param line inside a section body: key, separator (: or =). Mirrors the
 # parser's param shape (column-indented).
 RE_PARAM_LINE = re.compile(r'^(\s*)([A-Za-z_][A-Za-z0-9_.\-]*)\s*([:=])(.*)$')
@@ -341,6 +353,19 @@ def _resolve_section_ref(requested: str, lines: list[str]) -> str:
         return distinct_ci[0]
     if ' ' in requested:  # full-header form that simply isn't there
         return requested
+    # A bare request that is itself a complete Klipper section TYPE
+    # ('stepper_x' is a top-level section per the schema) must NEVER be
+    # hijacked onto a family header whose name part merely coincides
+    # ('[tmc2209 stepper_x]'). BULK-04 bank re-run (2026-10-17): every
+    # fix attempt for the missing [stepper_x] landed on the DRIVER
+    # section — 'already exists [tmc2209 stepper_x]', unknown-param
+    # kickbacks for step_pin on [tmc2209] — 51 failed ops of flail. The
+    # replace_section hijack was caught only by post-merge validation;
+    # had that missed, the driver body would have been overwritten with
+    # stepper params. The fallback exists for names that are NOT types
+    # themselves ('Level_Bed' -> [gcode_macro Level_Bed]).
+    if get_section_def(wanted) is not None:
+        return requested
     matches = [h for h in headers if ' ' in h
                and _header_name_part(h).casefold() == wanted]
     distinct = list(dict.fromkeys(matches))
@@ -377,7 +402,13 @@ def _ambiguous_section_hint(requested: str, lines: list[str]) -> str:
             if header.casefold() == wanted:
                 matches.append(header)
         elif ' ' in header and _header_name_part(header).casefold() == wanted:
-            matches.append(header)
+            # Same type-name guard as _resolve_section_ref (BULK-04): a
+            # request that IS a complete section type has nothing to
+            # disambiguate — a coinciding family name part ('[tmc2209
+            # stepper_x]' for 'stepper_x') is a sibling, not a candidate.
+            # Offering it would steer the model onto the driver section.
+            if get_section_def(wanted) is None:
+                matches.append(header)
     if len(matches) < 2:
         return ''
     return (f" Multiple sections match '{requested}' — pass one of these "
@@ -607,6 +638,21 @@ class ProjectState:
             # cancels out of the delta — while producing zero findings of
             # its own that could skew the comparison.
             control.files[op_file] = '# control placeholder\n'
+        if kind == 'move_section':
+            # move_section is a file-CREATING op too (round-1 review
+            # 2026-10-25, L2): to_file is created when absent, and the
+            # candidate validates in the 2+-file project mode while the
+            # control stayed in the 1-file world — file-set-mode findings
+            # the op never caused (e.g. kinematics_stepper_missing) lit up
+            # as NEW and the whole move was refused with a false ERROR.
+            # config_write making the identical file-set change succeeds,
+            # so project the same placeholder for the created target.
+            to_raw = str(op.get('to_file', '') or '').strip()
+            if to_raw:
+                from pathlib import PurePosixPath
+                to_key = str(PurePosixPath(to_raw.replace('\\', '/')))
+                if to_key and to_key not in self.files:
+                    control.files[to_key] = '# control placeholder\n'
         return control
 
     def _delta_findings(self, baseline: dict[str, dict],
@@ -686,11 +732,22 @@ class ProjectState:
             'advisories': findings['advisories'],
             'diff': {'file': outcome['file'], 'before': base_text, 'after': after_text},
         }
+        # move_section touches TWO files: carry the source-side diff so the
+        # recorder can emit a second change-set row (and the staged entry
+        # for the source file is refreshed, not left stale).
+        if outcome.get('move_from'):
+            src_file = outcome['move_from']
+            result['diff_from'] = {
+                'file': src_file,
+                'before': self.files.get(src_file, ''),
+                'after': new_state.files.get(src_file, ''),
+            }
         # rename_section carries structured from/to through the raw outcome
         # for the chat layer's post-rename directive (see _op_rename_section).
         # needs_include carries through the same way for the post-create
         # include directive (see _op_new_file, 2026-10-12).
-        for k in ('renamed_from', 'renamed_to', 'needs_include'):
+        for k in ('renamed_from', 'renamed_to', 'needs_include',
+                  'created', 'resolvedSection'):
             if k in outcome:
                 result[k] = outcome[k]
         if result['status'] == 'error':
@@ -719,11 +776,23 @@ class ProjectState:
 
     def _apply_raw(self, op: dict) -> dict:
         kind = op.get('op', '')
+        # add_section key alias (BULK-04 re-run 2026-10-17): gemma passed
+        # the header under 'new_section' — rename_section's NEW-side key —
+        # five identical times against 'Missing required argument:
+        # section'. Same law as _resolve_op_section: resolve the model's
+        # identifier habit, never land it in the config (the value is
+        # used verbatim as the header, case preserved). Unambiguous:
+        # add_section has no new-section/current-section pair to confuse.
+        if kind == 'add_section' \
+                and not str(op.get('section') or '').strip() \
+                and str(op.get('new_section') or '').strip():
+            op = {**op, 'section': op['new_section']}
         handler = {
             'set_param': self._op_set_param,
             'add_section': self._op_add_section,
             'replace_section': self._op_replace_section,
             'delete_section': self._op_delete_section,
+            'move_section': self._op_move_section,
             'rename_section': self._op_rename_section,
             'patch_section': self._op_patch_section,
             'comment_section': self._op_comment_section,
@@ -737,16 +806,30 @@ class ProjectState:
         if handler is None:
             return _state_error(
                 f"Unknown op '{kind}'. Valid ops: set_param, add_section, "
-                "replace_section, delete_section, rename_section, "
+                "replace_section, delete_section, move_section, "
+                "rename_section, "
                 "patch_section, comment_section, uncomment_section, "
                 "delete_file, add_include, remove_include, comment_include "
                 "— use exactly one of these, one op per call.")
+        resolved_op = self._resolve_op_section(op)
         try:
-            return handler(self._resolve_op_section(op))
+            outcome = handler(resolved_op)
         except _OpError as exc:  # precondition failure — structured, no raise
             return exc.to_result()
         except KeyError as exc:  # missing required arg — structured, no raise
             return _state_error(f"Missing required argument for {kind}: {exc.args[0]}")
+        # Carry the CANONICAL resolved header through the result (BULK-02
+        # bank run 2026-10-17): the change-set recorder resolved the raw op
+        # against the POST-apply state, where a just-commented
+        # '[gcode_macro M109]' is invisible to the resolver — the row was
+        # recorded as bare 'M109' and the prefix-filtered coverage criterion
+        # saw 2 of 15 commented macros. The pre-apply resolution is the
+        # only place the canonical name still exists.
+        if (isinstance(outcome, dict) and outcome.get('status') == 'ok'
+                and str(resolved_op.get('section') or '')):
+            outcome['resolvedSection'] = (
+                str(resolved_op.get('section')).strip().strip('[]'))
+        return outcome
 
     def _resolve_op_section(self, op: dict) -> dict:
         """Rewrite op['section'] / op['file'] to the real header and key
@@ -947,12 +1030,31 @@ class ProjectState:
                 f"Section '[{header}]' already exists in {filename}. "
                 "Use replace_section or set_param to change it."
             )
-        # Reject a header line duplicated inside the model-authored body.
+        # Header-line guard (BULK-04 bank re-run 2026-10-17, same law as
+        # replace_section/patch_section): the 'text' of add_section is the
+        # BODY of exactly ONE section. A header line inside it — whether
+        # the section's own header re-pasted (old duplicate check) or a
+        # FOREIGN one — makes Klipper's parser split the file there.
+        # Gemma crammed each '[tmc2209 stepper_X]' inside its stepper's
+        # 'text': the file survived (Klipper splits on any header), but
+        # the changeSet recorded 3 rows for 6 sections, the review pane
+        # attributed drivers to steppers, and the honest trace-based
+        # coverage criterion counted 3 of 6. One op, one section: extra
+        # sections belong in their own ops[] entry.
         for line in body.split('\n'):
-            match = RE_SECTION_HEADER.match(line)
-            if match and match.group(1).strip() == header:
+            match = RE_HEADER_LINE.match(line)
+            if match:
+                found = match.group(1).strip()
+                if found == header:
+                    return _state_error(
+                        f"Argument text must be the section BODY only "
+                        f"(no '[{header}]' header line)."
+                    )
                 return _state_error(
-                    f"Argument text must be the section BODY only (no '[{header}]' header line)."
+                    f"Argument text must be the body of [{header}] only — "
+                    f"it contains a section header line '[{found}]'. "
+                    "To add several sections, send one add_section op per "
+                    "section in the ops array."
                 )
         # New-section TYPE token gate (bug 2026-10-07: an op created
         # '[bed_mesh_calibrate]' — a gcode COMMAND name used as a section
@@ -1014,13 +1116,38 @@ class ProjectState:
             scan -= 1
         inner_end = scan
         body_stripped = body.strip('\n')
-        for line in body_stripped.split('\n'):
-            match = RE_SECTION_HEADER.match(line)
-            if match and match.group(1).strip() != header:
-                return _state_error(
-                    f"Argument text must contain only the body of [{header}] "
-                    f"(found foreign header '[{match.group(1).strip()}]')."
-                )
+        # Header guard (BULK bank run 2026-10-17): ANY header line in the
+        # body corrupts the file. A FOREIGN header nests a new section
+        # inside this one; a repeat of the section's OWN header splits it
+        # in two, and both raw parsers merge the halves last-wins
+        # (Klipper is strict=False) — so the damaged file can even
+        # validate clean while silently re-ordering definitions (BULK-01
+        # staged 6 duplicated [header] lines this way, e.g.
+        # text='# purpose\n[printer]\nkinematics:...' whose second
+        # '[printer]' survived because only the FIRST line is stripped).
+        # The own-header exemption below therefore applies ONLY to the
+        # leading line.
+        body_lines_pre = body_stripped.split('\n')
+        for pos, line in enumerate(body_lines_pre):
+            match = RE_HEADER_LINE.match(line)
+            if not match:
+                continue
+            found_hdr = match.group(1).strip()
+            if found_hdr == header and pos == 0:
+                continue  # leading own header: stripped below, as models habitually send it
+            return _state_error(
+                f"Argument text must contain only the body of [{header}] "
+                f"(found header line '[{found_hdr}]' at body line {pos + 1}"
+                + (f" — a repeated '[{header}]' makes both parsers MERGE the two "
+                   f"halves and the first one's params are silently shadowed. "
+                   f"Send the body exactly ONCE with NO header line (a purpose "
+                   f"comment as the first body line is fine); "
+                   f"op='add_section' creates new sections, not "
+                   f"replace_section."
+                   if found_hdr == header else
+                   f"). op='add_section' creates new sections — never embed "
+                   f"a '[...]' header inside another section's body.")
+            )
         # A text that OPENS with the section's own header (models habitually
         # include it) is the body-plus-header shape, not body-only. Strip
         # one leading header line -- without this, keeping the header in the
@@ -1080,6 +1207,101 @@ class ProjectState:
         _splice_blank_gutter(lines, header_index)
         self.files[filename] = '\n'.join(lines)
         return {'status': 'ok', 'file': filename, 'summary': f"deleted section [{header}] from {filename}"}
+
+    def _op_move_section(self, op: dict) -> dict:
+        """Move ONE section, body byte-exact, from this file into to_file.
+
+        ``rename_section`` taught the lesson: a composite intent expressed
+        as delete + re-add forces the MODEL to retype the body, and models
+        drop comments, commented-out blocks and whitespace, and can finish
+        one half while confabulating the other. Live probe 2026-10-20
+        (qwen3.8-27b, "move all my fans"): it copied
+        [fan_generic Aux_Fan] into the new file, never staged the delete
+        from aux_fan.cfg, silently dropped two commented blocks, and
+        reported success. Here the SERVER carries the text, so both halves
+        are exact and land together — or neither does.
+
+        Target: an existing project file (resolved case-insensitively, like
+        every other file ref) or a NEW file created here, in which case the
+        include directive rides out exactly as ``new_file``'s does
+        (2026-10-12 law: a file nothing includes is silently dead). A
+        target that already has the section is refused — Klipper will not
+        load duplicate sections, which is what a half-applied copy leaves.
+        """
+        src = self._require_file(op.get('file'))
+        header = self._require_header(op)
+        to_raw = str(op.get('to_file') or '').strip()
+        if not to_raw:
+            raise _OpError(
+                "Missing required argument: to_file — the file the section "
+                "moves INTO (created if it does not exist), e.g. 'fans.cfg'")
+        dst = _resolve_file_ref(to_raw, self.files)
+        created = dst is None
+        if created:
+            dst = str(PurePosixPath(to_raw.replace('\\', '/')))
+            if not dst or dst.endswith('/'):
+                return _state_error(f"to_file '{to_raw}' is not a file name")
+        if dst == src:
+            return _state_error(
+                f"move_section: '{src}' is both source and target — use "
+                "rename_section to rename a section in place.")
+        src_lines = _split_lines(self.files[src])
+        found = _find_section(src_lines, header)
+        if found is None:
+            return _state_error(
+                f"Section '[{header}]' not found in {src}."
+                + _ambiguous_section_hint(header, src_lines)
+                + _missing_section_hint(self.files, header, src))
+        header_index, end = found
+        # Same gutter trim as delete_section: the block is the section's own
+        # lines, byte-exact, without the blank run that separated it.
+        while end > header_index + 1 and not src_lines[end - 1].strip():
+            end -= 1
+        block = list(src_lines[header_index:end])
+        dst_text = self.files.get(dst, '')
+        # Case-folded (round-1 review 2026-10-25, L6): every other
+        # existence test in the module folds case (_resolve_section_ref,
+        # _section_exists_in_project, _resolve_file_ref), and the engine's
+        # section resolution is case-insensitive — so a dst holding
+        # [FAN_GENERIC first_fan] IS this section and must refuse the
+        # move, not duplicate it into a twin resolution can no longer tell
+        # apart. _find_section stays strict for placement scans.
+        if not created and any(
+                (hm := RE_SECTION_HEADER.match(line))
+                and hm.group(1).strip().casefold() == header.casefold()
+                for line in _split_lines(dst_text)):
+            return _state_error(
+                f"Section '[{header}]' already exists in {dst} — moving it "
+                "would duplicate the section, and Klipper refuses to load "
+                "duplicate sections.")
+        # Remove from the source …
+        del src_lines[header_index:end]
+        _splice_blank_gutter(src_lines, header_index)
+        self.files[src] = '\n'.join(src_lines)
+        # … and place it in the target.
+        if created:
+            self.files[dst] = '\n'.join(block) + '\n'
+        else:
+            self.files[dst] = _insert_above_save_config(dst_text, block)
+        outcome = {'status': 'ok', 'file': dst, 'move_from': src,
+                   'created': created,
+                   'summary': f"moved section [{header}] from {src} to {dst}"}
+        if created:
+            already = False
+            for other in sorted(self.files):
+                if other == dst:
+                    continue
+                for _, path in _include_lines(_split_lines(self.files[other])):
+                    if _include_resolves_to(path, other, dst):
+                        outcome['summary'] += (
+                            f" — [include {path}] already present in {other}")
+                        already = True
+                        break
+                if already:
+                    break
+            if not already:
+                outcome['needs_include'] = dst
+        return outcome
 
     def _op_rename_section(self, op: dict) -> dict:
         """Rewrite a section's HEADER line, body untouched (byte-stable).
@@ -1392,6 +1614,93 @@ class ProjectState:
             return _state_error('Missing required argument: old_text (quote lines exactly as read returned them)')
         if not isinstance(new_text, str):
             return _state_error('Missing required argument: new_text')
+        # Header guard (BULK-04 bank run 2026-10-17): new_text smuggled
+        # SIX new '[stepper_x]...[tmc2209 stepper_z]' sections inside
+        # [printer]'s body and the op reported success. A raw column-0
+        # '[...]' line can never legally exist inside a section's body
+        # scope (the parser would have ended the section there), so any
+        # header line in new_text is corruption by construction.
+        # Own-header ANCHOR exemption (BULK-05 bank autopsies
+        # 2026-10-24): the bulk comment-sweep re-emits the section's own
+        # header because there is nothing body-anchored to quote — and
+        # for body-less sections ([pause_resume]) the header is the ONLY
+        # anchor that exists. When old_text IS exactly the own header
+        # line, the op is an unambiguous insert after the header (same
+        # habit replace_section already strips), so the remainder of
+        # new_text (header itself optional) is inserted directly after
+        # it. A FOREIGN header line anywhere, or the own header at a
+        # non-leading position, stays refused (BULK-04/BULK-01
+        # corruption classes unchanged).
+        old_stripped = old_text.strip()
+        old_hdr_m = RE_SECTION_HEADER.match(old_stripped)
+        old_is_own_header = bool(
+            old_hdr_m and old_hdr_m.group(1).strip() == header)
+        if old_hdr_m and not old_is_own_header:
+            # Anchor is a header but names a DIFFERENT section than the
+            # op — patching it into [{header}] would duplicate the
+            # anchor header inside this body (BULK-01 merge class).
+            # Name the mismatch instead of the generic new_text guard.
+            return _state_error(
+                f"old_text anchor '[{old_hdr_m.group(1).strip()}]' is the "
+                f"header of a different section, not [{header}] — "
+                f"patch_section edits INSIDE [{header}] only. Re-send the "
+                f"op with section='{old_hdr_m.group(1).strip()}' to edit "
+                f"that section, or anchor on its body lines.")
+        if old_is_own_header and old_text == new_text:
+            return _state_error(
+                f"patch_section made NO change: old_text and new_text are "
+                f"identical. To add a comment after the header, new_text "
+                f"must be the header line PLUS the new comment line(s).")
+        if old_is_own_header and old_text != new_text:
+            # The anchor line itself is replaced, so own-header lines in
+            # new_text cannot duplicate it — only FOREIGN headers can
+            # corrupt. Own headers pass anywhere; foreign -> the guard.
+            # Detection is parser-aligned (RE_HEADER_LINE, L3): an
+            # indented or trailing-commented header splits the file just
+            # the same, so it must be judged here too.
+            new_lines_pre = new_text.split('\n')
+            if not any(
+                    (m := RE_HEADER_LINE.match(l))
+                    and m.group(1).strip() != header
+                    for l in new_lines_pre):
+                insert_body = [l for l in new_lines_pre
+                               if not ((hm := RE_HEADER_LINE.match(l))
+                                       and hm.group(1).strip() == header)]
+                if not any(s.strip() for s in insert_body):
+                    # L5: new_text was ONLY header lines — after dropping
+                    # them nothing would be inserted, yet the branch below
+                    # would report 'patched' on a byte-identical file. A
+                    # patch that changes nothing must say so (same law as
+                    # the old_text == new_text no-op above).
+                    return _state_error(
+                        f"patch_section made NO change: new_text contains "
+                        f"only section-header line(s) — nothing would be "
+                        f"inserted into [{header}]. Add the comment or body "
+                        f"line(s) you actually want after the header.")
+                lines = _split_lines(self.files[filename])
+                found = _find_section(lines, header)
+                if found is None:
+                    return _state_error(
+                        f"Section '[{header}]' not found in {filename}."
+                        + _ambiguous_section_hint(header, lines)
+                        + _missing_section_hint(self.files, header, filename)
+                        + " Read the file first."
+                    )
+                header_index, end = found
+                section_lines = lines[header_index + 1:end]
+                lines[header_index + 1:end] = insert_body + section_lines
+                self.files[filename] = '\n'.join(lines)
+                return {'status': 'ok', 'file': filename,
+                        'summary': f"patched [{header}] in {filename}"}
+        for line in new_text.split('\n'):
+            m_hdr = RE_HEADER_LINE.match(line)
+            if m_hdr:
+                return _state_error(
+                    f"new_text must not contain a section header "
+                    f"('[{m_hdr.group(1).strip()}]') — patch_section edits "
+                    f"INSIDE [{header}] only. To create a new section use "
+                    f"op='add_section' (one per section, or list them in one "
+                    f"ops=[...] batch).")
 
         lines = _split_lines(self.files[filename])
         found = _find_section(lines, header)
@@ -1533,11 +1842,11 @@ class ProjectState:
                 continue
             for _, path in _include_lines(_split_lines(self.files[other])):
                 if _include_resolves_to(path, other, filename):
-                    return {'status': 'ok', 'file': filename,
+                    return {'status': 'ok', 'file': filename, 'created': True,
                             'summary': f"created new file {filename} — "
                                        f"[include {path}] is already present "
                                        f"in {other}, no include needed"}
-        return {'status': 'ok', 'file': filename,
+        return {'status': 'ok', 'file': filename, 'created': True,
                 'summary': f"created new file {filename}",
                 'needs_include': filename}
 

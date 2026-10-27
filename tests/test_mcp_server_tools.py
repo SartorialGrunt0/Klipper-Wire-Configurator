@@ -1393,3 +1393,124 @@ def test_list_klipper_docs_notes_source(tmp_path):
     out = _call_tool(server, "list_klipper_docs", {})
     assert "Source:" in out
 
+
+
+# ── Step 3 (2026-10-16): keywords=[...] multi-keyword sweep ───────────
+def test_search_user_configs_keywords_array_per_name_counts(tmp_path):
+    # BULK family: 'rename Level_Bed and old_probe_home everywhere' must
+    # give a PER-NAME checklist in ONE call — one merged total hides
+    # which rename is still open.
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "printer.cfg").write_text(
+        "[gcode_macro Level_Bed]\n"
+        "gcode:\n"
+        "    RESPOND TYPE=error MSG='Level_Bed'\n"
+        "[gcode_macro old_probe_home]\n"
+        "gcode:\n"
+        "    RESPOND TYPE=echo MSG='old_probe_home'\n"
+        "[gcode_macro PRINT_START]\n"
+        "gcode:\n"
+        "    Level_Bed\n"
+        "    old_probe_home\n",
+        encoding="utf-8",
+    )
+    out = _call_tool(server, "search_user_configs",
+                     {"keywords": ["Level_Bed", "old_probe_home"]})
+    # Section-header lines never count as references (the header
+    # enumeration covers them) — x2 each = the two body occurrences.
+    assert "'level_bed' x2" in out
+    assert "'old_probe_home' x2" in out
+    # both occurrences of both names are listed with sections/lines
+    assert "RESPOND TYPE=error MSG='Level_Bed'" in out
+    assert "old_probe_home" in out
+
+
+def test_search_user_configs_keywords_stringified_recovery(tmp_path):
+    # Text-protocol emission: the array arrives as a JSON string (same
+    # recovery family as the edit batch envelope).
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "printer.cfg").write_text(
+        "[gcode_macro Level_Bed]\ngcode:\n    Level_Bed\n"
+        "[idle_timeout]\ngcode:\n    old_probe_home\n",
+        encoding="utf-8",
+    )
+    out = _call_tool(server, "search_user_configs",
+                     {"keywords": '["level_bed", "old_probe_home"]'})
+    assert "'level_bed' x1" in out
+    assert "'old_probe_home' x1" in out
+
+
+def test_search_user_configs_keywords_word_boundary_no_false_positive(tmp_path):
+    # level_bed_extra is NOT an occurrence of level_bed ('_' is a word
+    # char), even in keywords mode — the done-check stays exact.
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "printer.cfg").write_text(
+        "[gcode_macro level_bed_extra]\n"
+        "gcode:\n"
+        "    Level_Bed\n",
+        encoding="utf-8",
+    )
+    out = _call_tool(server, "search_user_configs", {"keywords": ["level_bed"]})
+    assert "references to 'level_bed' in this file: 1" in out
+    assert "(L3): Level_Bed" in out
+
+
+def test_search_user_configs_keywords_case_insensitive(tmp_path):
+    # Cliff's rule: names match case-insensitively onto the real
+    # spelling — QUERY casing never hides a differently-cased occurrence.
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "printer.cfg").write_text(
+        "[gcode_macro LEVEL_BED]\ngcode:\n    LEVEL_BED\n",
+        encoding="utf-8",
+    )
+    out = _call_tool(server, "search_user_configs", {"keywords": ["level_bed"]})
+    assert "references to 'level_bed' in this file: 1" in out
+    out2 = _call_tool(server, "search_user_configs", {"query": "Level_Bed"})
+    # The handler lowercases the query label; matching itself is
+    # case-insensitive either way (the occurrence above proves it).
+    assert "references to 'level_bed' in this file: 1" in out2
+
+
+def test_search_user_configs_single_keyword_uses_singular_label(tmp_path):
+    # One keyword reads like a plain query (no per-name clutter);
+    # the multi-name label only appears for 2+ keywords.
+    server, root = _server(tmp_path)
+    user_dir = root / "user_configs"
+    user_dir.mkdir(parents=True)
+    (user_dir / "printer.cfg").write_text(
+        "[gcode_macro Level_Bed]\ngcode:\n    Level_Bed\n",
+        encoding="utf-8",
+    )
+    out = _call_tool(server, "search_user_configs", {"keywords": ["level_bed"]})
+    assert "references to 'level_bed' in this file: 1" in out
+    assert "references in this file —" not in out
+
+
+def test_search_user_configs_empty_keywords_kickback(tmp_path):
+    server, _root = _server(tmp_path)
+    out = _call_tool(server, "search_user_configs", {"keywords": []})
+    assert "keywords" in out  # actionable kickback names the shape
+
+
+def test_search_user_configs_descriptions_advertise_checklist_and_keywords():
+    # Both description surfaces (plan Step 3 / ref item 3): the native
+    # MCP tool schema AND the chat-layer snippet must advertise the
+    # REFERENCES checklist and keywords=[...] — models only use what the
+    # surface they see names.
+    from mcp_server import McpServer
+    server = McpServer.__new__(McpServer)
+    native = {t["name"]: t for t in server._list_tools()}
+    desc = native["search_user_configs"]["description"]
+    assert "REFERENCES" in desc and "keywords=" in desc
+    assert "keywords" in native["search_user_configs"]["inputSchema"]["properties"]
+    from api.ai_routes import _MCP_TOOL_SNIPPETS
+    snip = _MCP_TOOL_SNIPPETS["search_user_configs"]
+    assert "REFERENCES" in snip and "keywords=" in snip

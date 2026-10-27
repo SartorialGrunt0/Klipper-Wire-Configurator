@@ -871,7 +871,14 @@ class McpServer:
                     "Hits inside a section are annotated with the enclosing Klipper section "
                     "(e.g. '## printer.cfg [extruder]') so you can jump straight to "
                     "read_user_config with section=; preamble matches (includes, header "
-                    "comments) are marked '(top of file)'."
+                    "comments) are marked '(top of file)'. "
+                    "Each hit also carries a REFERENCES checklist: every word-bounded "
+                    "occurrence of the query in that file with section + line number "
+                    "(e.g. \"[gcode_macro PRINT_START] x1 (L10): Level_Bed\") — rename or "
+                    "'every reference' jobs MUST edit from this list and re-search until "
+                    "every count reads 0; the count is a done-check. For several names at "
+                    "once use keywords=['level_bed', 'old_probe_home'] (ONE call, per-name "
+                    "counts)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -880,13 +887,22 @@ class McpServer:
                             "type": "string",
                             "description": "Search query (e.g. 'voron', 'skr', 'bed_mesh')",
                         },
+                        "keywords": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Several exact names to sweep in ONE call "
+                                "(e.g. ['level_bed', 'old_probe_home']); each "
+                                "name gets its own per-file reference count. "
+                                "Takes the place of query for multi-name jobs."
+                            ),
+                        },
                         "limit": {
                             "type": "number",
                             "description": "Max results (default 10)",
                             "default": 10,
                         },
                     },
-                    "required": ["query"],
                 },
             },
             {
@@ -1835,7 +1851,8 @@ class McpServer:
                 if header_name not in matched_headers:
                     matched_headers.append(header_name)
 
-        occurrences, occurrence_total, occurrence_sec_totals, occurrence_capped = (
+        (occurrences, occurrence_total, occurrence_sec_totals,
+         occurrence_capped, occurrence_term_totals) = (
             self._find_user_config_occurrences(text, occ_terms or []))
 
         lines_list = text.split("\n")
@@ -1852,6 +1869,7 @@ class McpServer:
             "occurrence_total": occurrence_total,
             "occurrence_sec_totals": occurrence_sec_totals,
             "occurrence_capped": occurrence_capped,
+            "occurrence_term_totals": occurrence_term_totals,
         }
 
     @staticmethod
@@ -1884,7 +1902,7 @@ class McpServer:
     @staticmethod
     def _find_user_config_occurrences(
         text: str, occ_terms: list[str], max_lines: int = MAX_SEARCH_OCCURRENCE_LINES,
-    ) -> tuple[list[dict[str, Any]], int, dict[str, int], bool]:
+    ) -> tuple[list[dict[str, Any]], int, dict[str, int], bool, dict[str, int]]:
         """Every line with a word-bounded, case-insensitive occurrence of
         any occ_term, labelled with its enclosing [section] (None = top of
         file). '_' is a word char, so query 'level_bed' does NOT count
@@ -1896,20 +1914,27 @@ class McpServer:
         lines. The SAVE_CONFIG tail is skipped entirely (R6-C2): Klipper
         owns that block and the user may not edit it.
         Returns (listed_lines, total_occurrences, per_section_totals,
-        capped) — per_section_totals counts ALL hits (listed or
-        capped-out), keyed by section name ('' = top of file); `capped`
-        is True only when matching LINES were actually withheld (R6-C1:
-        the old 'total > listed_lines' comparison mixed an occurrence
-        count with a line count, so a triple-hit line claimed a phantom
-        '2 more not listed' remainder)."""
+        capped, per_term_totals) — per_section_totals counts ALL hits
+        (listed or capped-out), keyed by section name ('' = top of file);
+        `capped` is True only when matching LINES were actually withheld
+        (R6-C1: the old 'total > listed_lines' comparison mixed an
+        occurrence count with a line count, so a triple-hit line claimed
+        a phantom '2 more not listed' remainder). per_term_totals counts
+        ALL hits per keyword (multi-keyword sweep accounting, 2026-10-16:
+        a bulk rename like 'rename Level_Bed and old_probe_home' needs a
+        per-name done-count, not one merged total)."""
         terms = sorted({t for t in occ_terms if len(t) >= 2}, key=len, reverse=True)
         if not terms:
-            return [], 0, {}, False
+            return [], 0, {}, False, {}
         try:
+            # Named groups so each hit attributes to its keyword:
+            # longer terms first keeps 'level_bed' winning over 'bed'
+            # inside 'level_bed' (same alternation order as before).
             pattern = re.compile(
-                "|".join(rf"\b{re.escape(t)}\b" for t in terms), re.IGNORECASE)
+                "|".join(rf"(?P<k{i}>\b{re.escape(t)}\b)"
+                         for i, t in enumerate(terms)), re.IGNORECASE)
         except re.error:
-            return [], 0, {}, False
+            return [], 0, {}, False, {}
         # Header lines -> enclosing-section map, walking the same rules as
         # _enclosing_user_config_section (include directives are preamble).
         header_by_line: dict[int, str | None] = {}
@@ -1928,6 +1953,7 @@ class McpServer:
         total = 0
         capped = False
         sec_totals: dict[str, int] = {}
+        term_totals: dict[str, int] = {t: 0 for t in terms}
         current_section: str | None = None
         # Round-6 review (R6-C2): the '#*# <...SAVE_CONFIG...>' tail is
         # Klipper's own block — the banner says DO NOT EDIT THIS BLOCK OR
@@ -1941,7 +1967,7 @@ class McpServer:
             is_header = line_no in header_by_line
             if is_header:
                 current_section = header_by_line[line_no]
-            hits = pattern.findall(line)
+            hits = list(pattern.finditer(line))
             if not hits:
                 continue
             stripped = line.strip()
@@ -1951,6 +1977,9 @@ class McpServer:
             total += len(hits)
             sec_key = current_section or ""
             sec_totals[sec_key] = sec_totals.get(sec_key, 0) + len(hits)
+            for h in hits:
+                kw = terms[int(h.lastgroup[1:])]
+                term_totals[kw] += 1
             if len(results) < max_lines:
                 results.append({
                     "line_no": line_no,
@@ -1959,25 +1988,62 @@ class McpServer:
                 })
             else:
                 capped = True
-        return results, total, sec_totals, capped
+        return results, total, sec_totals, capped, term_totals
+
+    @staticmethod
+    def _parse_keyword_list(raw: Any) -> list[str]:
+        """keywords=[...] arg with the same stringified recovery as the
+        edit batch envelope (2026-10-16): small models emit array args as
+        a JSON string ('["a","b"]') or a comma list. Returns lowercased
+        names, input order, deduped."""
+        if raw is None or raw == "":
+            return []
+        parsed = raw
+        if isinstance(parsed, str):
+            s = parsed.strip()
+            if s.startswith("["):
+                try:
+                    parsed = json.loads(s)
+                except ValueError:
+                    parsed = re.split(r"[,\n]", s.strip("[]"))
+            else:
+                parsed = re.split(r"[,\n]", s)
+        if not isinstance(parsed, (list, tuple)):
+            parsed = [parsed]
+        return list(dict.fromkeys(
+            str(k).strip().lower() for k in parsed if str(k).strip()))
 
     def _handle_search_user_configs(self, args: dict[str, Any]) -> str:
         query = args.get("query", "").strip().lower()
         limit = min(int(args.get("limit", 10)), 30)
 
+        # Multi-keyword sweep (2026-10-16, BULK family): keywords=[...]
+        # carries SEVERAL raw names in one call — "rename Level_Bed and
+        # old_probe_home everywhere" must produce a per-name checklist,
+        # not one merged total. query stays the prose/ranking fallback.
+        keywords = self._parse_keyword_list(args.get("keywords"))
+        if not query and keywords:
+            query = " ".join(keywords)
+
         if not query:
-            return "Please provide a search query."
+            return ("Please provide a search query or keywords "
+                    "(keywords=['level_bed', 'old_probe_home']).")
 
         results: list[dict[str, Any]] = []
         # Shared tokenizer: folds plurals and applies ALIAS_MAP synonyms so
         # natural-language queries match config terms (same as docs search).
-        query_terms = list(dict.fromkeys(_expand_query_terms(query)))
-        # Occurrence checklist terms: RAW query words with underscores kept
+        # Each keyword is tokenized for RANKING too — a keyword's file must
+        # match to appear at all.
+        query_terms = list(dict.fromkeys(
+            t for q in [query, *keywords] for t in _expand_query_terms(q)))
+        # Occurrence checklist terms: RAW words with underscores kept
         # intact (tokenizer would split 'level_bed' into 'level'+'bed', and
         # bare 'bed' hits — [heater_bed], unrelated prose — were exactly
         # the noise that made the first-match section label misleading).
+        # Keywords contribute WHOLE names verbatim.
         occ_terms = list(dict.fromkeys(
-            w for w in re.findall(r"[a-z0-9_]+", query) if not w.isdigit()))
+            w for q in [query, *keywords]
+            for w in re.findall(r"[a-z0-9_]+", q) if not w.isdigit()))
         seen_filenames: set[str] = set()
 
         # Working-state files FIRST (chat overlay): staged drafts/approved
@@ -2061,7 +2127,20 @@ class McpServer:
                 # was invisible because only the first match's section and a
                 # file-head snippet were shown).
                 total = r.get("occurrence_total", 0)
-                lines.append(f"references to '{query}' in this file: {total}")
+                term_totals = r.get("occurrence_term_totals") or {}
+                if keywords and len(keywords) > 1:
+                    # Per-name done-counts: the sweep re-searches until
+                    # EVERY name reads 0 (one merged total hides which
+                    # rename is still open).
+                    counts = ", ".join(
+                        f"'{k}' x{term_totals.get(k, 0)}" for k in keywords)
+                    lines.append(
+                        f"references in this file — {counts}"
+                        f" (total {total})")
+                else:
+                    label = keywords[0] if keywords else query
+                    lines.append(
+                        f"references to '{label}' in this file: {total}")
                 sec_totals = r.get("occurrence_sec_totals") or {}
                 for occ in occurrences:
                     sec = f"[{occ['section']}]" if occ["section"] else "(top of file)"

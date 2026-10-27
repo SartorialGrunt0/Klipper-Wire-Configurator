@@ -92,9 +92,14 @@ def test_case_insensitive_header_matching():
     assert len(dups) == 2
 
 
-def test_single_file_header_duplicate_not_flagged_by_project_check():
-    # 3a scope is CROSS-file duplicates; a single-file exact-header dup is
-    # not the concern of the project pass.
+def test_single_file_header_duplicate_flagged_via_per_file_check():
+    # Updated 2026-10-25: this test previously pinned the GAP the user
+    # reported — a single-file exact-header dup surfaced NOTHING, because
+    # the project pass groups by FILE (len(files) <= 1 -> skip) and the
+    # per-file count check covers singleton TYPES only. The per-file pass
+    # _append_same_file_duplicate_headers now closes that gap, and since
+    # validate_project_configs runs validate_config per file, the finding
+    # reaches the project path too: one INFO per occurrence.
     a = (
         "[gcode_macro FOO]\n"
         "gcode: G28\n"
@@ -103,7 +108,10 @@ def test_single_file_header_duplicate_not_flagged_by_project_check():
         "gcode: G28\n"
     )
     b = ""
-    assert _dup_warnings(_project(a, b)) == []
+    dups = _dup_warnings(_project(a, b))
+    assert len(dups) == 2, f"expected one INFO per occurrence, got {dups}"
+    assert all(e.severity == "info" for e in dups)
+    assert all("defined multiple times in this file" in e.message for e in dups)
 
 
 def test_singleton_type_not_double_flagged():

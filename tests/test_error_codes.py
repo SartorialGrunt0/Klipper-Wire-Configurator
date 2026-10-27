@@ -142,6 +142,37 @@ def test_cross_file_duplicate_carries_code():
             f"message should name the other file(s): {[e.message for e in dups]}"
 
 
+def test_same_file_multiinstance_duplicate_carries_code():
+    # 2026-10-25 user-reported gap: exact duplicate headers of a MULTI-instance
+    # type (gcode_macro) inside ONE file went unflagged — the per-file count
+    # check only covers singleton types, and the project pass bails when
+    # all copies share a file. Klipper merges them (strict=False, later
+    # wins), so this is the same INFO/code as every other duplicate path.
+    result = _validate('[gcode_macro T3]\ngcode: G28\n[gcode_macro T3]\ngcode: G90\n')
+    dups = _with_code(result.errors, 'project_duplicate')
+    assert dups, "expected a duplicate-section finding for same-file multi-instance duplicates"
+    assert all(e.severity == 'info' for e in dups), \
+        f"duplicate sections are legal (Klipper merges) — info, got {[e.severity for e in dups]}"
+    assert all('defined multiple times in this file' in e.message for e in dups)
+
+
+def test_same_file_duplicate_headers_are_case_insensitive():
+    # configparser section names are case-insensitive (Klipper's
+    # RawConfigParser merges [gcode_macro T3] with [gcode_macro t3]), so
+    # the case variant is the same duplicated header.
+    result = _validate('[gcode_macro T3]\ngcode: G28\n[gcode_macro t3]\ngcode: G90\n')
+    dups = _with_code(result.errors, 'project_duplicate')
+    assert dups, "expected a finding for case-variant duplicate headers in one file"
+
+
+def test_different_headers_same_multiinstance_type_stay_silent():
+    # [gcode_macro T3] + [gcode_macro T4] are two distinct sections Klipper
+    # registers separately — not a duplicate. Guards against counting by
+    # section TYPE instead of full header.
+    result = _validate('[gcode_macro T3]\ngcode: G28\n[gcode_macro T4]\ngcode: G90\n')
+    assert not _with_code(result.errors, 'project_duplicate')
+
+
 # ── shared_pin ─────────────────────────────────────────────────────
 
 def test_shared_pin_carries_code():
