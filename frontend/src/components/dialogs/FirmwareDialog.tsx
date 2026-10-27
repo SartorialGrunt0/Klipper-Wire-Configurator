@@ -1880,8 +1880,8 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                         <div className="flex items-center gap-2">
                           <p className="truncate text-sm font-medium text-[var(--color-text-primary)]">{artifact.name}</p>
                           {primaryArtifact?.name === artifact.name && (
-                            <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-emerald-300">
-                              primary
+                            <span className="kwc-primary-label text-[10px]!">
+                              PRIMARY
                             </span>
                           )}
                         </div>
@@ -1892,14 +1892,20 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                       <div className="flex shrink-0 items-center gap-2">
                         <button
                           onClick={() => void handleDeleteArtifact(activeTarget, artifact)}
-                          className="rounded-md bg-red-500/15 px-3 py-1.5 text-xs font-medium text-red-200 transition-colors hover:bg-red-500/25"
+                          title="Delete"
+                          className="flex items-center justify-center rounded-md px-2 py-1.5 text-red-400 transition-colors hover:bg-red-500/20"
                         >
-                          Delete
+                          <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+                            <path d="M3 4h10M5.5 4V3a1 1 0 011-1h3a1 1 0 011 1v1M6 7v4M10 7v4M4 4l.8 9a1 1 0 001 .9h4.4a1 1 0 001-.9L12 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                          </svg>
                         </button>
                         <button
                           onClick={() => void handleDownload(activeTarget, artifact)}
-                          className="rounded-md bg-[var(--color-bg-tertiary)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]"
+                          className="flex items-center gap-1.5 rounded-md bg-[var(--color-bg-tertiary)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]"
                         >
+                          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                            <path d="M2 10v3a1 1 0 001 1h10a1 1 0 001-1v-3M8 11V2M5 5l3-3 3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                          </svg>
                           Download
                         </button>
                       </div>
