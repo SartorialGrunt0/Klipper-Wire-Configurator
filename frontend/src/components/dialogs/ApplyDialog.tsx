@@ -895,10 +895,10 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                           </span>
                         )}
                         {findings.length > 0 && (
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full text-white ${
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
                             errorCount > 0
-                              ? 'bg-red-600'
-                              : 'bg-[var(--color-warning)]'
+                              ? 'bg-red-600 text-white'
+                              : 'bg-[var(--color-warning)] text-[var(--color-bg-primary)]'
                           }`}>
                             {findings.length} finding{findings.length !== 1 ? 's' : ''}
                           </span>
