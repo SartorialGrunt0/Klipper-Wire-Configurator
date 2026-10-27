@@ -1892,12 +1892,9 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                       <div className="flex shrink-0 items-center gap-2">
                         <button
                           onClick={() => void handleDeleteArtifact(activeTarget, artifact)}
-                          title="Delete"
-                          className="flex items-center justify-center rounded-md px-2 py-1.5 text-red-400 transition-colors hover:bg-red-500/20"
+                          className="rounded-md bg-red-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-red-600"
                         >
-                          <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
-                            <path d="M3 4h10M5.5 4V3a1 1 0 011-1h3a1 1 0 011 1v1M6 7v4M10 7v4M4 4l.8 9a1 1 0 001 .9h4.4a1 1 0 001-.9L12 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                          </svg>
+                          Delete
                         </button>
                         <button
                           onClick={() => void handleDownload(activeTarget, artifact)}
