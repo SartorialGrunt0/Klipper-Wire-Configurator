@@ -176,7 +176,7 @@ const ReviewItem = ({
                 className="w-full flex items-start gap-2 px-2 py-1.5 text-left rounded-md hover:bg-[var(--color-bg-primary)] disabled:cursor-default disabled:opacity-60"
               >
                 <span
-                  className={`mt-1 w-2 h-2 rounded-full shrink-0 ${f.kind === 'error' ? 'bg-red-500' : 'bg-[var(--color-warning)]'}`}
+                  className={`mt-1 w-2 h-2 rounded-full shrink-0 ${f.kind === 'error' ? 'bg-[var(--color-error)]' : 'bg-[var(--color-warning)]'}`}
                 />
                 <span className="flex-1 min-w-0">
                   <span className="block text-xs text-[var(--color-text-primary)] truncate">{f.message}</span>
