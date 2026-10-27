@@ -1880,7 +1880,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                         <div className="flex items-center gap-2">
                           <p className="truncate text-sm font-medium text-[var(--color-text-primary)]">{artifact.name}</p>
                           {primaryArtifact?.name === artifact.name && (
-                            <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-[var(--color-accent)] text-[var(--color-bg-primary)] shrink-0">
+                            <span className="kwc-primary-label">
                               Primary
                             </span>
                           )}
