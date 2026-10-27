@@ -736,7 +736,7 @@ def test_single_file_duplicate_singleton_section_is_info_not_error():
     assert any(
         error.severity == 'info'
         and error.section == 'virtual_sdcard'
-        and error.message == 'Section [virtual_sdcard] is defined multiple times in this file — the later definition wins.'
+        and error.message == 'Section [virtual_sdcard] is defined multiple times in this file. Klipper merges duplicate sections — the later definition takes precedence.'
         for error in result.errors
     )
 

@@ -592,9 +592,60 @@ def _project_duplicate_message(sec_type: str, other_files: list[str]) -> str:
     # never hard-fails. The finding's value is stating the precedence — which
     # definition wins — not alarm.
     message = f"Section [{sec_type}] is also defined in: {', '.join(other_files)}."
-    message += " Klipper merges duplicate sections — the later include"
+    message += " Klipper merges duplicate sections — the later definition"
     message += " takes precedence."
     return message
+
+
+def _append_same_file_duplicate_headers(
+    config: ConfigFile,
+    result: ValidationResult,
+    acknowledged_duplicate_types: set[str],
+) -> None:
+    # Same-file exact-header duplicates of MULTI-instance section types
+    # (max_instances != 1), e.g. two [gcode_macro T3] in printer.cfg. The
+    # count check in validate_config covers SINGLETON types only, and the
+    # project pass in validate_project_configs groups by FILE so it stays
+    # silent when every copy of a duplicated header lives in one file —
+    # that gap is this pass. Klipper merges duplicate headers case-
+    # insensitively (RawConfigParser strict=False, later definition wins)
+    # and never hard-fails, so — like every other duplicate path — this is
+    # INFO with code project_duplicate, suppressed by the per-type ack.
+    header_sections: dict[str, list[ConfigSection]] = {}
+    for section in config.sections:
+        if section.section_type == "include" or section.is_commented_out:
+            continue
+
+        sec_def = get_section_def(section.section_type)
+        if _is_suppressed_for_validation(section, sec_def.category if sec_def else None):
+            continue
+        if sec_def is not None and sec_def.max_instances == 1:
+            # Singleton types are already counted per-file in validate_config.
+            continue
+
+        header_sections.setdefault(section.full_header.lower(), []).append(section)
+
+    for sections in header_sections.values():
+        if len(sections) <= 1:
+            continue
+
+        sec_type = sections[0].section_type
+        if sec_type in acknowledged_duplicate_types:
+            continue
+
+        for section in sections:
+            result.errors.append(ValidationError(
+                severity="info",
+                section=section.full_header,
+                param="",
+                message=(
+                    f"Section [{section.full_header}] is defined multiple times in this"
+                    " file. Klipper merges duplicate sections — the later"
+                    " definition takes precedence."
+                ),
+                line_number=section.line_number,
+                code="project_duplicate",
+            ))
 
 
 def _is_suppressed_for_validation(section: ConfigSection, category: str | None) -> bool:
@@ -1113,7 +1164,8 @@ def validate_config(config: ConfigFile, *, gcode_registry: bool = True) -> Valid
                     param="",
                     message=(
                         f"Section [{sec_type}] is defined multiple times in this"
-                        " file — the later definition wins."
+                        " file. Klipper merges duplicate sections — the later"
+                        " definition takes precedence."
                     ),
                     line_number=section.line_number,
                     code="project_duplicate",
@@ -1287,6 +1339,10 @@ def validate_config(config: ConfigFile, *, gcode_registry: bool = True) -> Valid
     _check_tmc_spi_chain_conflicts(
         {config.filename: config}, {config.filename: result}, {config.filename},
     )
+
+    # Same-file exact-header duplicates (multi-instance types — singletons
+    # are handled by the count check in the loop above).
+    _append_same_file_duplicate_headers(config, result, acknowledged_duplicate_types)
 
     # G-code command registry scan (file-local context; project validation
     # re-derives these findings cross-file). Warning tier only.
