@@ -1704,7 +1704,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                 className={`inline-flex min-w-[5.75rem] justify-center rounded-md px-4 py-2 text-xs font-semibold text-black transition-colors disabled:opacity-50 ${
                   buildJobActive
                     ? 'bg-red-500 hover:bg-red-400'
-                    : 'bg-amber-500 hover:bg-amber-400'
+                    : 'bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)]'
                 }`}
               >
                 {buildLabel}
