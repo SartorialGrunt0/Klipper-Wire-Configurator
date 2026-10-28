@@ -370,13 +370,13 @@ export default function Toolbar({
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
         >
           {/* Two nodes with converging arrows: comparing two versions of the config. */}
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <circle cx="4.2" cy="4.2" r="1.7" stroke="currentColor" strokeWidth="1.5"/>
-            <circle cx="11.8" cy="11.8" r="1.7" stroke="currentColor" strokeWidth="1.5"/>
-            <path d="M4.2 5.9v5.9h4.1" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-            <path d="M6.7 9.6l2.2 2.2-2.2 2.2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-            <path d="M11.8 10.1V4.2H7.7" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-            <path d="M9.3 2l-2.2 2.2 2.2 2.2" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <circle cx="4.2" cy="4.2" r="1.8" stroke="currentColor" strokeWidth="1.7"/>
+            <circle cx="11.8" cy="11.8" r="1.8" stroke="currentColor" strokeWidth="1.7"/>
+            <path d="M4.2 6.0v5.8h4.2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M6.7 9.6l2.2 2.2-2.2 2.2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M11.8 10.0V4.2H7.6" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M9.3 2l-2.2 2.2 2.2 2.2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
           Diff
         </button>
