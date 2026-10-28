@@ -369,14 +369,16 @@ export default function Toolbar({
           onClick={() => setShowDiff(true)}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
         >
-          {/* Two nodes with converging arrows: comparing two versions of the config. */}
+          {/* Two nodes with converging arrows: comparing two versions of the config.
+              16px box + strokeWidth 1.3 => 1.3px rendered stroke, matching the 14px/1.5
+              neighbors exactly (they shrink 1.5 -> 1.31 at their smaller box). */}
           <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <circle cx="4.2" cy="4.2" r="1.8" stroke="currentColor" strokeWidth="1.7"/>
-            <circle cx="11.8" cy="11.8" r="1.8" stroke="currentColor" strokeWidth="1.7"/>
-            <path d="M4.2 6.0v5.8h4.2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/>
-            <path d="M6.7 9.6l2.2 2.2-2.2 2.2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/>
-            <path d="M11.8 10.0V4.2H7.6" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/>
-            <path d="M9.3 2l-2.2 2.2 2.2 2.2" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round"/>
+            <circle cx="4.2" cy="4.2" r="1.8" stroke="currentColor" strokeWidth="1.3"/>
+            <circle cx="11.8" cy="11.8" r="1.8" stroke="currentColor" strokeWidth="1.3"/>
+            <path d="M4.2 6.0v5.8h4.2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M6.7 9.6l2.2 2.2-2.2 2.2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M11.8 10.0V4.2H7.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M9.3 2l-2.2 2.2 2.2 2.2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
           Diff
         </button>
