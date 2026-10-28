@@ -226,7 +226,7 @@ function HardwareNode({ data, selected, id }: NodeProps) {
           {nodeData.customImage ? (
             <img src={nodeData.customImage} alt="" className="w-5 h-5 object-contain shrink-0" />
           ) : (
-            <span className="shrink-0" style={{ color, fontSize: 13, fontWeight: 700 }}>
+            <span className="shrink-0 leading-tight" style={{ color, fontSize: 13, fontWeight: 700 }}>
               {hardwareTypeLabel.toUpperCase()}
             </span>
           )}
