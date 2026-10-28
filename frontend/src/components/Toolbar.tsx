@@ -369,8 +369,14 @@ export default function Toolbar({
           onClick={() => setShowDiff(true)}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
         >
+          {/* Two nodes with converging arrows: comparing two versions of the config. */}
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M4 3v10M8 3v10M12 6l-4 4M12 10l-4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            <circle cx="4.5" cy="4.5" r="1.6" stroke="currentColor" strokeWidth="1.5"/>
+            <circle cx="11.5" cy="11.5" r="1.6" stroke="currentColor" strokeWidth="1.5"/>
+            <path d="M4.5 6.1v5.4h3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M6.5 9.6l1.9 1.9-1.9 1.9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M11.5 9.9V4.5H8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M9.5 2.6l-1.9 1.9 1.9 1.9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
           Diff
         </button>
