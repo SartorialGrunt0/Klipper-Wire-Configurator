@@ -411,8 +411,12 @@ export default function Toolbar({
           onClick={() => setShowFlash(true)}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
         >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M3 5.5h10M5 2.5h6M5 8.5h6M4.5 11.5h7M4 14h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+          {/* Firmware flash: lightning bolt. The previous glyph (staggered wire
+              traces) read as a near-duplicate of the Text View toggle's
+              three-lines icon at 14px; the bolt is firmware-flash vocabulary
+              and the only diagonal silhouette in the toolbar. */}
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+            <path d="M9 2L4.5 9.5h3L7 14l4.5-7.5h-3L9 2z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
           Flash
         </button>
