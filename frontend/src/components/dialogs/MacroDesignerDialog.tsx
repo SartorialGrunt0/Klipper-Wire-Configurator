@@ -1942,7 +1942,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                 <option key={filename} value={filename}>{filename}</option>
               ))}
             </select>
-            <button onClick={handleAddToConfiguration} disabled={addToConfigurationState.disabled} className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-bg-primary)] disabled:opacity-40">{addToConfigurationState.label}</button>
+            <button onClick={handleAddToConfiguration} disabled={addToConfigurationState.disabled} className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)] disabled:opacity-40">{addToConfigurationState.label}</button>
             <button onClick={handleCloseRequest} className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]">✕</button>
           </div>
         </div>
@@ -1954,7 +1954,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
               <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search macros" className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-3 py-2 text-xs text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none" />
             </div>
             <div className="mb-3 grid grid-cols-2 gap-2">
-              <button onClick={handleCreateDraft} className="w-full rounded-md bg-[var(--color-accent)] px-3 py-2 text-xs font-semibold text-[var(--color-bg-primary)]">New</button>
+              <button onClick={handleCreateDraft} className="w-full rounded-md bg-[var(--color-accent)] px-3 py-2 text-xs font-semibold text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)]">New</button>
               <button onClick={handleLoadPlaybackClick} className="w-full rounded-md border border-[var(--color-bg-tertiary)] px-3 py-2 text-xs font-semibold text-[var(--color-text-primary)] hover:border-[var(--color-accent)]">Load G-code</button>
             </div>
 
@@ -2121,7 +2121,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                           type="button"
                           disabled={!editMode || !displayedItem}
                           onClick={() => handleSetMoveMode('absolute')}
-                        className={`px-2.5 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-60 ${activeMoveMode === 'absolute' ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]' : 'text-[var(--color-text-primary)]'}`}
+                        className={`px-2.5 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-60 ${activeMoveMode === 'absolute' ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]' : 'text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)]'}`}
                       >
                         Absolute
                       </button>
@@ -2129,7 +2129,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                         type="button"
                         disabled={!editMode || !displayedItem}
                         onClick={() => handleSetMoveMode('relative')}
-                        className={`border-l border-[var(--color-bg-tertiary)] px-2.5 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-60 ${activeMoveMode === 'relative' ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]' : 'text-[var(--color-text-primary)]'}`}
+                        className={`border-l border-[var(--color-bg-tertiary)] px-2.5 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-60 ${activeMoveMode === 'relative' ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]' : 'text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)]'}`}
                       >
                         Relative
                       </button>
@@ -2155,7 +2155,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                         <input value={goToX} onChange={(e) => setGoToX(e.target.value)} placeholder="X" className="w-14 rounded border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-primary)]" />
                         <input value={goToY} onChange={(e) => setGoToY(e.target.value)} placeholder="Y" className="w-14 rounded border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-primary)]" />
                         <input value={goToZ} onChange={(e) => setGoToZ(e.target.value)} placeholder="Z" className="w-14 rounded border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-primary)]" />
-                        <button onClick={handleGoTo} className="rounded bg-[var(--color-accent)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-bg-primary)]">Move</button>
+                        <button onClick={handleGoTo} className="rounded bg-[var(--color-accent)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)]">Move</button>
                       </div>
                     </div>
                   )}
@@ -2340,20 +2340,20 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                     </span>
                   </div>
                   <div className="mt-3 flex flex-wrap items-center gap-2">
-                    <button onClick={() => { if (isRunning) { setIsRunning(false); cancelAnimation(); } else { setIsRunning(true); setToolheadDragPos(null); } }} disabled={!simulationStepCount || stepIndex >= simulationStepCount} className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] disabled:opacity-40" title={isRunning ? 'Pause' : 'Play'}>
+                    <button onClick={() => { if (isRunning) { setIsRunning(false); cancelAnimation(); } else { setIsRunning(true); setToolheadDragPos(null); } }} disabled={!simulationStepCount || stepIndex >= simulationStepCount} className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:opacity-40" title={isRunning ? 'Pause' : 'Play'}>
                       {isRunning ? (
                         <svg viewBox="0 0 16 16" className="h-4 w-4 fill-current"><rect x="3" y="2.5" width="3.5" height="11" rx="0.8" /><rect x="9.5" y="2.5" width="3.5" height="11" rx="0.8" /></svg>
                       ) : (
                         <svg viewBox="0 0 16 16" className="h-4 w-4 fill-current"><path d="M4 2.5 L13 8 L4 13.5 Z" /></svg>
                       )}
                     </button>
-                    <button onClick={handleStepBack} disabled={!runtimeHistory.length} className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] disabled:opacity-40" title="Step back">
+                    <button onClick={handleStepBack} disabled={!runtimeHistory.length} className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:opacity-40" title="Step back">
                       <svg viewBox="0 0 16 16" className="h-4 w-4 fill-current"><path d="M10.5 2.5 L4.5 8 L10.5 13.5 Z" /><rect x="11.5" y="2.5" width="1.5" height="11" rx="0.5" /></svg>
                     </button>
-                    <button onClick={handleStep} disabled={isAnimating || !simulationStepCount || stepIndex >= simulationStepCount} className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] disabled:opacity-40" title="Step forward">
+                    <button onClick={handleStep} disabled={isAnimating || !simulationStepCount || stepIndex >= simulationStepCount} className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:opacity-40" title="Step forward">
                       <svg viewBox="0 0 16 16" className="h-4 w-4 fill-current"><path d="M5.5 2.5 L11.5 8 L5.5 13.5 Z" /><rect x="3" y="2.5" width="1.5" height="11" rx="0.5" /></svg>
                     </button>
-                    <button onClick={handleReset} disabled={!selectedItem} className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] disabled:opacity-40" title="Reset">
+                    <button onClick={handleReset} disabled={!selectedItem} className="flex h-8 w-8 items-center justify-center rounded-md border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:opacity-40" title="Reset">
                       <svg viewBox="0 0 16 16" className="h-4 w-4 fill-current"><path d="M8 3 A5 5 0 1 1 3.4 6 H1.8 L4.4 3.4 L7 6 H5.2 A3.5 3.5 0 1 0 8 4.5 Z" /></svg>
                     </button>
                     <div className="ml-auto flex min-w-0 flex-wrap justify-end gap-x-3 gap-y-1 text-[10px] text-[var(--color-text-secondary)]">
@@ -2436,7 +2436,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                       placeholder="Seed a command, e.g. G28 or M104 S200"
                       className="min-w-0 flex-1 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 font-mono text-[11px] text-[var(--color-text-primary)] disabled:opacity-40"
                     />
-                    <button onClick={handleSeedCommand} disabled={isRunning || !seedInput.trim()} className="shrink-0 rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-[11px] font-semibold text-[var(--color-bg-primary)] disabled:opacity-40">Send</button>
+                    <button onClick={handleSeedCommand} disabled={isRunning || !seedInput.trim()} className="shrink-0 rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-[11px] font-semibold text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)] disabled:opacity-40">Send</button>
                   </div>
                   {seededRuntime && (
                     <div className="mt-1 flex items-center justify-between gap-2 text-[10px] text-[var(--color-text-secondary)]">
@@ -2457,8 +2457,8 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
             {selectedItem ? (
               <div className="flex flex-col gap-4">
                 <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
-                  <button onClick={handleToggleEdit} disabled={selectedItem.source === 'playback'} className={`rounded-md px-3 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-40 ${editMode ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]' : 'border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]'}`}>{editMode ? 'Save' : 'Edit'}</button>
-                  <button onClick={handleCancelEdit} disabled={!editMode} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-2 text-xs text-[var(--color-text-primary)] disabled:opacity-40">Cancel</button>
+                  <button onClick={handleToggleEdit} disabled={selectedItem.source === 'playback'} className={`rounded-md px-3 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-40 ${editMode ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)]' : 'border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:border-[var(--color-accent)]'}`}>{editMode ? 'Save' : 'Edit'}</button>
+                  <button onClick={handleCancelEdit} disabled={!editMode} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-2 text-xs text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:opacity-40">Cancel</button>
                 </div>
                 <div>
                   <div className="mb-1 text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">Macro</div>
@@ -2520,22 +2520,22 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                 <div className="min-w-0 rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-primary)] p-3">
                   <div className="mb-3 flex items-center justify-between gap-3">
                     <div className="text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-text-secondary)]">Control</div>
-                    <button disabled={!editMode} onClick={() => setShowCommandPicker(true)} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] text-[var(--color-text-primary)] disabled:opacity-40">Commands</button>
+                    <button disabled={!editMode} onClick={() => setShowCommandPicker(true)} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-[10px] text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:opacity-40">Commands</button>
                   </div>
                   <div className="mb-3 flex flex-wrap items-end gap-2 text-xs">
                     <label className="min-w-[8rem] flex-1">
                       <span className="mb-1 block text-[var(--color-text-secondary)]">Feedrate</span>
                       <input disabled={!editMode} value={moveFeedRate} onChange={(event) => setMoveFeedRate(event.target.value)} placeholder="Optional" className="w-full rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
                     </label>
-                    <button disabled={!editMode} onClick={() => appendGcode('G28')} className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-bg-primary)] disabled:opacity-40">Home all</button>
-                    <button disabled={!editMode} onClick={() => appendGcode('M84')} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-xs text-[var(--color-text-primary)] disabled:opacity-40">M84</button>
+                    <button disabled={!editMode} onClick={() => appendGcode('G28')} className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)] disabled:opacity-40">Home all</button>
+                    <button disabled={!editMode} onClick={() => appendGcode('M84')} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-xs text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:opacity-40">M84</button>
                   </div>
                   <div className="space-y-2 text-xs">
                     <div className="grid grid-cols-7 overflow-hidden rounded-lg border border-[var(--color-bg-tertiary)]">
                       <button disabled={!editMode} onClick={() => handleAxisJog('X', -100)} className="border-r border-[var(--color-bg-tertiary)] px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">-100</button>
                       <button disabled={!editMode} onClick={() => handleAxisJog('X', -10)} className="border-r border-[var(--color-bg-tertiary)] px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">-10</button>
                       <button disabled={!editMode} onClick={() => handleAxisJog('X', -1)} className="border-r border-[var(--color-bg-tertiary)] px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">-1</button>
-                      <button disabled={!editMode} onClick={() => appendGcode('G28 X')} className="border-r border-[var(--color-accent)] bg-[var(--color-accent)] px-2 py-2 font-semibold text-[var(--color-bg-primary)] disabled:opacity-40">X</button>
+                      <button disabled={!editMode} onClick={() => appendGcode('G28 X')} className="border-r border-[var(--color-accent)] bg-[var(--color-accent)] px-2 py-2 font-semibold text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)] disabled:opacity-40">X</button>
                       <button disabled={!editMode} onClick={() => handleAxisJog('X', 1)} className="border-r border-[var(--color-bg-tertiary)] px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">+1</button>
                       <button disabled={!editMode} onClick={() => handleAxisJog('X', 10)} className="border-r border-[var(--color-bg-tertiary)] px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">+10</button>
                       <button disabled={!editMode} onClick={() => handleAxisJog('X', 100)} className="px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">+100</button>
@@ -2544,7 +2544,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                       <button disabled={!editMode} onClick={() => handleAxisJog('Y', -100)} className="border-r border-[var(--color-bg-tertiary)] px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">-100</button>
                       <button disabled={!editMode} onClick={() => handleAxisJog('Y', -10)} className="border-r border-[var(--color-bg-tertiary)] px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">-10</button>
                       <button disabled={!editMode} onClick={() => handleAxisJog('Y', -1)} className="border-r border-[var(--color-bg-tertiary)] px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">-1</button>
-                      <button disabled={!editMode} onClick={() => appendGcode('G28 Y')} className="border-r border-[var(--color-accent)] bg-[var(--color-accent)] px-2 py-2 font-semibold text-[var(--color-bg-primary)] disabled:opacity-40">Y</button>
+                      <button disabled={!editMode} onClick={() => appendGcode('G28 Y')} className="border-r border-[var(--color-accent)] bg-[var(--color-accent)] px-2 py-2 font-semibold text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)] disabled:opacity-40">Y</button>
                       <button disabled={!editMode} onClick={() => handleAxisJog('Y', 1)} className="border-r border-[var(--color-bg-tertiary)] px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">+1</button>
                       <button disabled={!editMode} onClick={() => handleAxisJog('Y', 10)} className="border-r border-[var(--color-bg-tertiary)] px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">+10</button>
                       <button disabled={!editMode} onClick={() => handleAxisJog('Y', 100)} className="px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">+100</button>
@@ -2553,7 +2553,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                       <button disabled={!editMode} onClick={() => handleAxisJog('Z', -25)} className="border-r border-[var(--color-bg-tertiary)] px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">-25</button>
                       <button disabled={!editMode} onClick={() => handleAxisJog('Z', -1)} className="border-r border-[var(--color-bg-tertiary)] px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">-1</button>
                       <button disabled={!editMode} onClick={() => handleAxisJog('Z', -0.1)} className="border-r border-[var(--color-bg-tertiary)] px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">-0.1</button>
-                      <button disabled={!editMode} onClick={() => appendGcode('G28 Z')} className="border-r border-[var(--color-accent)] bg-[var(--color-accent)] px-2 py-2 font-semibold text-[var(--color-bg-primary)] disabled:opacity-40">Z</button>
+                      <button disabled={!editMode} onClick={() => appendGcode('G28 Z')} className="border-r border-[var(--color-accent)] bg-[var(--color-accent)] px-2 py-2 font-semibold text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)] disabled:opacity-40">Z</button>
                       <button disabled={!editMode} onClick={() => handleAxisJog('Z', 0.1)} className="border-r border-[var(--color-bg-tertiary)] px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">+0.1</button>
                       <button disabled={!editMode} onClick={() => handleAxisJog('Z', 1)} className="border-r border-[var(--color-bg-tertiary)] px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">+1</button>
                       <button disabled={!editMode} onClick={() => handleAxisJog('Z', 25)} className="px-2 py-2 text-[var(--color-text-primary)] hover:bg-[var(--color-bg-secondary)] disabled:opacity-40">+25</button>
@@ -2571,14 +2571,14 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                     <button
                       disabled={!editMode}
                       onClick={() => appendExtrusionCommand(1)}
-                      className="self-end rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40"
+                      className="self-end rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:opacity-40"
                     >
                       Extrude
                     </button>
                     <button
                       disabled={!editMode}
                       onClick={() => appendExtrusionCommand(-1)}
-                      className="self-end rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40"
+                      className="self-end rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:opacity-40"
                     >
                       Retract
                     </button>
@@ -2595,7 +2595,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                             return;
                           }
                           appendGcode(`M140 S${target}`);
-                        }} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-2 text-[var(--color-text-primary)] disabled:opacity-40" title="Set bed temp (no wait)">Set</button>
+                        }} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-2 text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:opacity-40" title="Set bed temp (no wait)">Set</button>
                         <button disabled={!editMode} onClick={() => {
                           const target = Number(bedTarget);
                           if (!Number.isFinite(target) || target < 0 || target > machineProfile.bedMaxTemp) {
@@ -2603,7 +2603,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                             return;
                           }
                           appendGcode(`M190 S${target}`);
-                        }} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-2 text-[var(--color-text-primary)] disabled:opacity-40" title="Set bed temp and wait">Wait</button>
+                        }} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-2 text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:opacity-40" title="Set bed temp and wait">Wait</button>
                       </div>
                     </div>
                     <div className="min-w-0">
@@ -2617,7 +2617,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                             return;
                           }
                           appendGcode(`M104 S${target}`);
-                        }} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-2 text-[var(--color-text-primary)] disabled:opacity-40" title="Set nozzle temp (no wait)">Set</button>
+                        }} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-2 text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:opacity-40" title="Set nozzle temp (no wait)">Set</button>
                         <button disabled={!editMode} onClick={() => {
                           const target = Number(nozzleTarget);
                           if (!Number.isFinite(target) || target < 0 || target > machineProfile.nozzleMaxTemp) {
@@ -2625,7 +2625,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                             return;
                           }
                           appendGcode(`M109 S${target}`);
-                        }} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-2 text-[var(--color-text-primary)] disabled:opacity-40" title="Set nozzle temp and wait">Wait</button>
+                        }} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-2 text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:opacity-40" title="Set nozzle temp and wait">Wait</button>
                       </div>
                     </div>
                   </div>
@@ -2640,14 +2640,14 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                           const green = parseInt(ledColor.slice(3, 5), 16) / 255;
                           const blue = parseInt(ledColor.slice(5, 7), 16) / 255;
                           appendGcode(`SET_LED LED=${ledName || 'status_led'} RED=${red.toFixed(3)} GREEN=${green.toFixed(3)} BLUE=${blue.toFixed(3)}`);
-                        }} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" disabled={!editMode}>Add</button>
+                        }} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:opacity-40" disabled={!editMode}>Add</button>
                       </div>
                     </div>
                     <div className="min-w-0">
                       <label className="mb-1 block text-[var(--color-text-secondary)]">Terminal message</label>
                       <div className="flex flex-wrap gap-2">
                         <input disabled={!editMode} value={terminalMessage} onChange={(event) => setTerminalMessage(event.target.value)} className="min-w-[10rem] flex-1 rounded-md border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] px-2 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40" />
-                        <button disabled={!editMode} onClick={() => appendGcode(`RESPOND MSG="${terminalMessage.replace(/"/g, '')}"`)} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] disabled:opacity-40">Add</button>
+                        <button disabled={!editMode} onClick={() => appendGcode(`RESPOND MSG="${terminalMessage.replace(/"/g, '')}"`)} className="shrink-0 rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-[var(--color-text-primary)] hover:border-[var(--color-accent)] disabled:opacity-40">Add</button>
                       </div>
                     </div>
                   </div>
@@ -2670,7 +2670,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                     Apply any changed macros before closing, or close now and keep the drafts for later.
                   </p>
                 </div>
-                <button onClick={() => setShowExitDialog(false)} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-xs text-[var(--color-text-primary)]">Back</button>
+                <button onClick={() => setShowExitDialog(false)} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-xs text-[var(--color-text-primary)] hover:border-[var(--color-accent)]">Back</button>
               </div>
 
               <div className="space-y-2">
@@ -2701,7 +2701,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                           applyMacroItemToConfiguration(item, destinationFile);
                         }}
                         disabled={actionState.disabled}
-                        className="rounded-md bg-[var(--color-accent)] px-3 py-2 text-xs font-semibold text-[var(--color-bg-primary)] disabled:opacity-40"
+                        className="rounded-md bg-[var(--color-accent)] px-3 py-2 text-xs font-semibold text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)] disabled:opacity-40"
                       >
                         {actionState.label}
                       </button>
@@ -2713,7 +2713,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
               <div className="mt-4 flex justify-end gap-2">
                 <button
                   onClick={() => setShowExitDialog(false)}
-                  className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-xs text-[var(--color-text-primary)]"
+                  className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-xs text-[var(--color-text-primary)] hover:border-[var(--color-accent)]"
                 >
                   Keep editing
                 </button>
@@ -2736,7 +2736,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
             <div className="w-[720px] max-w-[95vw] rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-4 shadow-2xl" onClick={(event) => event.stopPropagation()}>
               <div className="mb-3 flex items-center justify-between gap-2">
                 <div className="text-sm font-semibold text-[var(--color-text-primary)]">Supported gcode commands</div>
-                <button onClick={() => setShowCommandPicker(false)} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-xs text-[var(--color-text-primary)]">Close</button>
+                <button onClick={() => setShowCommandPicker(false)} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-xs text-[var(--color-text-primary)] hover:border-[var(--color-accent)]">Close</button>
               </div>
               <input
                 value={commandSearch}
@@ -2753,7 +2753,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                       setShowCommandPicker(false);
                     }}
                     disabled={!editMode}
-                    className="w-full border-b border-[var(--color-bg-tertiary)] px-3 py-2 text-left last:border-b-0 disabled:opacity-40"
+                    className="w-full border-b border-[var(--color-bg-tertiary)] px-3 py-2 text-left last:border-b-0 hover:bg-[var(--color-bg-primary)] disabled:opacity-40"
                   >
                     <div className="text-xs font-semibold text-[var(--color-text-primary)]">{entry.command}</div>
                     <div className="mt-0.5 font-mono text-[11px] text-[var(--color-accent)]">{entry.format}</div>
@@ -2783,7 +2783,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                   <div className="text-sm font-semibold text-[var(--color-text-primary)]">Set exact position</div>
                   <div className="text-[11px] text-[var(--color-text-secondary)]">{exactPositionDialog.target === 'dock' ? 'Dock position' : 'No-go zone bounds'}</div>
                 </div>
-                <button type="button" onClick={() => setExactPositionDialog(null)} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-xs text-[var(--color-text-primary)]">Close</button>
+                <button type="button" onClick={() => setExactPositionDialog(null)} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-xs text-[var(--color-text-primary)] hover:border-[var(--color-accent)]">Close</button>
               </div>
               <div className="grid grid-cols-2 gap-3 text-xs">
                 <label>
@@ -2825,8 +2825,8 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                 )}
               </div>
               <div className="mt-4 flex justify-end gap-2">
-                <button type="button" onClick={() => setExactPositionDialog(null)} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-xs text-[var(--color-text-primary)]">Cancel</button>
-                <button type="submit" className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-bg-primary)]">Apply</button>
+                <button type="button" onClick={() => setExactPositionDialog(null)} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-xs text-[var(--color-text-primary)] hover:border-[var(--color-accent)]">Cancel</button>
+                <button type="submit" className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)]">Apply</button>
               </div>
             </form>
           </div>
