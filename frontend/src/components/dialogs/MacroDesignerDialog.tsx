@@ -1942,8 +1942,8 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                 <option key={filename} value={filename}>{filename}</option>
               ))}
             </select>
-            <button onClick={handleAddToConfiguration} disabled={addToConfigurationState.disabled} className="rounded-md bg-green-600 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-40">{addToConfigurationState.label}</button>
-            <button onClick={handleCloseRequest} className="rounded-md border border-[var(--color-bg-tertiary)] px-3 py-1.5 text-xs text-[var(--color-text-primary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]">Close</button>
+            <button onClick={handleAddToConfiguration} disabled={addToConfigurationState.disabled} className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-bg-primary)] disabled:opacity-40">{addToConfigurationState.label}</button>
+            <button onClick={handleCloseRequest} className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]">✕</button>
           </div>
         </div>
 
@@ -2701,7 +2701,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                           applyMacroItemToConfiguration(item, destinationFile);
                         }}
                         disabled={actionState.disabled}
-                        className="rounded-md bg-green-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-40"
+                        className="rounded-md bg-[var(--color-accent)] px-3 py-2 text-xs font-semibold text-[var(--color-bg-primary)] disabled:opacity-40"
                       >
                         {actionState.label}
                       </button>
