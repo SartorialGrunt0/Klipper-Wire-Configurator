@@ -180,16 +180,6 @@ export default function DiffDialog({ onClose }: DiffDialogProps) {
             )}
           </div>
         </div>
-
-        {/* Footer */}
-        <div className="flex justify-end p-4 border-t border-[var(--color-bg-tertiary)]">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)]"
-          >
-            Close
-          </button>
-        </div>
       </div>
     </div>
   );

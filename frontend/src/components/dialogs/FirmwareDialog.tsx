@@ -1940,12 +1940,6 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
           >
             {panel.message}
           </p>
-          <button
-            onClick={onClose}
-            className="rounded-md bg-[var(--color-bg-tertiary)] px-4 py-1.5 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-primary)]"
-          >
-            Close
-          </button>
         </div>
       </div>
       {profileDialog && (
