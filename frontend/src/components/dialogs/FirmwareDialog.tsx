@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import * as api from '../../services/api';
+import { getSaveButtonClass } from '../../utils/saveButtonClass';
 import type {
   FlashTargetKey,
   NativeFlashArtifact,
@@ -1500,7 +1501,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                 <div>
                   <p className="text-xs font-semibold text-[var(--color-text-primary)]">Checkout Paths</p>
                   <p className="mt-0.5 text-[11px] text-[var(--color-text-secondary)]">
-                    Leave a path blank to auto-detect the checkout. Applying paths reloads both targets and refreshes detected flash devices.
+                    Leave a path blank to auto-detect the checkout. Saving reloads both targets and refreshes detected flash devices.
                   </p>
                 </div>
                 <button
@@ -1509,7 +1510,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                   disabled={anyPanelBusy}
                   className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-bg-primary)] transition-colors hover:opacity-90 disabled:opacity-50"
                 >
-                  Apply Paths
+                  Save
                 </button>
               </div>
 
@@ -1687,7 +1688,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
             <button
                 onClick={() => void openLoadDialog(activeTarget)}
                 disabled={actionBusy}
-                className="rounded-md bg-[var(--color-bg-tertiary)] px-4 py-2 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-primary)] disabled:opacity-50"
+                className="rounded-md bg-[var(--color-bg-tertiary)] px-4 py-2 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] disabled:opacity-50"
               >
                 Load
               </button>
@@ -2035,7 +2036,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                               type="button"
                               onClick={() => void handleDeleteSavedProfile(profile.name)}
                               disabled={profileDialog.deletingName === profile.name || profileDialog.loading}
-                              className="rounded-md bg-red-500/15 px-3 py-2 text-xs font-medium text-red-200 transition-colors hover:bg-red-500/25 disabled:opacity-50"
+                              className="rounded-md bg-red-500 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-red-600 disabled:opacity-50"
                             >
                               {profileDialog.deletingName === profile.name ? 'Deleting...' : 'Delete'}
                             </button>
@@ -2097,22 +2098,24 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
             </div>
 
             <div className="flex items-center justify-end gap-2 border-t border-[var(--color-bg-tertiary)] px-4 py-3">
-              <button
-                type="button"
-                onClick={closeProfileDialog}
-                className="rounded-md bg-[var(--color-bg-tertiary)] px-4 py-2 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-primary)]"
-              >
-                Close
-              </button>
               {profileDialog.mode === 'save' && (
-                <button
-                  type="button"
-                  onClick={() => void handleSaveNamedProfile()}
-                  disabled={profileDialog.saving || profileDialog.loading}
-                  className="rounded-md bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold text-[var(--color-bg-primary)] transition-colors hover:opacity-90 disabled:opacity-50"
-                >
-                  {profileDialog.saving ? 'Saving...' : 'Save Named Profile'}
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={closeProfileDialog}
+                    className="px-4 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleSaveNamedProfile()}
+                    disabled={profileDialog.saving || profileDialog.loading}
+                    className={`px-4 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 ${getSaveButtonClass(true, {})}`}
+                  >
+                    {profileDialog.saving ? 'Saving...' : 'Save Profile'}
+                  </button>
+                </>
               )}
             </div>
           </div>
