@@ -7,6 +7,7 @@
  */
 import React, { useState, useEffect } from 'react';
 import { usePrinterMemoryStore, type PrinterMemory, isPrinterMemoryBlank } from '../../stores/printerMemoryStore';
+import { getSaveButtonClass } from '../../utils/saveButtonClass';
 
 // ── Props ───────────────────────────────────────────────────────────
 
@@ -160,6 +161,12 @@ const PrinterMemoryDialog: React.FC<PrinterMemoryDialogProps> = ({
   if (!open) return null;
 
   const blank = isPrinterMemoryBlank(memory);
+  // Manual mode: pending edits are whatever differs from the loaded memory —
+  // the same JSON comparison the sync effect uses. Proposal mode always has a
+  // pending change to commit.
+  const hasPendingEdits = proposedMemory
+    ? true
+    : JSON.stringify(editValues) !== JSON.stringify(memory);
 
   return (
     <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50" onClick={onClose}>
@@ -274,7 +281,7 @@ const PrinterMemoryDialog: React.FC<PrinterMemoryDialogProps> = ({
         <div className="flex items-center justify-end gap-2 p-4 border-t border-[var(--color-bg-tertiary)]">
           <button
             onClick={onClose}
-            className="px-3 py-1.5 rounded text-xs font-medium border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+            className="px-4 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors"
           >
             Cancel
           </button>
@@ -282,7 +289,7 @@ const PrinterMemoryDialog: React.FC<PrinterMemoryDialogProps> = ({
             <button
               onClick={handleAcceptProposal}
               disabled={loading || saving}
-              className="px-3 py-1.5 rounded text-xs font-medium bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              className={`px-4 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 ${getSaveButtonClass(hasPendingEdits, {})}`}
             >
               {saving ? 'Saving...' : 'Accept Proposal'}
             </button>
@@ -290,9 +297,9 @@ const PrinterMemoryDialog: React.FC<PrinterMemoryDialogProps> = ({
             <button
               onClick={handleSave}
               disabled={loading || saving}
-              className="px-3 py-1.5 rounded text-xs font-medium bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-tertiary)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              className={`px-4 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 ${getSaveButtonClass(hasPendingEdits, {})}`}
             >
-              {saving ? 'Saving...' : 'Save'}
+              {saving ? 'Saving...' : 'Save Changes'}
             </button>
           )}
         </div>
