@@ -1281,6 +1281,16 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const iconButtonClass =
     'rounded p-1 text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-not-allowed';
 
+  // Mirrors the Flash dialog's checkout-settings gear: same chrome and hover
+  // treatment, plus the accent highlight while its inline settings panel is
+  // open, so the gear reads as a toggle rather than a one-shot action.
+  const settingsGearClass = (active: boolean) =>
+    `rounded p-1 transition-colors ${
+      active
+        ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]'
+        : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]'
+    }`;
+
   const header = docked ? (
     // Mirrors ConfigTree's header so the two side panels read as a pair:
     // label + status on the left, controls on the right, `>` to fold.
@@ -1325,7 +1335,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           </button>
           <button
             onClick={() => setShowSettings(!showSettings)}
-            className={iconButtonClass}
+            className={settingsGearClass(showSettings)}
             title="AI Settings"
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
@@ -1371,7 +1381,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         </button>
         <button
           onClick={() => setShowSettings(!showSettings)}
-          className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+          className={settingsGearClass(showSettings)}
           title="AI Settings"
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
