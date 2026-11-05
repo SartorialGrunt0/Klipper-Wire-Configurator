@@ -1618,8 +1618,8 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                   aria-label="Refresh detected flash devices"
                 >
                   <svg
-                    width="13"
-                    height="13"
+                    width="16"
+                    height="16"
                     viewBox="0 0 16 16"
                     fill="none"
                     className={panel.devicesScanning ? 'animate-spin' : ''}
