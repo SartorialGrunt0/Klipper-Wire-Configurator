@@ -176,14 +176,7 @@ const PrinterMemoryDialog: React.FC<PrinterMemoryDialogProps> = ({
       >
         {/* Title bar */}
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
-          <div className="flex items-center gap-2">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" className="text-[var(--color-text-secondary)]">
-              <rect x="3" y="3" width="18" height="18" rx="3" stroke="currentColor" strokeWidth="2" />
-              <circle cx="9" cy="9" r="1.5" fill="currentColor" />
-              <circle cx="15" cy="9" r="1.5" fill="currentColor" />
-              <circle cx="9" cy="15" r="1.5" fill="currentColor" />
-              <circle cx="15" cy="15" r="1.5" fill="currentColor" />
-            </svg>
+          <div className="flex items-center">
             <h2 className="text-sm font-semibold">
               {proposedMemory ? 'Review Printer Memory' : 'Printer Memory'}
             </h2>

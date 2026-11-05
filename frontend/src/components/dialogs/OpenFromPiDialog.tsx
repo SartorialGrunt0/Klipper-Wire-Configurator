@@ -189,7 +189,7 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
           <div>
-            <h2 className="text-base font-semibold text-[var(--color-text-primary)]">Open from Pi</h2>
+            <h2 className="text-base font-semibold text-[var(--color-text-primary)]">Open from Host</h2>
             <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
               Read Klipper config files directly from the Raspberry Pi
             </p>

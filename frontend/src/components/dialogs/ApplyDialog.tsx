@@ -733,7 +733,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
           <div>
             <h2 className="text-base font-semibold text-[var(--color-text-primary)]">
-              {isLocalMode ? 'Save Config Files' : 'Save to Pi'}
+              {isLocalMode ? 'Save Config Files' : 'Save to Host'}
             </h2>
             <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
               {isLocalMode
