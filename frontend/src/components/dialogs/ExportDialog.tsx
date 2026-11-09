@@ -353,6 +353,7 @@ export default function ExportDialog({ onClose, onShowTextView }: ExportDialogPr
       label="Export Configuration"
       backdropClassName="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
       panelClassName="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl flex flex-col border border-[var(--color-bg-tertiary)] overflow-hidden"
+      panelStyle={{ width: showReviewPanel ? 900 : 480, maxHeight: '85vh' }}
     >
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
           <div>

@@ -1,4 +1,4 @@
-import { useEffect, useRef, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
+import { useEffect, useRef, type CSSProperties, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
 import { isTabbable, nextTrapIndex, probeElement } from '../utils/focusTrap';
 
 /**
@@ -15,9 +15,11 @@ import { isTabbable, nextTrapIndex, probeElement } from '../utils/focusTrap';
  * a stale overlay) is pulled to the first control on the next Tab.
  */
 
-/** Elements the trap walks; tabbability is then filtered via isTabbable. */
+/** Elements the trap walks; tabbability is then filtered via isTabbable.
+ *  [contenteditable="true"] covers rich inputs (the chat composer) that lack
+ *  an interactive tag or tabindex but still receive sequential focus. */
 export const FOCUSABLE_SELECTOR =
-  'a[href],button,input,select,textarea,audio[controls],video[controls],[tabindex]';
+  'a[href],button,input,select,textarea,audio[controls],video[controls],[tabindex],[contenteditable="true"]';
 
 export interface ModalProps {
   children: ReactNode;
@@ -30,6 +32,9 @@ export interface ModalProps {
   label?: string;
   backdropClassName?: string;
   panelClassName?: string;
+  /** Inline styles for the panel (dynamic widths/height caps that cannot be
+   *  class strings, e.g. width switching on a side-panel toggle). */
+  panelStyle?: CSSProperties;
   /** Set false when the dialog manages its own initial focus entirely. */
   claimFocus?: boolean;
 }
@@ -43,6 +48,7 @@ export default function Modal({
   label,
   backdropClassName = DEFAULT_BACKDROP,
   panelClassName = '',
+  panelStyle,
   claimFocus = true,
 }: ModalProps) {
   const panelRef = useRef<HTMLDivElement>(null);
@@ -52,13 +58,23 @@ export default function Modal({
     restoreRef.current =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const panel = panelRef.current;
-    if (!panel || !claimFocus) return;
-    // Only claim focus when nothing else has it (a dialog's own autoFocus
-    // input already holds focus at commit time — don't steal it).
-    if (document.activeElement === document.body || document.activeElement === null) {
-      const first = panel.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
-      (first ?? panel).focus({ preventScroll: true });
+    if (panel && claimFocus && !panel.contains(document.activeElement)) {
+      // Claim focus unless the dialog already took it (an autoFocus input is
+      // focused at commit time, before this passive effect). Otherwise pull
+      // focus in from the trigger so screen readers announce the dialog and
+      // the Tab trap is actually engaged on the click-open path. Pick the
+      // first truly tabbable control (skips display:none file inputs etc.).
+      let target: HTMLElement | null = null;
+      for (const el of panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)) {
+        if (isTabbable(probeElement(el))) {
+          target = el;
+          break;
+        }
+      }
+      (target ?? panel).focus({ preventScroll: true });
     }
+    // Registered regardless of claimFocus so restore still works when the
+    // dialog manages its own initial focus.
     return () => {
       const prev = restoreRef.current;
       if (prev && document.contains(prev)) prev.focus({ preventScroll: true });
@@ -67,6 +83,9 @@ export default function Modal({
 
   const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
     if (e.key !== 'Tab') return;
+    // A control inside the dialog already handled this Tab (e.g. the chat
+    // composer's accept-mention). Respect it; don't also move focus.
+    if (e.defaultPrevented) return;
     const panel = panelRef.current;
     if (!panel) return;
     // Nested dialog on top of this one? Its own trap owns the Tab event.
@@ -89,6 +108,7 @@ export default function Modal({
         aria-label={label}
         tabIndex={-1}
         className={panelClassName}
+        style={panelStyle}
         onClick={(e) => e.stopPropagation()}
       >
         {children}

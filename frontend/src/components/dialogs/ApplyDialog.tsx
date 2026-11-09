@@ -729,6 +729,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
       label={isLocalMode ? 'Save Config Files' : 'Save to Host'}
       backdropClassName="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
       panelClassName="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl flex flex-col border border-[var(--color-bg-tertiary)] overflow-hidden"
+      panelStyle={{ width: showReviewPanel ? 900 : 480, maxHeight: '85vh' }}
     >
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
@@ -1059,6 +1060,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
           label={hasGateErrors ? 'Active errors' : 'Save with warnings?'}
           backdropClassName="fixed inset-0 z-[60] flex items-center justify-center bg-black/60"
           panelClassName="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl flex flex-col border border-[var(--color-bg-tertiary)] overflow-hidden"
+          panelStyle={{ width: 520, maxHeight: '85vh' }}
         >
             <div className="p-4 border-b border-[var(--color-bg-tertiary)]">
               <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
