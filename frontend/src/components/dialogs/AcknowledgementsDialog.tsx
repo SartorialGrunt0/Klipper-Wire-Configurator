@@ -91,7 +91,7 @@ export default function AcknowledgementsDialog({ onClose }: AcknowledgementsDial
   useEffect(() => disarm, [disarm]); // unmount cleanup
 
   const handleRemove = useCallback(async (row: Row) => {
-    // The row set changes — a stale armed "Really clear all?" must not
+    // The row set changes — a stale armed "Really delete all?" must not
     // survive into a different list.
     disarm();
     try {
@@ -154,11 +154,11 @@ export default function AcknowledgementsDialog({ onClose }: AcknowledgementsDial
             disabled={loading || rows.length === 0}
             className={`text-[11px] px-2.5 py-1 rounded transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${
               confirmClear
-                ? 'bg-red-500 text-white hover:bg-red-600'
-                : 'bg-red-500/15 text-red-400 hover:bg-red-500/25'
+                ? 'bg-red-700 text-white hover:bg-red-800'
+                : 'bg-red-600 text-white hover:bg-red-700'
             }`}
           >
-            {confirmClear ? 'Really clear all?' : 'Clear all'}
+            {confirmClear ? 'Really delete all?' : 'Delete All'}
           </button>
         </div>
 

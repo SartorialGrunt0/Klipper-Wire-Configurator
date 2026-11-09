@@ -1716,7 +1716,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                 className={`inline-flex min-w-[5.75rem] justify-center rounded-md px-4 py-2 text-xs font-semibold transition-colors ${
                   flashJobActive
                     ? 'bg-red-500 text-black hover:bg-red-400'
-                    : 'bg-green-600 text-[var(--color-bg-primary)] hover:bg-green-700 hover:text-white disabled:bg-[var(--color-bg-tertiary)] disabled:text-[var(--color-text-secondary)] disabled:hover:bg-[var(--color-bg-tertiary)]'
+                    : 'bg-green-600 text-white hover:bg-green-700 disabled:bg-[var(--color-bg-tertiary)] disabled:text-[var(--color-text-secondary)] disabled:hover:bg-[var(--color-bg-tertiary)]'
                 }`}
               >
                 {flashLabel}
@@ -2175,7 +2175,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
               <button
                 type="button"
                 onClick={() => void confirmFlash()}
-                className="inline-flex min-w-[5.75rem] justify-center rounded-md bg-green-600 px-4 py-2 text-xs font-semibold text-[var(--color-bg-primary)] transition-colors hover:bg-green-700 hover:text-white"
+                className="inline-flex min-w-[5.75rem] justify-center rounded-md bg-green-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-green-700"
               >
                 Flash
               </button>
