@@ -12,6 +12,7 @@
  */
 import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
 import { useAiStore, AiProvider, providerRequiresApiKey, type ChatMessage } from '../../stores/aiStore';
+import Modal from '../Modal';
 import { useChatHistoryStore } from '../../stores/chatHistoryStore';
 import { useConfigStore } from '../../stores/configStore';
 import { usePendingEditStore } from '../../stores/pendingEditStore';
@@ -1248,11 +1249,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // `docked` is false and this stays the one configuration entry point.
   if (!isConfigured()) {
     return (
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
-        <div
-          className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[600px] overflow-hidden"
-          onClick={(e) => e.stopPropagation()}
-        >
+      <Modal
+        onClose={onClose}
+        label="AI Chat"
+        panelClassName="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[600px] overflow-hidden"
+      >
           <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
             <h2 className="text-sm font-semibold">AI Chat</h2>
             <button aria-label="Close" onClick={onClose} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
@@ -1268,8 +1269,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
               onClose={onClose}
             />
           </div>
-        </div>
-      </div>
+      </Modal>
     );
   }
 
@@ -1531,11 +1531,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
       {/* Interrupted-conversation carry-over prompt */}
       {showCarryOverPrompt && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50" onClick={() => setShowCarryOverPrompt(false)}>
-          <div
-            className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[420px] p-5"
-            onClick={(e) => e.stopPropagation()}
-          >
+        <Modal
+          onClose={() => setShowCarryOverPrompt(false)}
+          label="Unanswered message"
+          backdropClassName="fixed inset-0 z-[70] flex items-center justify-center bg-black/50"
+          panelClassName="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[420px] p-5"
+        >
             <h2 className="text-sm font-semibold mb-1">Your last message didn't get a response</h2>
             <p className="text-[11px] text-[var(--color-text-secondary)] leading-relaxed mb-4">
               The conversation was interrupted — the model may have timed out or been unloaded.
@@ -1551,13 +1552,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
               </button>
               <button
                 onClick={handleCarryOverContext}
-                className="px-3 py-1.5 rounded text-xs font-medium bg-blue-600 text-white hover:bg-blue-500 transition-colors"
+                className="px-3 py-1.5 rounded text-xs font-medium bg-[var(--color-accent)] text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)] transition-colors"
               >
                 Keep Context &amp; Continue
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
     </>
   );
@@ -1583,16 +1583,14 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
   // ── Modal shell (unchanged) ─────────────────────────────────────
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
-      <div
-        className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[620px] overflow-hidden flex flex-col"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {body}
-      </div>
-
+    <Modal
+      onClose={onClose}
+      label="AI Chat"
+      panelClassName="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[620px] overflow-hidden flex flex-col"
+    >
+      {body}
       {overlays}
-    </div>
+    </Modal>
   );
 };
 
