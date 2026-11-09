@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import * as api from '../../services/api';
 import { getSaveButtonClass } from '../../utils/saveButtonClass';
+import Modal from '../Modal';
 import type {
   FlashTargetKey,
   NativeFlashArtifact,
@@ -1452,11 +1453,11 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
-      <div
-        className="flex max-h-[92vh] w-[1180px] max-w-[96vw] flex-col overflow-hidden rounded-2xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl"
-        onClick={(event) => event.stopPropagation()}
-      >
+    <Modal
+      onClose={onClose}
+      label="Flash"
+      panelClassName="flex max-h-[92vh] w-[1180px] max-w-[96vw] flex-col overflow-hidden rounded-2xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl"
+    >
         <div className="flex items-start justify-between border-b border-[var(--color-bg-tertiary)] px-4 py-4">
           <div>
             <div className="flex items-center gap-2">
@@ -1942,13 +1943,13 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
             {panel.message}
           </p>
         </div>
-      </div>
       {profileDialog && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60" onClick={closeProfileDialog}>
-          <div
-            className="flex max-h-[80vh] w-[760px] max-w-[92vw] flex-col overflow-hidden rounded-2xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl"
-            onClick={(event) => event.stopPropagation()}
-          >
+        <Modal
+          onClose={closeProfileDialog}
+          label="Flash configs"
+          backdropClassName="fixed inset-0 z-[60] flex items-center justify-center bg-black/60"
+          panelClassName="flex max-h-[80vh] w-[760px] max-w-[92vw] flex-col overflow-hidden rounded-2xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl"
+        >
             <div className="flex items-start justify-between border-b border-[var(--color-bg-tertiary)] px-4 py-4">
               <div>
                 <h3 className="text-base font-semibold text-[var(--color-text-primary)]">
@@ -2118,15 +2119,15 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                 </>
               )}
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
       {flashConfirm && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60" onClick={() => setFlashConfirm(null)}>
-          <div
-            className="w-[440px] max-w-[92vw] overflow-hidden rounded-2xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl"
-            onClick={(event) => event.stopPropagation()}
-          >
+        <Modal
+          onClose={() => setFlashConfirm(null)}
+          label="Confirm flash"
+          backdropClassName="fixed inset-0 z-[60] flex items-center justify-center bg-black/60"
+          panelClassName="w-[440px] max-w-[92vw] overflow-hidden rounded-2xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl"
+        >
             <div className="flex items-start justify-between border-b border-[var(--color-bg-tertiary)] px-5 py-4">
               <div>
                 <h3 className="text-base font-semibold text-[var(--color-text-primary)]">
@@ -2180,9 +2181,8 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                 Flash
               </button>
             </div>
-          </div>
-        </div>
+        </Modal>
       )}
-    </div>
+    </Modal>
   );
 }

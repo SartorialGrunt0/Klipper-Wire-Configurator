@@ -68,6 +68,8 @@ export default function Modal({
     if (e.key !== 'Tab') return;
     const panel = panelRef.current;
     if (!panel) return;
+    // Nested dialog on top of this one? Its own trap owns the Tab event.
+    if ((e.target as HTMLElement).closest('[aria-modal="true"]') !== panel) return;
     const els = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
     const flags = els.map((el) => isTabbable(probeElement(el)));
     const active = els.indexOf(document.activeElement as HTMLElement);
