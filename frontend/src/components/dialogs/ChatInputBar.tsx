@@ -247,6 +247,10 @@ const ChatInputBar: React.FC<ChatInputBarProps> = ({
             }`}
             contentEditable
             suppressContentEditableWarning
+            tabIndex={0}
+            role="textbox"
+            aria-label="Chat message"
+            aria-multiline="true"
             onKeyDown={handleComposerKeyDown}
             onBlur={() => setMention(null)}
             onInput={(e) => {
