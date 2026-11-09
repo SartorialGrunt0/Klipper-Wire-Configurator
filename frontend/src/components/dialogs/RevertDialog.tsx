@@ -203,7 +203,7 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
           {status === 'idle' && (
             <button
               onClick={handleRevert}
-              className="px-4 py-1.5 rounded-md text-xs font-medium bg-red-500 text-white hover:bg-red-600 transition-colors"
+              className="px-4 py-1.5 rounded-md text-xs font-medium bg-red-600 text-white hover:bg-red-700 transition-colors"
             >
               Revert All Changes
             </button>
