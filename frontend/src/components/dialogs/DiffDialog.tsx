@@ -3,6 +3,7 @@ import { useConfigStore } from '../../stores/configStore';
 import * as api from '../../services/api';
 import type { ConfigFile } from '../../types/config';
 import { countChangedLines, createConfigPatch, parsePatch } from '../../utils/configDiff';
+import Modal from '../Modal';
 
 interface DiffDialogProps {
   onClose: () => void;
@@ -62,11 +63,12 @@ export default function DiffDialog({ onClose }: DiffDialogProps) {
   const hasChanges = diffLines.some((l) => l.type === 'added' || l.type === 'removed');
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
-      <div
-        className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[900px] max-h-[80vh] flex flex-col overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Modal
+      onClose={onClose}
+      label="Diff from Last Save"
+      backdropClassName="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      panelClassName="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[900px] max-h-[80vh] flex flex-col overflow-hidden"
+    >
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
           <h2 className="text-sm font-semibold">Diff from Last Save</h2>
@@ -180,7 +182,7 @@ export default function DiffDialog({ onClose }: DiffDialogProps) {
             )}
           </div>
         </div>
-      </div>
-    </div>
+      
+    </Modal>
   );
 }

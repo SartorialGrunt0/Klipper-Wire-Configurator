@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react';
 import type { ApprovalCard } from '../../services/api';
 import { createConfigPatch, parsePatch } from '../../utils/configDiff';
+import Modal from '../Modal';
 
 interface Props {
   card: ApprovalCard;
@@ -39,11 +40,12 @@ export default function ApprovalDiffPreview({ card, onClose }: Props) {
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
-      <div
-        className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[900px] max-h-[80vh] flex flex-col overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Modal
+      onClose={onClose}
+      label="Proposed change"
+      backdropClassName="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      panelClassName="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[900px] max-h-[80vh] flex flex-col overflow-hidden"
+    >
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
           <div className="flex items-center gap-2 min-w-0">
@@ -129,7 +131,7 @@ export default function ApprovalDiffPreview({ card, onClose }: Props) {
             Close
           </button>
         </div>
-      </div>
-    </div>
+      
+    </Modal>
   );
 }

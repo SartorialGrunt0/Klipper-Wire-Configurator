@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import * as api from '../../services/api';
 import type { AcknowledgementKind, AcknowledgementList } from '../../services/api';
 import { useConfigStore } from '../../stores/configStore';
+import Modal from '../Modal';
 
 interface AcknowledgementsDialogProps {
   onClose: () => void;
@@ -124,11 +125,12 @@ export default function AcknowledgementsDialog({ onClose }: AcknowledgementsDial
   }, [confirmClear, disarm, revalidateAfterChange]);
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
-      <div
-        className="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl w-[560px] max-h-[70vh] flex flex-col border border-[var(--color-bg-tertiary)]"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Modal
+      onClose={onClose}
+      label="Acknowledgements"
+      backdropClassName="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+      panelClassName="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl w-[560px] max-h-[70vh] flex flex-col border border-[var(--color-bg-tertiary)]"
+    >
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
           <div>
@@ -200,7 +202,7 @@ export default function AcknowledgementsDialog({ onClose }: AcknowledgementsDial
             <p className="text-xs text-red-400">{error}</p>
           </div>
         )}
-      </div>
-    </div>
+      
+    </Modal>
   );
 }

@@ -1,4 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
+import Modal from '../Modal';
 
 interface McuNameDialogProps {
   /** Title shown at the top of the dialog. */
@@ -62,8 +63,11 @@ export default function McuNameDialog({
   );
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60">
-      <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] rounded-lg shadow-xl p-6 w-96 max-w-[90vw]">
+    <Modal
+      label={title}
+      backdropClassName="fixed inset-0 z-[60] flex items-center justify-center bg-black/60"
+      panelClassName="bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] rounded-lg shadow-xl p-6 w-96 max-w-[90vw]"
+    >
         <div className="flex items-start justify-between gap-2 mb-2">
           <h3 className="text-lg font-semibold text-[var(--color-text-primary)]">{title}</h3>
           <button aria-label="Close" onClick={onCancel} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
@@ -105,7 +109,7 @@ export default function McuNameDialog({
             Confirm
           </button>
         </div>
-      </div>
-    </div>
+      
+    </Modal>
   );
 }

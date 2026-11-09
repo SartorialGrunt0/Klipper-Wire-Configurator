@@ -8,6 +8,7 @@
 import React, { useState, useEffect } from 'react';
 import { usePrinterMemoryStore, type PrinterMemory, isPrinterMemoryBlank } from '../../stores/printerMemoryStore';
 import { getSaveButtonClass } from '../../utils/saveButtonClass';
+import Modal from '../Modal';
 
 // ── Props ───────────────────────────────────────────────────────────
 
@@ -169,11 +170,12 @@ const PrinterMemoryDialog: React.FC<PrinterMemoryDialogProps> = ({
     : JSON.stringify(editValues) !== JSON.stringify(memory);
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/50" onClick={onClose}>
-      <div
-        className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[520px] max-h-[80vh] overflow-hidden flex flex-col"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Modal
+      onClose={onClose}
+      label={proposedMemory ? 'Review Printer Memory' : 'Printer Memory'}
+      backdropClassName="fixed inset-0 z-[70] flex items-center justify-center bg-black/50"
+      panelClassName="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[520px] max-h-[80vh] overflow-hidden flex flex-col"
+    >
         {/* Title bar */}
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
           <div className="flex items-center">
@@ -296,8 +298,8 @@ const PrinterMemoryDialog: React.FC<PrinterMemoryDialogProps> = ({
             </button>
           )}
         </div>
-      </div>
-    </div>
+      
+    </Modal>
   );
 };
 

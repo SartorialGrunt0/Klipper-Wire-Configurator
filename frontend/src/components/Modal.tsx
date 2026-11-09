@@ -1,4 +1,4 @@
-import { useEffect, useRef, type KeyboardEvent, type ReactNode } from 'react';
+import { useEffect, useRef, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
 import { isTabbable, nextTrapIndex, probeElement } from '../utils/focusTrap';
 
 /**
@@ -21,8 +21,9 @@ export const FOCUSABLE_SELECTOR =
 
 export interface ModalProps {
   children: ReactNode;
-  /** Backdrop click handler; omit to disable click-outside dismissal. */
-  onClose?: () => void;
+  /** Backdrop click handler; omit to disable click-outside dismissal.
+   *  Receives the backdrop mouse event so handlers can do target checks. */
+  onClose?: (e: MouseEvent<HTMLDivElement>) => void;
   /** id of the dialog's title element (preferred) ... */
   labelledBy?: string;
   /** ... or a direct accessible name when there is no visible title element. */

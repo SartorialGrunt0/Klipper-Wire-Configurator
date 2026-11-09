@@ -9,6 +9,7 @@ import { restoreLayoutAfterRebuild } from '../../utils/layoutPersistence';
 import { isBackupConfigFilename } from '../../utils/backupFiles';
 import { discardReview } from '../../services/changeSetReview';
 import type { ConfigFile, ValidationResult } from '../../types/config';
+import Modal from '../Modal';
 
 interface OpenFromPiDialogProps {
   onClose: () => void;
@@ -181,11 +182,12 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
   const selectedCount = Object.values(selected).filter(Boolean).length;
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
-      <div
-        className="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl w-[520px] max-h-[80vh] flex flex-col border border-[var(--color-bg-tertiary)]"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Modal
+      onClose={onClose}
+      label="Open from Host"
+      backdropClassName="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+      panelClassName="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl w-[520px] max-h-[80vh] flex flex-col border border-[var(--color-bg-tertiary)]"
+    >
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
           <div>
@@ -322,7 +324,7 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
             )}
           </div>
         </div>
-      </div>
-    </div>
+      
+    </Modal>
   );
 }

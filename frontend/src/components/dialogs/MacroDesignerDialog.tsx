@@ -43,6 +43,7 @@ import {
 } from '../../utils/gcodeSimulator';
 import { logMacroDesignerEvent } from '../../utils/macroDesignerLog';
 import type { TrapezoidalProfile } from '../../utils/gcodeSimulator';
+import Modal from '../Modal';
 
 interface MacroDesignerDialogProps {
   onClose: () => void;
@@ -1922,8 +1923,12 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
   const directionArrowLength = Math.max(4, toolheadSize * 2.6);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/55" onClick={handleCloseRequest}>
-      <div className="h-[min(94vh,1100px)] w-[min(99vw,1920px)] overflow-hidden rounded-2xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl" onClick={(event) => event.stopPropagation()}>
+    <Modal
+      onClose={handleCloseRequest}
+      label="G-Code Macro Designer"
+      backdropClassName="fixed inset-0 z-50 flex items-center justify-center bg-black/55"
+      panelClassName="h-[min(94vh,1100px)] w-[min(99vw,1920px)] overflow-hidden rounded-2xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl"
+    >
         <input
           ref={playbackFileInputRef}
           type="file"
@@ -2665,8 +2670,12 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
         </div>
 
         {showExitDialog && (
-          <div className="fixed inset-0 z-[68] flex items-center justify-center bg-black/45" onClick={() => setShowExitDialog(false)}>
-            <div className="w-[min(92vw,760px)] rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-4 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+          <Modal
+            onClose={() => setShowExitDialog(false)}
+            label="Unapplied macro changes"
+            backdropClassName="fixed inset-0 z-[68] flex items-center justify-center bg-black/45"
+            panelClassName="w-[min(92vw,760px)] rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-4 shadow-2xl"
+          >
               <div className="mb-4 flex items-start justify-between gap-4">
                 <div>
                   <div className="text-sm font-semibold text-[var(--color-text-primary)]">Unapplied macro changes</div>
@@ -2731,13 +2740,17 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                   Close and keep drafts
                 </button>
               </div>
-            </div>
-          </div>
+            
+          </Modal>
         )}
 
         {showCommandPicker && (
-          <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/45" onClick={() => setShowCommandPicker(false)}>
-            <div className="w-[720px] max-w-[95vw] rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-4 shadow-2xl" onClick={(event) => event.stopPropagation()}>
+          <Modal
+            onClose={() => setShowCommandPicker(false)}
+            label="Supported gcode commands"
+            backdropClassName="fixed inset-0 z-[70] flex items-center justify-center bg-black/45"
+            panelClassName="w-[720px] max-w-[95vw] rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-4 shadow-2xl"
+          >
               <div className="mb-3 flex items-center justify-between gap-2">
                 <div className="text-sm font-semibold text-[var(--color-text-primary)]">Supported gcode commands</div>
                 <button aria-label="Close" onClick={() => setShowCommandPicker(false)} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
@@ -2772,8 +2785,8 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                   <div className="px-3 py-4 text-xs text-[var(--color-text-secondary)]">No matching commands.</div>
                 )}
               </div>
-            </div>
-          </div>
+            
+          </Modal>
         )}
 
         {exactPositionDialog && (
@@ -2939,7 +2952,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
             )}
           </div>
         )}
-      </div>
-    </div>
+      
+    </Modal>
   );
 }

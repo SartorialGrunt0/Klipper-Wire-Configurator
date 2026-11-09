@@ -7,6 +7,7 @@ import { buildUniqueSectionDraft } from '../utils/sectionNaming';
 import { hasFeatureSectionType as hasFeatureSectionTypeInFiles } from '../utils/featureSections';
 import type { ConfigSection, CommunicationType, ExampleConfig, HardwareType } from '../types/config';
 import McuNameDialog from './dialogs/McuNameDialog';
+import Modal from './Modal';
 
 interface AddMenuProps {
   onClose: () => void;
@@ -425,7 +426,12 @@ export default function AddMenu({ onClose }: AddMenuProps) {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center pt-16 bg-black/50" onClick={onClose}>
+    <Modal
+      onClose={onClose}
+      label="Add Configuration"
+      backdropClassName="fixed inset-0 z-50 flex items-start justify-center pt-16 bg-black/50"
+      panelClassName="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[600px] max-h-[70vh] overflow-hidden"
+    >
       {mcuNamePrompt && (
         <McuNameDialog
           title="Name this MCU"
@@ -438,10 +444,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
           onCancel={() => setMcuNamePrompt(null)}
         />
       )}
-      <div
-        className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[600px] max-h-[70vh] overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
+
         {/* Tabs */}
         <div className="flex items-center border-b border-[var(--color-bg-tertiary)]">
           <div className="flex flex-1">
@@ -689,7 +692,6 @@ export default function AddMenu({ onClose }: AddMenuProps) {
             </div>
           )}
         </div>
-      </div>
-    </div>
+    </Modal>
   );
 }
