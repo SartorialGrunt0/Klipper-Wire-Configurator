@@ -1975,7 +1975,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
               </button>
             </div>
 
-            <div className="p-5 overflow-y-auto max-h-[calc(70vh-60px)]">
+            <div className="p-5 overflow-y-auto max-h-[calc(70vh-65px)]">
               {addConfigStep === 'choose' && (
                 <div className="grid grid-cols-2 gap-3">
                   <button
