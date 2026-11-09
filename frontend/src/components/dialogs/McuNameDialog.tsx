@@ -64,7 +64,14 @@ export default function McuNameDialog({
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60">
       <div className="bg-[var(--color-bg-secondary)] border border-[var(--color-bg-tertiary)] rounded-lg shadow-xl p-6 w-96 max-w-[90vw]">
-        <h3 className="text-lg font-semibold text-[var(--color-text-primary)] mb-2">{title}</h3>
+        <div className="flex items-start justify-between gap-2 mb-2">
+          <h3 className="text-lg font-semibold text-[var(--color-text-primary)]">{title}</h3>
+          <button aria-label="Close" onClick={onCancel} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
         <p className="text-sm text-[var(--color-text-secondary)] mb-4">{message}</p>
 
         <input
@@ -77,11 +84,11 @@ export default function McuNameDialog({
           }}
           onKeyDown={handleKeyDown}
           placeholder="e.g., EBBCan, SKR_Pico"
-          className="w-full px-3 py-2 rounded border bg-[var(--color-bg-primary)] border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] text-sm placeholder:text-[var(--color-text-tertiary)] focus:border-blue-500 focus:outline-none"
+          className="w-full px-3 py-2 rounded border bg-[var(--color-bg-primary)] border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] text-sm placeholder:text-[var(--color-text-tertiary)] focus:border-[var(--color-accent)] focus:outline-none"
         />
 
         {error && (
-          <p className="text-xs text-red-400 mt-1">{error}</p>
+          <p className="text-xs text-[var(--color-error)] mt-1">{error}</p>
         )}
 
         <div className="flex justify-end gap-2 mt-4">
@@ -93,7 +100,7 @@ export default function McuNameDialog({
           </button>
           <button
             onClick={handleSubmit}
-            className="px-4 py-1.5 rounded text-sm bg-blue-600 hover:bg-blue-500 text-white transition"
+            className="px-4 py-1.5 rounded text-sm bg-[var(--color-accent)] text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)] transition-colors"
           >
             Confirm
           </button>

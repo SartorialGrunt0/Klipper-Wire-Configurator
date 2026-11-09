@@ -221,7 +221,7 @@ export default function GenerateDialog({ onClose }: GenerateDialogProps) {
         <div className="flex justify-end gap-2 p-4 border-t border-[var(--color-bg-tertiary)]">
           <button
             onClick={onClose}
-            className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]"
+            className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors"
           >
             Cancel
           </button>
@@ -252,7 +252,7 @@ export default function GenerateDialog({ onClose }: GenerateDialogProps) {
             <div className="flex justify-end gap-2">
               <button
                 onClick={() => setShowConfirm(false)}
-                className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]"
+                className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors"
               >
                 Cancel
               </button>

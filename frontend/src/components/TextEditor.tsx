@@ -1921,14 +1921,14 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
               Delete <span className="font-mono text-[var(--color-text-primary)]">{confirmDelete.file}</span> and its graph nodes? This can&apos;t be undone.
             </p>
             <div className="flex justify-end gap-2">
-              <button onClick={() => setConfirmDelete(null)} className="px-3 py-1.5 rounded text-xs bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]">Cancel</button>
+              <button onClick={() => setConfirmDelete(null)} className="px-3 py-1.5 rounded text-xs bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors">Cancel</button>
               <button
                 onClick={() => {
                   const file = confirmDelete.file;
                   setConfirmDelete(null);
                   void doDeleteFile(file);
                 }}
-                className="px-3 py-1.5 rounded text-xs bg-[var(--color-error)] text-[var(--color-bg-primary)]"
+                className="px-3 py-1.5 rounded text-xs bg-[var(--color-error)] text-[var(--color-bg-primary)] hover:opacity-90 transition-opacity"
               >
                 Delete
               </button>
@@ -1955,7 +1955,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
             </div>
             {fileError && <p className="text-xs text-[var(--color-error)] mt-2">{fileError}</p>}
             <div className="flex justify-end gap-2 mt-4">
-              <button onClick={() => { setRenameDialog(null); setFileError(''); }} className="px-3 py-1.5 rounded text-xs bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]">Cancel</button>
+              <button onClick={() => { setRenameDialog(null); setFileError(''); }} className="px-3 py-1.5 rounded text-xs bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors">Cancel</button>
               <button onClick={handleRenameConfirm} className="px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] text-[var(--color-bg-primary)]">Rename</button>
             </div>
           </div>
@@ -2333,13 +2333,13 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
               <div className="flex justify-end gap-2">
                 <button
                   onClick={() => setConfirmReplace(null)}
-                  className="px-3 py-1.5 rounded text-xs bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]"
+                  className="px-3 py-1.5 rounded text-xs bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={() => void applyReplaceAll()}
-                  className="px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] text-[var(--color-bg-primary)]"
+                  className="px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)] transition-colors"
                 >
                   Replace All
                 </button>
