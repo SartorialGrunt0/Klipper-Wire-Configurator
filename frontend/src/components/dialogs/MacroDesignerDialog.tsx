@@ -1943,7 +1943,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
               ))}
             </select>
             <button onClick={handleAddToConfiguration} disabled={addToConfigurationState.disabled} className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)] disabled:opacity-40">{addToConfigurationState.label}</button>
-            <button onClick={handleCloseRequest} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
+            <button aria-label="Close" onClick={handleCloseRequest} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
               <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
                 <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
               </svg>
@@ -2740,7 +2740,11 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
             <div className="w-[720px] max-w-[95vw] rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] p-4 shadow-2xl" onClick={(event) => event.stopPropagation()}>
               <div className="mb-3 flex items-center justify-between gap-2">
                 <div className="text-sm font-semibold text-[var(--color-text-primary)]">Supported gcode commands</div>
-                <button onClick={() => setShowCommandPicker(false)} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-xs text-[var(--color-text-primary)] hover:border-[var(--color-accent)]">Close</button>
+                <button aria-label="Close" onClick={() => setShowCommandPicker(false)} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  </svg>
+                </button>
               </div>
               <input
                 value={commandSearch}
@@ -2787,7 +2791,11 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
                   <div className="text-sm font-semibold text-[var(--color-text-primary)]">Set exact position</div>
                   <div className="text-[11px] text-[var(--color-text-secondary)]">{exactPositionDialog.target === 'dock' ? 'Dock position' : 'No-go zone bounds'}</div>
                 </div>
-                <button type="button" onClick={() => setExactPositionDialog(null)} className="rounded-md border border-[var(--color-bg-tertiary)] px-2 py-1 text-xs text-[var(--color-text-primary)] hover:border-[var(--color-accent)]">Close</button>
+                <button type="button" aria-label="Close" onClick={() => setExactPositionDialog(null)} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                  </svg>
+                </button>
               </div>
               <div className="grid grid-cols-2 gap-3 text-xs">
                 <label>

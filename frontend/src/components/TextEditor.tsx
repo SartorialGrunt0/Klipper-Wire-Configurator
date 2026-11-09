@@ -1966,8 +1966,13 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       {showAddConfig && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => { setShowAddConfig(false); setAddConfigStep('choose'); setNewFileName(''); setFileError(''); setReferenceSearch(''); }}>
           <div className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[480px] max-h-[70vh] overflow-hidden" onClick={(e) => e.stopPropagation()}>
-            <div className="px-5 py-4 border-b border-[var(--color-bg-tertiary)]">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--color-bg-tertiary)]">
               <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">Add Configuration</h3>
+              <button aria-label="Close" onClick={() => { setShowAddConfig(false); setAddConfigStep('choose'); setNewFileName(''); setFileError(''); setReferenceSearch(''); }} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+              </button>
             </div>
 
             <div className="p-5 overflow-y-auto max-h-[calc(70vh-60px)]">

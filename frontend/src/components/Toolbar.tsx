@@ -340,7 +340,7 @@ export default function Toolbar({
       {showSaveButton && (
         <button
           onClick={() => setShowApply(true)}
-          title="Save to Pi (Ctrl+S)"
+          title="Save to Host (Ctrl+S)"
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${saveButtonClass}`}
         >
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">

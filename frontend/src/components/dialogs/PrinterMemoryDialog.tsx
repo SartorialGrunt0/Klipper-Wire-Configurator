@@ -181,7 +181,7 @@ const PrinterMemoryDialog: React.FC<PrinterMemoryDialogProps> = ({
               {proposedMemory ? 'Review Printer Memory' : 'Printer Memory'}
             </h2>
           </div>
-          <button onClick={onClose} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
+          <button aria-label="Close" onClick={onClose} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
               <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
             </svg>
