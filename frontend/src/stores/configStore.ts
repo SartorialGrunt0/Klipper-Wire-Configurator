@@ -306,7 +306,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   setValidation: (filename, result) =>
     set((s) => {
       // Master validation switch off: the UI shows no findings, so don't
-      // let load paths (import / revert / open-from-Pi parse results)
+      // let load paths (import / revert / open-from-Host parse results)
       // reseed the map behind the toggle.
       if (!isValidationEnabled()) {
         if (Object.keys(s.validation).length === 0) return s;

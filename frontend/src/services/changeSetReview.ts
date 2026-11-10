@@ -114,7 +114,7 @@ export async function buildDecisionContext(): Promise<Record<string, { content: 
  * no longer exists the moment the buffer is thrown away. Left standing, a
  * keep/undo would splice a decided run against a frame from a document the
  * user already discarded. So every path that replaces the buffer — Revert
- * (both branches), a re-read from the Pi with "clear existing", a fresh
+ * (both branches), a re-read from the host with "clear existing", a fresh
  * generate — calls this first.
  */
 export function discardReview(): void {

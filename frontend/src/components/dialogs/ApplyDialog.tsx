@@ -554,7 +554,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
         setStatus('success');
         setMessage(`Successfully saved ${result.saved.length} file${result.saved.length !== 1 ? 's' : ''} locally${result.removed.length ? `, removed ${result.removed.length} file${result.removed.length !== 1 ? 's' : ''}` : ''}`);
       } else {
-        // Native mode: save to Pi config path
+        // Native mode: save to the host config path
         setStatus('applying');
         setMessage(`Writing ${Object.keys(exportedFiles).length} files to ${configPath}...`);
         const result = await api.applyNativeConfig(exportedFiles, configPath, deleted);
@@ -757,7 +757,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
           <p className="text-xs text-amber-400">
             {isLocalMode
               ? 'This will overwrite the previously imported config files in local storage.'
-              : 'This will overwrite existing config files on the Pi. Make sure you have a backup.'
+              : 'This will overwrite existing config files on the host. Make sure you have a backup.'
             }
           </p>
         </div>

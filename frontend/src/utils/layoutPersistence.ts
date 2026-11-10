@@ -383,7 +383,7 @@ export async function loadSavedLayout(isNative: boolean | null): Promise<SavedLa
 
 /**
  * Re-apply the saved layout after an in-session full rebuild
- * (Import / Revert / Open-from-Pi / AI draft accept / TextEditor
+ * (Import / Revert / Open-from-Host / AI draft accept / TextEditor
  * reference-add). Without this, every rebuild auto-arranges and the 3s
  * autosave timer then persists that auto-arrangement OVER the user's saved
  * layout.

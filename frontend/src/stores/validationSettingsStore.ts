@@ -8,7 +8,7 @@ import type { SeverityVisibility } from '../utils/validationVisibility';
  *  Purely a UI concern: the backend keeps validating everything, so the MCP
  *  tools and the AI draft pipeline keep full findings regardless of these
  *  settings. When `enabled` is false the frontend also skips its own
- *  validation API calls (the Pi CPU saving was the point of the toggle).
+ *  validation API calls (saving CPU on the printer host was the point of the toggle).
  */
 
 export interface ValidationSettingsState {

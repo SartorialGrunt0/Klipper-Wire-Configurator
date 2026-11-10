@@ -366,7 +366,7 @@ export async function loadSavedConfigs(): Promise<ProjectImportResult> {
   return request('/project/load-saved');
 }
 
-/* ── Native (Pi) API ─────────────────────────────────── */
+/* ── Native (host) API ───────────────────────────────── */
 
 export interface NativeStatus {
   native: boolean;

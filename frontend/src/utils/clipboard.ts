@@ -4,7 +4,7 @@
  * The modern `navigator.clipboard.writeText` API is only available in
  * secure contexts (https, or http on localhost). KWC is frequently served
  * over plain HTTP on the LAN (Vite dev server binds all interfaces; the
- * built app is served over http from the Pi), where `navigator.clipboard`
+ * built app is served over http from the printer host), where `navigator.clipboard`
  * is `undefined` and every copy button silently fails.
  *
  * Falls back to the legacy hidden-textarea + `document.execCommand('copy')`
