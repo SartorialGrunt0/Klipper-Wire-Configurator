@@ -89,17 +89,16 @@ const ChatHistoryDialog: React.FC<ChatHistoryDialogProps> = ({
             {conversations.length > 0 && (
               <button
                 onClick={handleClearAll}
-                className="px-2 py-1 rounded text-[10px] font-medium text-[var(--color-error)] hover:bg-[var(--color-bg-tertiary)] transition-colors"
+                className="rounded-md bg-red-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-red-700 transition-colors"
                 title="Delete all saved conversations"
               >
-                Clear All
+                Delete All
               </button>
             )}
-            <button
-              onClick={onClose}
-              className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
-            >
-              ✕
+            <button aria-label="Close" onClick={onClose} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
             </button>
           </div>
         </div>

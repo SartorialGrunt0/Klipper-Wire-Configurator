@@ -1255,8 +1255,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         >
           <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
             <h2 className="text-sm font-semibold">AI Chat</h2>
-            <button onClick={onClose} className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]">
-              ✕
+            <button aria-label="Close" onClick={onClose} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+              </svg>
             </button>
           </div>
           <div className="p-6">
@@ -1278,6 +1280,16 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
 
   const iconButtonClass =
     'rounded p-1 text-[var(--color-text-secondary)] transition-colors hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-not-allowed';
+
+  // Mirrors the Flash dialog's checkout-settings gear: same chrome and hover
+  // treatment, plus the accent highlight while its inline settings panel is
+  // open, so the gear reads as a toggle rather than a one-shot action.
+  const settingsGearClass = (active: boolean) =>
+    `rounded p-1 transition-colors ${
+      active
+        ? 'bg-[var(--color-accent)] text-[var(--color-bg-primary)]'
+        : 'text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)] hover:text-[var(--color-text-primary)]'
+    }`;
 
   const header = docked ? (
     // Mirrors ConfigTree's header so the two side panels read as a pair:
@@ -1323,8 +1335,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           </button>
           <button
             onClick={() => setShowSettings(!showSettings)}
-            className={iconButtonClass}
+            className={settingsGearClass(showSettings)}
             title="AI Settings"
+            aria-expanded={showSettings}
           >
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none">
               <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.5" />
@@ -1369,16 +1382,19 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         </button>
         <button
           onClick={() => setShowSettings(!showSettings)}
-          className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)] transition-colors"
+          className={settingsGearClass(showSettings)}
           title="AI Settings"
+          aria-expanded={showSettings}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
             <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.5"/>
             <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
         </button>
-        <button onClick={onClose} className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]">
-          ✕
+        <button aria-label="Close" onClick={onClose} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          </svg>
         </button>
       </div>
     </div>

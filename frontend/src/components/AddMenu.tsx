@@ -425,7 +425,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
   };
 
   return (
-    <div className="absolute inset-0 z-50 flex items-start justify-center pt-16 bg-black/40" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center pt-16 bg-black/50" onClick={onClose}>
       {mcuNamePrompt && (
         <McuNameDialog
           title="Name this MCU"
@@ -443,7 +443,8 @@ export default function AddMenu({ onClose }: AddMenuProps) {
         onClick={(e) => e.stopPropagation()}
       >
         {/* Tabs */}
-        <div className="flex border-b border-[var(--color-bg-tertiary)]">
+        <div className="flex items-center border-b border-[var(--color-bg-tertiary)]">
+          <div className="flex flex-1">
           {(['hardware', 'sub_component', 'feature'] as MenuTab[]).map((t) => (
             <button
               key={t}
@@ -457,6 +458,12 @@ export default function AddMenu({ onClose }: AddMenuProps) {
               {t === 'hardware' ? 'Major Components' : t === 'sub_component' ? 'Sub-Components' : 'Features'}
             </button>
           ))}
+          </div>
+          <button aria-label="Close" onClick={onClose} className="mr-3 shrink-0 p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+          </button>
         </div>
 
         <div className="overflow-y-auto max-h-[calc(70vh-48px)] p-4">

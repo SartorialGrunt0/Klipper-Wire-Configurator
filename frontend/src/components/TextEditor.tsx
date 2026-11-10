@@ -1921,14 +1921,14 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
               Delete <span className="font-mono text-[var(--color-text-primary)]">{confirmDelete.file}</span> and its graph nodes? This can&apos;t be undone.
             </p>
             <div className="flex justify-end gap-2">
-              <button onClick={() => setConfirmDelete(null)} className="px-3 py-1.5 rounded text-xs bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]">Cancel</button>
+              <button onClick={() => setConfirmDelete(null)} className="px-3 py-1.5 rounded text-xs bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors">Cancel</button>
               <button
                 onClick={() => {
                   const file = confirmDelete.file;
                   setConfirmDelete(null);
                   void doDeleteFile(file);
                 }}
-                className="px-3 py-1.5 rounded text-xs bg-[var(--color-error)] text-[var(--color-bg-primary)]"
+                className="px-3 py-1.5 rounded text-xs bg-[var(--color-error)] text-[var(--color-bg-primary)] hover:opacity-90 transition-opacity"
               >
                 Delete
               </button>
@@ -1955,7 +1955,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
             </div>
             {fileError && <p className="text-xs text-[var(--color-error)] mt-2">{fileError}</p>}
             <div className="flex justify-end gap-2 mt-4">
-              <button onClick={() => { setRenameDialog(null); setFileError(''); }} className="px-3 py-1.5 rounded text-xs bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]">Cancel</button>
+              <button onClick={() => { setRenameDialog(null); setFileError(''); }} className="px-3 py-1.5 rounded text-xs bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors">Cancel</button>
               <button onClick={handleRenameConfirm} className="px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] text-[var(--color-bg-primary)]">Rename</button>
             </div>
           </div>
@@ -1966,11 +1966,16 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       {showAddConfig && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => { setShowAddConfig(false); setAddConfigStep('choose'); setNewFileName(''); setFileError(''); setReferenceSearch(''); }}>
           <div className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[480px] max-h-[70vh] overflow-hidden" onClick={(e) => e.stopPropagation()}>
-            <div className="px-5 py-4 border-b border-[var(--color-bg-tertiary)]">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--color-bg-tertiary)]">
               <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">Add Configuration</h3>
+              <button aria-label="Close" onClick={() => { setShowAddConfig(false); setAddConfigStep('choose'); setNewFileName(''); setFileError(''); setReferenceSearch(''); }} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+                </svg>
+              </button>
             </div>
 
-            <div className="p-5 overflow-y-auto max-h-[calc(70vh-60px)]">
+            <div className="p-5 overflow-y-auto max-h-[calc(70vh-65px)]">
               {addConfigStep === 'choose' && (
                 <div className="grid grid-cols-2 gap-3">
                   <button
@@ -2328,13 +2333,13 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
               <div className="flex justify-end gap-2">
                 <button
                   onClick={() => setConfirmReplace(null)}
-                  className="px-3 py-1.5 rounded text-xs bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)]"
+                  className="px-3 py-1.5 rounded text-xs bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={() => void applyReplaceAll()}
-                  className="px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] text-[var(--color-bg-primary)]"
+                  className="px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] text-[var(--color-bg-primary)] hover:bg-[var(--color-accent-hover)] transition-colors"
                 >
                   Replace All
                 </button>

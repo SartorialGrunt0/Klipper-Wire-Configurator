@@ -348,7 +348,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
       className="w-full flex items-start gap-2 px-2 py-1.5 text-left rounded-md hover:bg-[var(--color-bg-primary)] disabled:cursor-default disabled:opacity-60"
     >
       <span
-        className={`mt-1 w-2 h-2 rounded-full shrink-0 ${kind === 'error' ? 'bg-red-500' : 'bg-[var(--color-warning)]'}`}
+        className={`mt-1 w-2 h-2 rounded-full shrink-0 ${kind === 'error' ? 'bg-[var(--color-error)]' : 'bg-[var(--color-warning)]'}`}
       />
       <span className="flex-1 min-w-0">
         <span className="block text-xs text-[var(--color-text-primary)] truncate">{f.message}</span>
@@ -733,7 +733,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
           <div>
             <h2 className="text-base font-semibold text-[var(--color-text-primary)]">
-              {isLocalMode ? 'Save Config Files' : 'Save to Pi'}
+              {isLocalMode ? 'Save Config Files' : 'Save to Host'}
             </h2>
             <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
               {isLocalMode
@@ -742,7 +742,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
               }
             </p>
           </div>
-          <button onClick={onClose} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
+          <button aria-label="Close" onClick={onClose} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
               <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
             </svg>
@@ -897,8 +897,8 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                         {findings.length > 0 && (
                           <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
                             errorCount > 0
-                              ? 'bg-red-500/20 text-red-400'
-                              : 'bg-[var(--color-warning)]/20 text-[var(--color-warning)]'
+                              ? 'bg-red-600 text-white'
+                              : 'bg-[var(--color-warning)] text-[var(--color-bg-primary)]'
                           }`}>
                             {findings.length} finding{findings.length !== 1 ? 's' : ''}
                           </span>
@@ -938,7 +938,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                         <div className="mt-1.5 rounded-lg border border-[var(--color-bg-tertiary)] overflow-hidden">
                           <div className="flex items-center justify-between px-2 py-1 bg-[var(--color-bg-primary)]">
                             <span className="text-[10px] font-semibold text-[var(--color-text-secondary)]">
-                              Validation findings ({findings.length})
+                              Validation findings
                             </span>
                             <span className="text-[10px] text-[var(--color-text-secondary)]">
                               click a finding to jump to it

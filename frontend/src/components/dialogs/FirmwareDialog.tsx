@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import * as api from '../../services/api';
+import { getSaveButtonClass } from '../../utils/saveButtonClass';
 import type {
   FlashTargetKey,
   NativeFlashArtifact,
@@ -1482,7 +1483,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </button>
-            <button
+            <button aria-label="Close"
               onClick={onClose}
               className="rounded p-1 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)]"
             >
@@ -1500,7 +1501,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                 <div>
                   <p className="text-xs font-semibold text-[var(--color-text-primary)]">Checkout Paths</p>
                   <p className="mt-0.5 text-[11px] text-[var(--color-text-secondary)]">
-                    Leave a path blank to auto-detect the checkout. Applying paths reloads both targets and refreshes detected flash devices.
+                    Leave a path blank to auto-detect the checkout. Saving reloads both targets and refreshes detected flash devices.
                   </p>
                 </div>
                 <button
@@ -1509,7 +1510,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                   disabled={anyPanelBusy}
                   className="rounded-md bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-bg-primary)] transition-colors hover:opacity-90 disabled:opacity-50"
                 >
-                  Apply Paths
+                  Save
                 </button>
               </div>
 
@@ -1617,8 +1618,8 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                   aria-label="Refresh detected flash devices"
                 >
                   <svg
-                    width="13"
-                    height="13"
+                    width="16"
+                    height="16"
                     viewBox="0 0 16 16"
                     fill="none"
                     className={panel.devicesScanning ? 'animate-spin' : ''}
@@ -1687,7 +1688,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
             <button
                 onClick={() => void openLoadDialog(activeTarget)}
                 disabled={actionBusy}
-                className="rounded-md bg-[var(--color-bg-tertiary)] px-4 py-2 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-primary)] disabled:opacity-50"
+                className="rounded-md bg-[var(--color-bg-tertiary)] px-4 py-2 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] disabled:opacity-50"
               >
                 Load
               </button>
@@ -1704,7 +1705,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                 className={`inline-flex min-w-[5.75rem] justify-center rounded-md px-4 py-2 text-xs font-semibold text-black transition-colors disabled:opacity-50 ${
                   buildJobActive
                     ? 'bg-red-500 hover:bg-red-400'
-                    : 'bg-amber-500 hover:bg-amber-400'
+                    : 'bg-[var(--color-accent)] hover:bg-[var(--color-accent-hover)]'
                 }`}
               >
                 {buildLabel}
@@ -1712,10 +1713,10 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
               <button
                 onClick={() => void (flashJobActive ? handleCancelJob(activeTarget) : handleFlash(activeTarget))}
                 disabled={flashJobActive ? false : flashButtonDisabled}
-                className={`inline-flex min-w-[5.75rem] justify-center rounded-md px-4 py-2 text-xs font-semibold text-black transition-colors ${
+                className={`inline-flex min-w-[5.75rem] justify-center rounded-md px-4 py-2 text-xs font-semibold transition-colors ${
                   flashJobActive
-                    ? 'bg-red-500 hover:bg-red-400'
-                    : 'bg-emerald-500 hover:bg-emerald-400 disabled:bg-[var(--color-bg-tertiary)] disabled:text-[var(--color-text-secondary)] disabled:hover:bg-[var(--color-bg-tertiary)]'
+                    ? 'bg-red-500 text-black hover:bg-red-400'
+                    : 'bg-green-600 text-white hover:bg-green-700 disabled:bg-[var(--color-bg-tertiary)] disabled:text-[var(--color-text-secondary)] disabled:hover:bg-[var(--color-bg-tertiary)]'
                 }`}
               >
                 {flashLabel}
@@ -1880,8 +1881,8 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                         <div className="flex items-center gap-2">
                           <p className="truncate text-sm font-medium text-[var(--color-text-primary)]">{artifact.name}</p>
                           {primaryArtifact?.name === artifact.name && (
-                            <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-emerald-300">
-                              primary
+                            <span className="kwc-primary-label">
+                              Primary
                             </span>
                           )}
                         </div>
@@ -1892,14 +1893,17 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                       <div className="flex shrink-0 items-center gap-2">
                         <button
                           onClick={() => void handleDeleteArtifact(activeTarget, artifact)}
-                          className="rounded-md bg-red-500/15 px-3 py-1.5 text-xs font-medium text-red-200 transition-colors hover:bg-red-500/25"
+                          className="rounded-md bg-red-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-red-700"
                         >
                           Delete
                         </button>
                         <button
                           onClick={() => void handleDownload(activeTarget, artifact)}
-                          className="rounded-md bg-[var(--color-bg-tertiary)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]"
+                          className="flex items-center gap-1.5 rounded-md bg-[var(--color-bg-tertiary)] px-3 py-1.5 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)]"
                         >
+                          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                            <path d="M2 10v3a1 1 0 001 1h10a1 1 0 001-1v-3M8 11V2M5 5l3-3 3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                          </svg>
                           Download
                         </button>
                       </div>
@@ -1937,12 +1941,6 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
           >
             {panel.message}
           </p>
-          <button
-            onClick={onClose}
-            className="rounded-md bg-[var(--color-bg-tertiary)] px-4 py-1.5 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-primary)]"
-          >
-            Close
-          </button>
         </div>
       </div>
       {profileDialog && (
@@ -1964,7 +1962,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                     : 'The active .config has been saved. Give this flash configuration a unique name to store it on the host for later reuse.'}
                 </p>
               </div>
-              <button
+              <button aria-label="Close"
                 type="button"
                 onClick={closeProfileDialog}
                 className="rounded p-1 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)]"
@@ -2038,7 +2036,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                               type="button"
                               onClick={() => void handleDeleteSavedProfile(profile.name)}
                               disabled={profileDialog.deletingName === profile.name || profileDialog.loading}
-                              className="rounded-md bg-red-500/15 px-3 py-2 text-xs font-medium text-red-200 transition-colors hover:bg-red-500/25 disabled:opacity-50"
+                              className="rounded-md bg-red-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-red-700 disabled:opacity-50"
                             >
                               {profileDialog.deletingName === profile.name ? 'Deleting...' : 'Delete'}
                             </button>
@@ -2100,22 +2098,24 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
             </div>
 
             <div className="flex items-center justify-end gap-2 border-t border-[var(--color-bg-tertiary)] px-4 py-3">
-              <button
-                type="button"
-                onClick={closeProfileDialog}
-                className="rounded-md bg-[var(--color-bg-tertiary)] px-4 py-2 text-xs font-medium text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-bg-primary)]"
-              >
-                Close
-              </button>
               {profileDialog.mode === 'save' && (
-                <button
-                  type="button"
-                  onClick={() => void handleSaveNamedProfile()}
-                  disabled={profileDialog.saving || profileDialog.loading}
-                  className="rounded-md bg-[var(--color-accent)] px-4 py-2 text-xs font-semibold text-[var(--color-bg-primary)] transition-colors hover:opacity-90 disabled:opacity-50"
-                >
-                  {profileDialog.saving ? 'Saving...' : 'Save Named Profile'}
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={closeProfileDialog}
+                    className="px-4 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleSaveNamedProfile()}
+                    disabled={profileDialog.saving || profileDialog.loading}
+                    className={`px-4 py-1.5 rounded-md text-xs font-medium transition-colors disabled:opacity-50 ${getSaveButtonClass(true, {})}`}
+                  >
+                    {profileDialog.saving ? 'Saving...' : 'Save Profile'}
+                  </button>
+                </>
               )}
             </div>
           </div>
@@ -2136,7 +2136,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
                   Confirm the target device and flash method before proceeding.
                 </p>
               </div>
-              <button
+              <button aria-label="Close"
                 type="button"
                 onClick={() => setFlashConfirm(null)}
                 className="rounded p-1 text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-tertiary)]"
@@ -2175,7 +2175,7 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
               <button
                 type="button"
                 onClick={() => void confirmFlash()}
-                className="inline-flex min-w-[5.75rem] justify-center rounded-md bg-emerald-500 px-4 py-2 text-xs font-semibold text-black transition-colors hover:bg-emerald-400"
+                className="inline-flex min-w-[5.75rem] justify-center rounded-md bg-green-600 px-4 py-2 text-xs font-semibold text-white transition-colors hover:bg-green-700"
               >
                 Flash
               </button>

@@ -16,8 +16,8 @@ export default function DiffDialog({ onClose }: DiffDialogProps) {
   // Snapshot store state once on mount — avoids re-running export on every Zustand update.
   const storeSnapshot = useRef(useConfigStore.getState());
   const { configFiles, originalTexts } = storeSnapshot.current;
-  // A file deleted since import is gone from configFiles but its original text
-  // survives in originalTexts — include it so deletions show up in the diff.
+  // A file deleted since the last save is gone from configFiles but its original
+  // text survives in originalTexts — include it so deletions show up in the diff.
   const filenames = Array.from(new Set([...Object.keys(configFiles), ...Object.keys(originalTexts)]));
 
   const [activeFile, setActiveFile] = useState(filenames[0] || '');
@@ -56,7 +56,7 @@ export default function DiffDialog({ onClose }: DiffDialogProps) {
   // original is empty so every line renders as an addition — otherwise a
   // moved sub-component/feature inside a new file would be invisible in the diff.
   const patch = !loading
-    ? createConfigPatch(activeFile, original, current, 'imported', 'current', 3)
+    ? createConfigPatch(activeFile, original, current, 'saved', 'current', 3)
     : '';
   const diffLines = parsePatch(patch);
   const hasChanges = diffLines.some((l) => l.type === 'added' || l.type === 'removed');
@@ -69,9 +69,11 @@ export default function DiffDialog({ onClose }: DiffDialogProps) {
       >
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
-          <h2 className="text-sm font-semibold">Changes Since Import</h2>
-          <button onClick={onClose} className="text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]">
-            ✕
+          <h2 className="text-sm font-semibold">Diff from Last Save</h2>
+          <button aria-label="Close" onClick={onClose} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
           </button>
         </div>
 
@@ -149,7 +151,7 @@ export default function DiffDialog({ onClose }: DiffDialogProps) {
               </div>
             ) : !hasChanges ? (
               <p className="text-xs text-[var(--color-text-secondary)] text-center py-8">
-                No changes — identical to the imported version.
+                No changes — identical to the saved version.
               </p>
             ) : (
               <div className="rounded-lg border border-[var(--color-bg-tertiary)] overflow-hidden">
@@ -177,16 +179,6 @@ export default function DiffDialog({ onClose }: DiffDialogProps) {
               </div>
             )}
           </div>
-        </div>
-
-        {/* Footer */}
-        <div className="flex justify-end p-4 border-t border-[var(--color-bg-tertiary)]">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 rounded-lg text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)]"
-          >
-            Close
-          </button>
         </div>
       </div>
     </div>

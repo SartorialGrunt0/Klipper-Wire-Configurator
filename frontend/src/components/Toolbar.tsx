@@ -59,18 +59,26 @@ const defaultHiddenItems: ToolbarHiddenState = {
   macro: false,
 };
 
-const toolbarVisibilityOptions: Array<{ id: ToolbarItemId; label: string }> = [
-  { id: 'import', label: 'Import' },
-  { id: 'openFromPi', label: 'Open from Pi' },
-  { id: 'export', label: 'Export' },
-  { id: 'save', label: 'Save' },
-  { id: 'revert', label: 'Revert' },
-  { id: 'diff', label: 'Diff' },
-  { id: 'aiChat', label: 'AI Chat' },
-  { id: 'flash', label: 'Flash' },
-  { id: 'component', label: 'Component' },
-  { id: 'macro', label: 'Macro' },
-];
+// Single source of truth for the hideable top-bar items. `Record<ToolbarItemId, …>`
+// forces every union member to appear exactly once (missing OR extra fails tsc),
+// and the checkbox menu is DERIVED from this map — the toolbar button text and the
+// settings-menu label are the same string by construction, so they cannot drift.
+const TOOLBAR_ITEM_LABELS: Record<ToolbarItemId, string> = {
+  import: 'Import',
+  openFromPi: 'Open',
+  export: 'Export',
+  save: 'Save',
+  revert: 'Revert',
+  diff: 'Diff',
+  aiChat: 'AI Chat',
+  flash: 'Flash',
+  component: 'Component',
+  macro: 'Macro',
+};
+
+const toolbarVisibilityOptions: Array<{ id: ToolbarItemId; label: string }> = (
+  Object.keys(TOOLBAR_ITEM_LABELS) as ToolbarItemId[]
+).map((id) => ({ id, label: TOOLBAR_ITEM_LABELS[id] }));
 
 function loadHiddenItems(): ToolbarHiddenState {
   if (typeof window === 'undefined') {
@@ -84,18 +92,11 @@ function loadHiddenItems(): ToolbarHiddenState {
     }
 
     const parsed = JSON.parse(raw) as Partial<Record<ToolbarItemId, unknown>>;
-    return {
-      import: parsed.import === true,
-      openFromPi: parsed.openFromPi === true,
-      export: parsed.export === true,
-      save: parsed.save === true,
-      revert: parsed.revert === true,
-      diff: parsed.diff === true,
-      aiChat: parsed.aiChat === true,
-      flash: parsed.flash === true,
-      component: parsed.component === true,
-      macro: parsed.macro === true,
-    };
+    const hidden: ToolbarHiddenState = { ...defaultHiddenItems };
+    for (const id of Object.keys(TOOLBAR_ITEM_LABELS) as ToolbarItemId[]) {
+      hidden[id] = parsed[id] === true;
+    }
+    return hidden;
   } catch {
     return { ...defaultHiddenItems };
   }
@@ -300,7 +301,7 @@ export default function Toolbar({
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
             <path d="M2 10v3a1 1 0 001 1h10a1 1 0 001-1v-3M8 2v9M5 8l3 3 3-3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
-          Import
+          {TOOLBAR_ITEM_LABELS.import}
         </button>
       )}
 
@@ -311,9 +312,9 @@ export default function Toolbar({
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
         >
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M2 3h12v8H2zM5 14h6M8 11v3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M2 4a1 1 0 011-1h3l1.5 1.5h5.5a1 1 0 011 1V12a1 1 0 01-1 1H3a1 1 0 01-1-1V4z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
-          Open from Pi
+          {TOOLBAR_ITEM_LABELS.openFromPi}
         </button>
       )}
 
@@ -331,7 +332,7 @@ export default function Toolbar({
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
             <path d="M2 10v3a1 1 0 001 1h10a1 1 0 001-1v-3M8 11V2M5 5l3-3 3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
-          Export
+          {TOOLBAR_ITEM_LABELS.export}
         </button>
       )}
 
@@ -339,13 +340,13 @@ export default function Toolbar({
       {showSaveButton && (
         <button
           onClick={() => setShowApply(true)}
-          title="Save to Pi (Ctrl+S)"
+          title="Save to Host (Ctrl+S)"
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${saveButtonClass}`}
         >
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
             <path d="M3 8l3.5 3.5L13 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
-          Save
+          {TOOLBAR_ITEM_LABELS.save}
         </button>
       )}
 
@@ -359,7 +360,7 @@ export default function Toolbar({
             <path d="M3 6h7a3 3 0 010 6H8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
             <path d="M6 3L3 6l3 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
-          Revert
+          {TOOLBAR_ITEM_LABELS.revert}
         </button>
       )}
 
@@ -369,10 +370,18 @@ export default function Toolbar({
           onClick={() => setShowDiff(true)}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
         >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M4 3v10M8 3v10M12 6l-4 4M12 10l-4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+          {/* Two nodes with converging arrows: comparing two versions of the config.
+              16px box + strokeWidth 1.3 => 1.3px rendered stroke, matching the 14px/1.5
+              neighbors exactly (they shrink 1.5 -> 1.31 at their smaller box). */}
+          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+            <circle cx="4.2" cy="4.2" r="1.8" stroke="currentColor" strokeWidth="1.3"/>
+            <circle cx="11.8" cy="11.8" r="1.8" stroke="currentColor" strokeWidth="1.3"/>
+            <path d="M4.2 6.0v5.8h4.2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M6.7 9.6l2.2 2.2-2.2 2.2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M11.8 10.0V4.2H7.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+            <path d="M9.3 2l-2.2 2.2 2.2 2.2" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
-          Diff
+          {TOOLBAR_ITEM_LABELS.diff}
         </button>
       )}
 
@@ -393,7 +402,7 @@ export default function Toolbar({
           title={chatStatusTitle(chatStatus, 'AI Chat')}
         >
           <ChatBubbleIcon />
-          AI Chat
+          {TOOLBAR_ITEM_LABELS.aiChat}
         </button>
       )}
 
@@ -403,10 +412,14 @@ export default function Toolbar({
           onClick={() => setShowFlash(true)}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-accent)] hover:text-[var(--color-bg-primary)] transition-colors"
         >
-          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-            <path d="M3 5.5h10M5 2.5h6M5 8.5h6M4.5 11.5h7M4 14h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
+          {/* Firmware flash: lightning bolt. The previous glyph (staggered wire
+              traces) read as a near-duplicate of the Text View toggle's
+              three-lines icon at 14px; the bolt is firmware-flash vocabulary
+              and the only diagonal silhouette in the toolbar. */}
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+            <path d="M9 2L4.5 9.5h3L7 14l4.5-7.5h-3L9 2z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
-          Flash
+          {TOOLBAR_ITEM_LABELS.flash}
         </button>
       )}
 
@@ -424,7 +437,7 @@ export default function Toolbar({
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
             <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
           </svg>
-          Component
+          {TOOLBAR_ITEM_LABELS.component}
         </button>
       )}
 
@@ -436,7 +449,7 @@ export default function Toolbar({
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
             <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/>
           </svg>
-          Macro
+          {TOOLBAR_ITEM_LABELS.macro}
         </button>
       )}
 
