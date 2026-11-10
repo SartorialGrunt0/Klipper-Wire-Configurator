@@ -2052,7 +2052,7 @@ function HardwareOverviewPanel({
             </h2>
           )}
           {(hwData as Record<string, unknown>).isPrimary === true && (
-            <span className="text-[9px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded bg-[var(--color-accent)] text-[var(--color-bg-primary)] shrink-0">
+            <span className="kwc-primary-label shrink-0">
               Primary
             </span>
           )}
