@@ -1,4 +1,4 @@
-"""Native Raspberry Pi services — device detection, config file I/O, layout persistence."""
+"""Native (printer-host) services — device detection, config file I/O, layout persistence."""
 from __future__ import annotations
 
 import getpass
