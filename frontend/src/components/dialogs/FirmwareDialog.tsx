@@ -241,28 +241,27 @@ function HelpPopover({
 
   // When the payload help was truncated ("…"), fetch the full text lazily the
   // first time the popover opens. Falls back to the truncated text on error.
+  // One-shot via startedRef: setLoadingHelp(true) below changes a value that
+  // used to be in this effect's deps, which re-ran the effect and fired the
+  // previous cleanup (cancelled=true) mid-flight — every handler of the
+  // in-flight fetch then no-op'd and loadingHelp never flipped back: an
+  // indefinitely spinning (i). The fetch must never cancel itself.
+  const startedRef = useRef(false);
   useEffect(() => {
-    if (!open || !lazyFetch || !text.endsWith('…') || fullText !== null || loadingHelp) {
-      return undefined;
+    if (!open || !lazyFetch || !text.endsWith('…') || startedRef.current) {
+      return;
     }
-    let cancelled = false;
+    startedRef.current = true;
     setLoadingHelp(true);
     lazyFetch()
       .then((fetched) => {
-        if (!cancelled) {
-          setFullText(fetched || text);
-        }
+        setFullText(fetched || text);
       })
       .catch(() => { /* keep the truncated text */ })
       .finally(() => {
-        if (!cancelled) {
-          setLoadingHelp(false);
-        }
+        setLoadingHelp(false);
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [open, lazyFetch, text, fullText, loadingHelp]);
+  }, [open, lazyFetch, text]);
 
   function updatePosition() {
     const trigger = triggerRef.current;
