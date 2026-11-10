@@ -233,7 +233,7 @@ function HardwareNode({ data, selected, id }: NodeProps) {
           <div className="min-w-0 flex flex-col leading-tight">
             {showLabel && <span className="truncate" style={{ color }}>{nodeData.label}</span>}
             {isPrimary && (
-              <span className="kwc-primary-label" style={{ opacity: hidePrimaryLabel ? 0 : 1 }}>
+              <span className="kwc-primary-label mt-0.5 w-fit" style={{ opacity: hidePrimaryLabel ? 0 : 1 }}>
                 PRIMARY
               </span>
             )}
