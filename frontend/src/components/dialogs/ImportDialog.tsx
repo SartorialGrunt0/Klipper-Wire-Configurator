@@ -11,6 +11,7 @@ import { restoreLayoutAfterRebuild } from '../../utils/layoutPersistence';
 import { buildInitialSelection, findOverlappingFiles } from '../../utils/importSelection';
 import { countChangedLines, createConfigPatch } from '../../utils/configDiff';
 import type { ConfigFile } from '../../types/config';
+import Modal from '../Modal';
 
 interface ImportDialogProps {
   onClose: () => void;
@@ -334,11 +335,12 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
-      <div
-        className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[520px] overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Modal
+      onClose={onClose}
+      label="Import Klipper Configuration"
+      backdropClassName="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      panelClassName="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[520px] overflow-hidden"
+    >
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
           <h2 className="text-sm font-semibold">Import Klipper Configuration</h2>
           <button aria-label="Close" onClick={onClose} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
@@ -627,8 +629,8 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
             {status === 'success' ? 'Done' : 'Cancel'}
           </button>
         </div>
-      </div>
-    </div>
+      
+    </Modal>
   );
 }
 

@@ -11,6 +11,7 @@ import { filterValidationMap } from '../../utils/validationVisibility';
 import * as api from '../../services/api';
 import type { ConfigFile } from '../../types/config';
 import type { NativeStatus } from '../../services/api';
+import Modal from '../Modal';
 
 interface ApplyDialogProps {
   onClose: () => void;
@@ -723,12 +724,13 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   }, [canAnalyzeWithAi, configFiles, currentTexts, filenames, onAnalyzeWithAi, restartErrors, restartLogPath, restartMessage]);
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
-      <div
-        className="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl flex flex-col border border-[var(--color-bg-tertiary)] overflow-hidden"
-        style={{ width: showReviewPanel ? 900 : 480, maxHeight: '85vh' }}
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Modal
+      onClose={onClose}
+      label={isLocalMode ? 'Save Config Files' : 'Save to Host'}
+      backdropClassName="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+      panelClassName="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl flex flex-col border border-[var(--color-bg-tertiary)] overflow-hidden"
+      panelStyle={{ width: showReviewPanel ? 900 : 480, maxHeight: '85vh' }}
+    >
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
           <div>
@@ -1046,22 +1048,20 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
             </button>
           )}
         </div>
-      </div>
+      
 
       {/* Save-gate confirmation — a single overlay above the dialog (z-[60],
           the app's nested-dialog pattern). Warnings-only → "Save with
           warnings?" + optional bulk-ack checkbox; errors present →
           "Active errors" + startup-failure line, never acked. */}
       {confirmOpen && (
-        <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60"
-          onClick={() => setConfirmOpen(false)}
+        <Modal
+          onClose={() => setConfirmOpen(false)}
+          label={hasGateErrors ? 'Active errors' : 'Save with warnings?'}
+          backdropClassName="fixed inset-0 z-[60] flex items-center justify-center bg-black/60"
+          panelClassName="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl flex flex-col border border-[var(--color-bg-tertiary)] overflow-hidden"
+          panelStyle={{ width: 520, maxHeight: '85vh' }}
         >
-          <div
-            className="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl flex flex-col border border-[var(--color-bg-tertiary)] overflow-hidden"
-            style={{ width: 520, maxHeight: '85vh' }}
-            onClick={(e) => e.stopPropagation()}
-          >
             <div className="p-4 border-b border-[var(--color-bg-tertiary)]">
               <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">
                 {hasGateErrors
@@ -1138,9 +1138,9 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                 )}
               </div>
             </div>
-          </div>
-        </div>
+          
+        </Modal>
       )}
-    </div>
+    </Modal>
   );
 }

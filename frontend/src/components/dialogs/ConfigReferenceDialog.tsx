@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import * as api from '../../services/api';
 import { extractHeadings, slugifyHeading } from '../../utils/referenceDoc';
 import { buildReferenceIndex, searchReference, hitHeadings } from '../../utils/referenceSearch';
+import Modal from '../Modal';
 
 const LIVE_REFERENCE_URL = 'https://raw.githubusercontent.com/Klipper3d/klipper/master/docs/Config_Reference.md';
 const LOCAL_REFERENCE_URL = '/reference/docs/Config_Reference.md';
@@ -135,11 +136,12 @@ export default function ConfigReferenceDialog({ onClose }: ConfigReferenceDialog
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
-      <div
-        className="flex h-[85vh] w-[92vw] max-w-[1400px] flex-col overflow-hidden rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Modal
+      onClose={onClose}
+      label="Configuration Reference"
+      backdropClassName="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      panelClassName="flex h-[85vh] w-[92vw] max-w-[1400px] flex-col overflow-hidden rounded-xl border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-2xl"
+    >
         <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--color-bg-tertiary)] px-4 py-3">
           <div className="flex min-w-0 items-center gap-3">
             <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">Configuration Reference</h2>
@@ -350,7 +352,7 @@ export default function ConfigReferenceDialog({ onClose }: ConfigReferenceDialog
             </div>
           </div>
         )}
-      </div>
-    </div>
+      
+    </Modal>
   );
 }

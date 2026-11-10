@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { useChatHistoryStore, type SavedConversation } from '../../stores/chatHistoryStore';
+import Modal from '../Modal';
 
 interface ChatHistoryDialogProps {
   onClose: () => void;
@@ -77,11 +78,12 @@ const ChatHistoryDialog: React.FC<ChatHistoryDialogProps> = ({
   );
 
   return (
-    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/50" onClick={handleClickOutside}>
-      <div
-        className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[480px] max-h-[70vh] flex flex-col overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Modal
+      onClose={handleClickOutside}
+      label="Chat History"
+      backdropClassName="fixed inset-0 z-[60] flex items-center justify-center bg-black/50"
+      panelClassName="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[480px] max-h-[70vh] flex flex-col overflow-hidden"
+    >
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
           <h2 className="text-sm font-semibold text-[var(--color-text-primary)]">Chat History</h2>
@@ -150,8 +152,8 @@ const ChatHistoryDialog: React.FC<ChatHistoryDialogProps> = ({
             ))
           )}
         </div>
-      </div>
-    </div>
+      
+    </Modal>
   );
 };
 

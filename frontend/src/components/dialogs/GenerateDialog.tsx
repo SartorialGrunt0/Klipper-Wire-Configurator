@@ -5,6 +5,7 @@ import * as api from '../../services/api';
 import type { ExampleConfig, ConfigFile } from '../../types/config';
 import { buildGraphFromConfig } from '../../utils/graphBuilder';
 import { discardReview } from '../../services/changeSetReview';
+import Modal from '../Modal';
 
 interface GenerateDialogProps {
   onClose: () => void;
@@ -102,11 +103,12 @@ export default function GenerateDialog({ onClose }: GenerateDialogProps) {
   }, [configFiles, doGenerate]);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
-      <div
-        className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[560px] max-h-[80vh] overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Modal
+      onClose={onClose}
+      label="Generate Configuration"
+      backdropClassName="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+      panelClassName="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[560px] max-h-[80vh] overflow-hidden"
+    >
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
           <h2 className="text-sm font-semibold">Generate Configuration</h2>
           <button aria-label="Close" onClick={onClose} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
@@ -233,18 +235,16 @@ export default function GenerateDialog({ onClose }: GenerateDialogProps) {
             {status === 'loading' ? 'Generating...' : 'Generate'}
           </button>
         </div>
-      </div>
+      
 
       {/* Confirmation overlay */}
       {showConfirm && (
-        <div
-          className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60"
-          onClick={() => setShowConfirm(false)}
+        <Modal
+          onClose={() => setShowConfirm(false)}
+          label="Replace existing configuration?"
+          backdropClassName="fixed inset-0 z-[60] flex items-center justify-center bg-black/60"
+          panelClassName="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[380px] p-5"
         >
-          <div
-            className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[380px] p-5"
-            onClick={(e) => e.stopPropagation()}
-          >
             <h3 className="text-sm font-semibold text-[var(--color-text-primary)] mb-2">Replace existing configuration?</h3>
             <p className="text-xs text-[var(--color-text-secondary)] mb-4">
               You have an existing configuration loaded. Generating a new one will discard all current data including imported files, nodes, and edges.
@@ -263,9 +263,9 @@ export default function GenerateDialog({ onClose }: GenerateDialogProps) {
                 Replace & Generate
               </button>
             </div>
-          </div>
-        </div>
+          
+        </Modal>
       )}
-    </div>
+    </Modal>
   );
 }

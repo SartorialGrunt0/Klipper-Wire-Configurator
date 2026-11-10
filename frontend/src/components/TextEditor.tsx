@@ -70,6 +70,7 @@ import { selectionToReference } from '../utils/chatReferences';
 import { useMediaQuery, WIDE_VIEWPORT_QUERY } from '../hooks/useMediaQuery';
 import type { TextIssue } from '../types/editor';
 import type { ExampleConfig, ConfigFile, ConfigSection, ValidationError } from '../types/config';
+import Modal from './Modal';
 
 interface SearchResult {
   file: string;
@@ -1914,8 +1915,12 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
 
       {/* Delete confirmation dialog */}
       {confirmDelete && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setConfirmDelete(null)}>
-          <div className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl p-5 w-80" onClick={(e) => e.stopPropagation()}>
+        <Modal
+          onClose={() => setConfirmDelete(null)}
+          label="Delete File"
+          backdropClassName="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          panelClassName="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl p-5 w-80"
+        >
             <h3 className="text-sm font-semibold text-[var(--color-text-primary)] mb-2">Delete File</h3>
             <p className="text-xs text-[var(--color-text-secondary)] mb-4">
               Delete <span className="font-mono text-[var(--color-text-primary)]">{confirmDelete.file}</span> and its graph nodes? This can&apos;t be undone.
@@ -1933,14 +1938,18 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                 Delete
               </button>
             </div>
-          </div>
-        </div>
+          
+        </Modal>
       )}
 
       {/* Rename dialog */}
       {renameDialog && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => { setRenameDialog(null); setFileError(''); }}>
-          <div className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl p-5 w-80" onClick={(e) => e.stopPropagation()}>
+        <Modal
+          onClose={() => { setRenameDialog(null); setFileError(''); }}
+          label="Rename File"
+          backdropClassName="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          panelClassName="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl p-5 w-80"
+        >
             <h3 className="text-sm font-semibold text-[var(--color-text-primary)] mb-3">Rename File</h3>
             <div className="flex items-center gap-1">
               <input
@@ -1958,14 +1967,18 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
               <button onClick={() => { setRenameDialog(null); setFileError(''); }} className="px-3 py-1.5 rounded text-xs bg-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] hover:bg-[var(--color-bg-primary)] transition-colors">Cancel</button>
               <button onClick={handleRenameConfirm} className="px-3 py-1.5 rounded text-xs bg-[var(--color-accent)] text-[var(--color-bg-primary)]">Rename</button>
             </div>
-          </div>
-        </div>
+          
+        </Modal>
       )}
 
       {/* Add Configuration dialog */}
       {showAddConfig && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => { setShowAddConfig(false); setAddConfigStep('choose'); setNewFileName(''); setFileError(''); setReferenceSearch(''); }}>
-          <div className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[480px] max-h-[70vh] overflow-hidden" onClick={(e) => e.stopPropagation()}>
+        <Modal
+          onClose={() => { setShowAddConfig(false); setAddConfigStep('choose'); setNewFileName(''); setFileError(''); setReferenceSearch(''); }}
+          label="Add Configuration"
+          backdropClassName="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+          panelClassName="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl w-[480px] max-h-[70vh] overflow-hidden"
+        >
             <div className="flex items-center justify-between px-5 py-4 border-b border-[var(--color-bg-tertiary)]">
               <h3 className="text-sm font-semibold text-[var(--color-text-primary)]">Add Configuration</h3>
               <button aria-label="Close" onClick={() => { setShowAddConfig(false); setAddConfigStep('choose'); setNewFileName(''); setFileError(''); setReferenceSearch(''); }} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
@@ -2077,8 +2090,8 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                 </div>
               )}
             </div>
-          </div>
-        </div>
+          
+        </Modal>
       )}
 
       {/* Editor area */}
@@ -2309,11 +2322,12 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
 
         {/* Replace All confirmation — a project-wide rewrite is destructive. */}
         {confirmReplace && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => setConfirmReplace(null)}>
-            <div
-              className="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl p-5 w-96"
-              onClick={(e) => e.stopPropagation()}
-            >
+          <Modal
+            onClose={() => setConfirmReplace(null)}
+            label="Replace All"
+            backdropClassName="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+            panelClassName="bg-[var(--color-bg-secondary)] rounded-xl border border-[var(--color-bg-tertiary)] shadow-2xl p-5 w-96"
+          >
               <h3 className="text-sm font-semibold text-[var(--color-text-primary)] mb-2">Replace All</h3>
               <p className="text-xs text-[var(--color-text-secondary)] mb-3">
                 Replace <span className="font-mono text-[var(--color-text-primary)]">{confirmReplace.hitCount}</span>{' '}
@@ -2344,8 +2358,8 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                   Replace All
                 </button>
               </div>
-            </div>
-          </div>
+            
+          </Modal>
         )}
 
         {/* Editor with line numbers and inline issues. In review mode the

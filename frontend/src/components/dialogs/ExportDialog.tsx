@@ -7,6 +7,7 @@ import { selectSaveGateIssues, type SaveGateFinding } from '../../utils/saveGate
 import { filterValidationMap } from '../../utils/validationVisibility';
 import * as api from '../../services/api';
 import type { ConfigFile } from '../../types/config';
+import Modal from '../Modal';
 
 interface ExportDialogProps {
   onClose: () => void;
@@ -347,12 +348,13 @@ export default function ExportDialog({ onClose, onShowTextView }: ExportDialogPr
   const exportableCount = filenames.filter((fn) => fn in configFiles).length;
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
-      <div
-        className="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl flex flex-col border border-[var(--color-bg-tertiary)] overflow-hidden"
-        style={{ width: showReviewPanel ? 900 : 480, maxHeight: '85vh' }}
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Modal
+      onClose={onClose}
+      label="Export Configuration"
+      backdropClassName="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+      panelClassName="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl flex flex-col border border-[var(--color-bg-tertiary)] overflow-hidden"
+      panelStyle={{ width: showReviewPanel ? 900 : 480, maxHeight: '85vh' }}
+    >
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
           <div>
             <h2 className="text-base font-semibold text-[var(--color-text-primary)]">Export Configuration</h2>
@@ -476,7 +478,7 @@ export default function ExportDialog({ onClose, onShowTextView }: ExportDialogPr
                 : `Export ${selectedFiles.size} file${selectedFiles.size !== 1 ? 's' : ''}`}
           </button>
         </div>
-      </div>
-    </div>
+      
+    </Modal>
   );
 }

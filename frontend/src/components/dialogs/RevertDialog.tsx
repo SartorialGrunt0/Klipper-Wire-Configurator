@@ -8,6 +8,7 @@ import { buildProjectGraph } from '../../utils/graphBuilder';
 import { restoreLayoutAfterRebuild } from '../../utils/layoutPersistence';
 import { discardReview } from '../../services/changeSetReview';
 import type { ConfigFile, ValidationResult } from '../../types/config';
+import Modal from '../Modal';
 
 interface RevertDialogProps {
   onClose: () => void;
@@ -142,11 +143,12 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
   }, [clearMacroDesignerState, configPath, isNative, onClose, persistClearedMacroDesignerState]);
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
-      <div
-        className="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl w-[420px] flex flex-col border border-[var(--color-bg-tertiary)]"
-        onClick={(e) => e.stopPropagation()}
-      >
+    <Modal
+      onClose={onClose}
+      label="Revert Changes"
+      backdropClassName="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+      panelClassName="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl w-[420px] flex flex-col border border-[var(--color-bg-tertiary)]"
+    >
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
           <h2 className="text-base font-semibold text-[var(--color-text-primary)]">Revert Changes</h2>
@@ -209,7 +211,7 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
             </button>
           )}
         </div>
-      </div>
-    </div>
+      
+    </Modal>
   );
 }
