@@ -1,6 +1,6 @@
 """Resolve which Klipper doc sources KWC serves.
 
-Hard failover, single source: when KWC is NATIVELY deployed on the Pi (the
+Hard failover, single source: when KWC is NATIVELY deployed on the printer host (the
 app's system config path exists — the same marker routes.py uses) and an
 installed Klipper repo with a docs/ directory is found (env
 KWC_KLIPPER_DIR, then common install paths), the docs are served from THAT
@@ -40,7 +40,7 @@ def resolve_config_path() -> Path:
     """Resolve the Klipper config directory used by user-config tooling.
 
     Priority: KLIPPER_CONFIG_PATH env override (always wins), then the
-    saved native setting (the path the user picked in the "Open from Pi"
+    saved native setting (the path the user picked in the "Open from Host"
     menu — load_settings reads settings.json), then the modern
     ~/printer_data/config layout (same default as native mode via
     native_services.get_default_config_path), then the legacy
@@ -53,7 +53,7 @@ def resolve_config_path() -> Path:
         return Path(env_path)
     # load_settings always returns a config_path (defaults to the modern
     # path); only honor it when the user actually picked a different one in
-    # the "Open from Pi" menu. Otherwise fall through to the layout checks.
+    # the "Open from Host" menu. Otherwise fall through to the layout checks.
     default = get_default_config_path()
     saved = load_settings().get("config_path")
     if saved and saved != default:
@@ -64,13 +64,13 @@ def resolve_config_path() -> Path:
     return Path("/home/pi/.klipper/config")
 
 
-# The Pi deployment marker: this dir only exists when KWC is natively
+# The native deployment marker: this dir only exists when KWC is natively
 # installed alongside Klipper (same resolution as mcp_server.SYSTEM_CONFIG_PATH).
 DEPLOYMENT_CONFIG_PATH = resolve_config_path()
 
 
 def _deployment_looks_native() -> bool:
-    """True when KWC is natively deployed on a Pi (system config path present)
+    """True when KWC is natively deployed on the printer host (system config path present)
     and we're on Linux — i.e., not a dev checkout / Windows box."""
     return is_native_platform() and DEPLOYMENT_CONFIG_PATH.is_dir()
 
@@ -80,7 +80,7 @@ def find_klipper_install() -> Path | None:
 
     The KWC_KLIPPER_DIR env override always wins (dev/test escape hatch).
     Otherwise only probes common install paths (KIAUH's default is
-    ~/klipper) when the app looks natively deployed on the Pi.
+    ~/klipper) when the app looks natively deployed on the printer host.
     """
     env_dir = os.environ.get("KWC_KLIPPER_DIR")
     if env_dir:

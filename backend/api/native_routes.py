@@ -67,7 +67,7 @@ router = APIRouter()
 
 @router.get("/status")
 async def native_status():
-    """Report whether native (Pi) features are available."""
+    """Report whether native (printer-host) features are available."""
     settings = load_settings() if is_native_platform() else {}
     return {
         "native": is_native_platform(),
@@ -120,7 +120,7 @@ async def update_settings(data: ConfigPathUpdate):
     return settings
 
 
-# ── Config files from Pi ────────────────────────────────────────
+# ── Config files from the host ──────────────────────────────────
 
 
 @router.get("/config-files")
@@ -135,7 +135,7 @@ async def get_config_files(path: str | None = None):
 
 @router.post("/config-files/read")
 def read_config_files(data: dict):
-    """Read and parse one or more config files from the Pi."""
+    """Read and parse one or more config files from the host."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
 
@@ -223,7 +223,7 @@ class ApplyRequest(BaseModel):
 
 @router.post("/apply")
 def apply_config(data: ApplyRequest):
-    """Write config files back to the Pi filesystem."""
+    """Write config files back to the host filesystem."""
     if not is_native_platform():
         raise HTTPException(status_code=501, detail="Only available on Pi")
 
