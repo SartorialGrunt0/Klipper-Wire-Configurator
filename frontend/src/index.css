@@ -284,6 +284,14 @@ input[type="radio"] {
   transition: opacity 0.15s ease;
 }
 
+/* Error-level graph badge (ORPHAN): tint derived from --color-error so the
+   badge stays in sync with the token (was raw red-500/15 while its text
+   already used the token — half token-driven, half not). */
+.kwc-error-tint-badge {
+  background: color-mix(in srgb, var(--color-error) 15%, transparent);
+  color: var(--color-error);
+}
+
 @keyframes kwc-marquee-scroll {
   0%, 12% {
     transform: translateX(0);
