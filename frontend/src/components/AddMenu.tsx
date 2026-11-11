@@ -575,7 +575,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
                           {template.filename}
                         </div>
                       </div>
-                      <CategoryChip category={template.category} />
+                      <CategoryChip category={template.category} className="shrink-0" />
                     </div>
                   </button>
                 ))}

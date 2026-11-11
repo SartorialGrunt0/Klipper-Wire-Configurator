@@ -2076,7 +2076,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                           <div className="text-xs font-medium text-[var(--color-text-primary)] truncate">{ex.name}</div>
                           <div className="text-[10px] text-[var(--color-text-secondary)] truncate">{ex.filename}</div>
                         </div>
-                        <CategoryChip category={ex.category} className="ml-2" />
+                        <CategoryChip category={ex.category} className="ml-2 shrink-0" />
                       </button>
                     ))}
                     {referenceResults.length === 0 && referenceSearch && (
