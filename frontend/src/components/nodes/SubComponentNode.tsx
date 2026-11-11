@@ -49,7 +49,7 @@ function SubComponentNode({ data, selected, id }: NodeProps) {
           {nodeData.label}
         </span>
         {isOrphan && (
-          <span className="text-[9px] px-1 py-0.5 rounded bg-red-500/15 text-[var(--color-error)] ml-auto shrink-0">
+          <span className="text-[9px] px-1 py-0.5 rounded kwc-error-tint-badge ml-auto shrink-0">
             ORPHAN
           </span>
         )}

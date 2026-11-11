@@ -165,7 +165,7 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
             <div className="space-y-3">
               <div className="px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30">
                 <p className="text-xs text-amber-400">
-                  This will discard all unsaved changes and reload the config from {isNative ? 'the Pi' : 'the original import'}.
+                  This will discard all unsaved changes and reload the config from {isNative ? 'the host' : 'the original file'}.
                 </p>
               </div>
               <p className="text-xs text-[var(--color-text-secondary)]">

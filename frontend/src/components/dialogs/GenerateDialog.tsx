@@ -6,6 +6,7 @@ import type { ExampleConfig, ConfigFile } from '../../types/config';
 import { buildGraphFromConfig } from '../../utils/graphBuilder';
 import { discardReview } from '../../services/changeSetReview';
 import Modal from '../Modal';
+import { CategoryChip } from '../CategoryChip';
 
 interface GenerateDialogProps {
   onClose: () => void;
@@ -191,15 +192,7 @@ export default function GenerateDialog({ onClose }: GenerateDialogProps) {
                     <div>
                       <div className="text-xs font-medium text-[var(--color-text-primary)]">{ex.name}</div>
                       <div className="flex gap-1 mt-0.5">
-                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
-                          ex.category === 'generic'
-                            ? 'bg-blue-500/20 text-blue-400'
-                            : ex.category === 'example'
-                            ? 'bg-green-500/20 text-green-400'
-                            : 'bg-gray-500/20 text-gray-400'
-                        }`}>
-                          {ex.category}
-                        </span>
+                        <CategoryChip category={ex.category} />
                       </div>
                     </div>
                   </button>

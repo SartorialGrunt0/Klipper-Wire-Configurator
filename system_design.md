@@ -140,7 +140,7 @@ Single-file import path:
 1. [frontend/src/components/dialogs/ImportDialog.tsx](frontend/src/components/dialogs/ImportDialog.tsx) collects selected files (file picker, drag-drop, or folder) and shows a staged list with per-file checkboxes so files can be deselected before importing. Selected files whose names collide with already-loaded project files require an explicit overwrite confirmation.
 2. [frontend/src/services/api.ts](frontend/src/services/api.ts) posts to `/api/import` or `/api/import-project`.
 3. [backend/api/routes.py](backend/api/routes.py) parses files with [backend/parser/config_parser.py](backend/parser/config_parser.py), validates with [backend/parser/validator.py](backend/parser/validator.py), and detects board metadata with [backend/services/board_detector.py](backend/services/board_detector.py). **Import never writes to disk** — parsed content is returned to the frontend only; persistence happens exclusively through the Save/Apply flow.
-4. The frontend writes config/validation into `configStore` as *unsaved changes* (merging into whatever is already loaded — import never clears the project) and rebuilds the graph with [frontend/src/utils/graphBuilder.ts](frontend/src/utils/graphBuilder.ts). Existing diff baselines (`originalTexts`) are preserved so Save shows import-vs-Pi; files that were never loaded before have no baseline and render as "new file".
+4. The frontend writes config/validation into `configStore` as *unsaved changes* (merging into whatever is already loaded — import never clears the project) and rebuilds the graph with [frontend/src/utils/graphBuilder.ts](frontend/src/utils/graphBuilder.ts). Existing diff baselines (`originalTexts`) are preserved so Save diffs against the last-saved copy (the imported text until a file is first saved); files that were never loaded before have no baseline and render as "new file".
 
 ### 6.2 Generate a blank or example config
 
@@ -186,7 +186,7 @@ Key maintenance point:
 | --- | --- | --- |
 | Diff | [frontend/src/components/dialogs/DiffDialog.tsx](frontend/src/components/dialogs/DiffDialog.tsx) | Uses exported text from [frontend/src/services/api.ts](frontend/src/services/api.ts) |
 | Export | [frontend/src/components/dialogs/ExportDialog.tsx](frontend/src/components/dialogs/ExportDialog.tsx) | `/api/export` and `/api/export-project` in [backend/api/routes.py](backend/api/routes.py) |
-| Apply to Pi | [frontend/src/components/dialogs/ApplyDialog.tsx](frontend/src/components/dialogs/ApplyDialog.tsx) | `/api/native/apply` and `/api/native/klipper/firmware-restart` in [backend/api/native_routes.py](backend/api/native_routes.py) |
+| Save to Host | [frontend/src/components/dialogs/ApplyDialog.tsx](frontend/src/components/dialogs/ApplyDialog.tsx) | `/api/native/apply` and `/api/native/klipper/firmware-restart` in [backend/api/native_routes.py](backend/api/native_routes.py) |
 | Revert | [frontend/src/components/dialogs/RevertDialog.tsx](frontend/src/components/dialogs/RevertDialog.tsx) | Browser mode reparses original text; native mode re-reads disk through `/api/native/config-files/read` |
 
 ### 6.7 Native mode and persistence

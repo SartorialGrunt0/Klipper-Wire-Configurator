@@ -39,7 +39,7 @@ def test_prefers_modern_layout(tmp_path, monkeypatch):
 
 
 def test_saved_native_setting_wins_over_modern(tmp_path, monkeypatch):
-    # The user picked a custom path in the "Open from Pi" menu (settings.json
+    # The user picked a custom path in the "Open from Host" menu (settings.json
     # has a config_path different from the modern default) — it must win over
     # the automatic modern layout so the AI tools scan the same directory the
     # native file browser uses.

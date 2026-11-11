@@ -8,6 +8,7 @@ import { hasFeatureSectionType as hasFeatureSectionTypeInFiles } from '../utils/
 import type { ConfigSection, CommunicationType, ExampleConfig, HardwareType } from '../types/config';
 import McuNameDialog from './dialogs/McuNameDialog';
 import Modal from './Modal';
+import { CategoryChip } from './CategoryChip';
 
 interface AddMenuProps {
   onClose: () => void;
@@ -574,9 +575,7 @@ export default function AddMenu({ onClose }: AddMenuProps) {
                           {template.filename}
                         </div>
                       </div>
-                      <span className="text-[10px] uppercase tracking-wider px-2 py-1 rounded-full bg-[var(--color-bg-primary)] text-[var(--color-text-secondary)] border border-[var(--color-bg-tertiary)] shrink-0">
-                        {template.category}
-                      </span>
+                      <CategoryChip category={template.category} className="shrink-0" />
                     </div>
                   </button>
                 ))}

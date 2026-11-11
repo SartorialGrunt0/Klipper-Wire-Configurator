@@ -8,6 +8,7 @@ import { filterValidationMap } from '../../utils/validationVisibility';
 import * as api from '../../services/api';
 import type { ConfigFile } from '../../types/config';
 import Modal from '../Modal';
+import { StatusPill, FindingsPill } from '../FileStatusPill';
 
 interface ExportDialogProps {
   onClose: () => void;
@@ -108,26 +109,12 @@ const ReviewItem = ({
     <div>
       <div className="flex items-center gap-2 mb-1">
         <span className="text-xs font-semibold text-[var(--color-text-primary)]">{fn}</span>
-        {!s.hasOriginal && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-warning)]/20 text-[var(--color-warning)]">new file</span>
-        )}
-        {s.hasOriginal && !s.hasChanges && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">unchanged</span>
-        )}
+        {!s.hasOriginal && <StatusPill tone="warning">new file</StatusPill>}
+        {s.hasOriginal && !s.hasChanges && <StatusPill tone="neutral">unchanged</StatusPill>}
         {s.hasOriginal && s.hasChanges && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-accent)]/20 text-[var(--color-accent)]">
-            {changedCount} lines changed
-          </span>
+          <StatusPill tone="accent">{changedCount} lines changed</StatusPill>
         )}
-        {findings.length > 0 && (
-          <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
-            errorCount > 0
-              ? 'bg-red-600 text-white'
-              : 'bg-[var(--color-warning)] text-[var(--color-bg-primary)]'
-          }`}>
-            {findings.length} finding{findings.length !== 1 ? 's' : ''}
-          </span>
-        )}
+        <FindingsPill count={findings.length} errorCount={errorCount} />
       </div>
       {s.hasChanges && (
         <div className="rounded-lg border border-[var(--color-bg-tertiary)] overflow-hidden">

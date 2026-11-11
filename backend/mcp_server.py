@@ -48,7 +48,7 @@ GCODE_MACRO_SUMMARY_PATH = KWC_CUSTOM_DOCS_DIR / "Klipper_GCode_Macro_AI_Summary
 DOCS_SUMMARY_PATH = KWC_CUSTOM_DOCS_DIR / "Klipper_Docs_AI_Summary.md"
 # The import-time system path for Klipper configs (see resolve_config_path).
 # Handlers re-resolve per call via _system_config_path() so a path change
-# made in the frontend ("Open from Pi" → PUT /native/settings) takes effect
+# made in the frontend ("Open from Host" → PUT /native/settings) takes effect
 # without a backend restart. Resolution priority: KLIPPER_CONFIG_PATH env
 # override, then the saved native setting, then the modern
 # ~/printer_data/config layout, then the legacy /home/pi/.klipper/config.
@@ -200,7 +200,7 @@ def _overlay_is_dirty(rel: str, content: str) -> bool:
 
 def _system_config_path() -> Path:
     """Resolve the system config dir per call so a path change made in the
-    frontend ("Open from Pi" → PUT /native/settings) takes effect without a
+    frontend ("Open from Host" → PUT /native/settings) takes effect without a
     backend restart. Falls back to the import-time SYSTEM_CONFIG_PATH when
     settings resolve to the default (env override / modern / legacy chain).
     """
@@ -909,7 +909,7 @@ class McpServer:
                 "name": "list_user_configs",
                 "description": (
                     "List all user configuration files available to the assistant, "
-                    "from both the Pi's native config path and imported user configs "
+                    "from both the printer host's native config path and imported user configs "
                     "(including subfolders). Use this to discover which files exist "
                     "before reading one — e.g. when the user names a macro or section "
                     "without saying which file it is in."

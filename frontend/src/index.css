@@ -270,8 +270,6 @@ input[type="radio"] {
    header badge (solid accent blue, dark lettering) so graph node cards and
    the flash dialog read as one language. */
 .kwc-primary-label {
-  margin-top: 2px;
-  width: fit-content;
   padding: 2px 6px;
   border-radius: 4px;
   background: var(--color-accent);
@@ -282,6 +280,14 @@ input[type="radio"] {
   line-height: 1.1;
   text-transform: uppercase;
   transition: opacity 0.15s ease;
+}
+
+/* Error-level graph badge (ORPHAN): tint derived from --color-error so the
+   badge stays in sync with the token (was raw red-500/15 while its text
+   already used the token — half token-driven, half not). */
+.kwc-error-tint-badge {
+  background: color-mix(in srgb, var(--color-error) 15%, transparent);
+  color: var(--color-error);
 }
 
 @keyframes kwc-marquee-scroll {

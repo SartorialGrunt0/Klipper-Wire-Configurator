@@ -71,6 +71,7 @@ import { useMediaQuery, WIDE_VIEWPORT_QUERY } from '../hooks/useMediaQuery';
 import type { TextIssue } from '../types/editor';
 import type { ExampleConfig, ConfigFile, ConfigSection, ValidationError } from '../types/config';
 import Modal from './Modal';
+import { CategoryChip } from './CategoryChip';
 
 interface SearchResult {
   file: string;
@@ -2075,9 +2076,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
                           <div className="text-xs font-medium text-[var(--color-text-primary)] truncate">{ex.name}</div>
                           <div className="text-[10px] text-[var(--color-text-secondary)] truncate">{ex.filename}</div>
                         </div>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 shrink-0 ml-2">
-                          {ex.category}
-                        </span>
+                        <CategoryChip category={ex.category} className="ml-2 shrink-0" />
                       </button>
                     ))}
                     {referenceResults.length === 0 && referenceSearch && (

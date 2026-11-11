@@ -141,7 +141,7 @@ function computeHardwareDragPreviewSize(nodes: Node[], hardwareId: string) {
  * Browser-mode fallback: restore the last saved config session from backend
  * storage (project/load-saved) and the saved graph layout from localStorage.
  * Only called when native mode is NOT active — native mode reads the real
- * config from the Pi disk via the native startup path instead.
+ * config from the host disk via the native startup path instead.
  */
 async function restoreSavedConfigsFromBackend(): Promise<void> {
   const configStore = useConfigStore.getState();
@@ -277,7 +277,7 @@ export default function App() {
     useNativeStore.getState().checkNativeStatus();
   }, []);
 
-  // Auto-read config from Pi on startup (native mode only).
+  // Auto-read config from the host on startup (native mode only).
   // On every page refresh, re-read from disk so unapplied changes are cleared.
   // Then restore graph positions from saved layout.
   const layoutRestored = useRef(false);
@@ -326,7 +326,7 @@ export default function App() {
               } catch { /* proceed without */ }
             }
 
-            // Read config files from Pi
+            // Read config files from the host
             const result = await api.readNativeConfigFiles(filenames, state.configPath);
 
             const allConfigs: Record<string, import('./types/config').ConfigFile> = {};
@@ -377,7 +377,7 @@ export default function App() {
 
   // Restore saved configs from backend storage on startup (non-native fallback).
   // Waits for the native status check so the two loaders can't race: native
-  // mode loads from the Pi config dir (effect above); browser mode restores
+  // mode loads from the host config dir (effect above); browser mode restores
   // the last saved session. Previously this fired on mount regardless —
   // wasting ~400ms of load-saved work on native startups and racing
   // buildProjectGraph (additive), a duplicate-cards source.

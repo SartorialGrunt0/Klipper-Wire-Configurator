@@ -12,6 +12,7 @@ import * as api from '../../services/api';
 import type { ConfigFile } from '../../types/config';
 import type { NativeStatus } from '../../services/api';
 import Modal from '../Modal';
+import { StatusPill, FindingsPill } from '../FileStatusPill';
 
 interface ApplyDialogProps {
   onClose: () => void;
@@ -553,7 +554,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
         setStatus('success');
         setMessage(`Successfully saved ${result.saved.length} file${result.saved.length !== 1 ? 's' : ''} locally${result.removed.length ? `, removed ${result.removed.length} file${result.removed.length !== 1 ? 's' : ''}` : ''}`);
       } else {
-        // Native mode: save to Pi config path
+        // Native mode: save to the host config path
         setStatus('applying');
         setMessage(`Writing ${Object.keys(exportedFiles).length} files to ${configPath}...`);
         const result = await api.applyNativeConfig(exportedFiles, configPath, deleted);
@@ -756,7 +757,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
           <p className="text-xs text-amber-400">
             {isLocalMode
               ? 'This will overwrite the previously imported config files in local storage.'
-              : 'This will overwrite existing config files on the Pi. Make sure you have a backup.'
+              : 'This will overwrite existing config files on the host. Make sure you have a backup.'
             }
           </p>
         </div>
@@ -879,32 +880,20 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
                         <span className="text-xs font-semibold text-[var(--color-text-primary)]">{fn}</span>
                         {s.isDeleted && (
                           <>
-                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-error)]/20 text-[var(--color-error)]">deleted</span>
-                            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-error)]/20 text-[var(--color-error)]">
+                            <StatusPill tone="error">deleted</StatusPill>
+                            <StatusPill tone="error">
                               {diffLines.filter((l) => l.type === 'removed').length} lines removed
-                            </span>
+                            </StatusPill>
                           </>
                         )}
-                        {!s.hasOriginal && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-warning)]/20 text-[var(--color-warning)]">new file</span>
-                        )}
+                        {!s.hasOriginal && <StatusPill tone="warning">new file</StatusPill>}
                         {s.hasOriginal && !s.isDeleted && !s.hasChanges && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">unchanged</span>
+                          <StatusPill tone="neutral">unchanged</StatusPill>
                         )}
                         {s.hasOriginal && !s.isDeleted && s.hasChanges && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-[var(--color-accent)]/20 text-[var(--color-accent)]">
-                            {changedCount} lines changed
-                          </span>
+                          <StatusPill tone="accent">{changedCount} lines changed</StatusPill>
                         )}
-                        {findings.length > 0 && (
-                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
-                            errorCount > 0
-                              ? 'bg-red-600 text-white'
-                              : 'bg-[var(--color-warning)] text-[var(--color-bg-primary)]'
-                          }`}>
-                            {findings.length} finding{findings.length !== 1 ? 's' : ''}
-                          </span>
-                        )}
+                        <FindingsPill count={findings.length} errorCount={errorCount} />
                       </div>
 
                       {s.hasChanges && (

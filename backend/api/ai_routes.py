@@ -1144,7 +1144,7 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
         "available user files."
     ),
     "list_user_configs": (
-        "List all user config files (from the Pi's native config path and "
+        "List all user config files (from the printer host's native config path and "
         "imported user configs). Use when the user names a macro or section "
         "without saying which file it is in, then read the best candidate."
     ),

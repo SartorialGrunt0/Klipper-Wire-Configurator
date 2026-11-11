@@ -436,7 +436,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       stopRequestIdRef.current = stopRequestId;
       setStopRequestId(stopRequestId);
       // Generation guard (PR #36 review, B-4): if the user discards the
-      // review (Revert / New Chat / Generate / Open-from-Pi) while this
+      // review (Revert / New Chat / Generate / Open-from-Host) while this
       // request is in flight, every later write of THIS run is stale.
       runEpochRef.current = useChangeSetStore.getState().epoch;
       // Reset the approval card state for the new request; the poll

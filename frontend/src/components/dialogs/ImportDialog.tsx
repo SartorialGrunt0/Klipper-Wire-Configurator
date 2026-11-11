@@ -93,7 +93,7 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
 
         // NOTE: do NOT set originalText here. Import stages files into the
         // session as unsaved changes; the diff baseline must remain whatever
-        // was loaded from the Pi (Open from Pi), so Save shows import-vs-Pi.
+        // was loaded from the host (Open from Host), so Save diffs against the host copy.
         // New files keep no original → they render as "new file" in Save.
 
         // Find MCU names in this file
@@ -124,7 +124,7 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
       }
 
       // Import stages files as unsaved changes (originalTexts stays the
-      // Pi-loaded baseline, so Save diffs import-vs-Pi). Light up the Save
+      // host-loaded baseline, so Save diffs against the host copy). Light up the Save
       // button only when the import actually differs from that baseline —
       // re-importing identical content leaves it grey, exactly like a no-op edit.
       const state = useConfigStore.getState();

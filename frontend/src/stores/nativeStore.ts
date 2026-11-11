@@ -3,9 +3,9 @@ import * as api from '../services/api';
 import type { DeviceList, NativeStatus, CanbusQueryResult } from '../services/api';
 
 interface NativeStore {
-  /** Whether running natively on the Pi (null = not yet checked) */
+  /** Whether running natively on the printer host (null = not yet checked) */
   isNative: boolean | null;
-  /** Config directory path on the Pi */
+  /** Config directory path on the printer host */
   configPath: string;
   /** Detected devices */
   devices: DeviceList | null;

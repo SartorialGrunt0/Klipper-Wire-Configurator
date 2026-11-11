@@ -127,7 +127,7 @@ describe('buildDecisionContext', () => {
 
 /**
  * A wholesale replacement of the working buffer — Revert, a fresh generate, a
- * re-read from the Pi — takes the review with it: the frame belongs to a file
+ * re-read from the host — takes the review with it: the frame belongs to a file
  * state that no longer exists.
  */
 describe('discardReview', () => {
