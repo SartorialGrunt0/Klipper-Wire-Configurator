@@ -16,7 +16,7 @@ interface OpenFromPiDialogProps {
 }
 
 export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
-  const { configPath, setConfigPath, isNative } = useNativeStore();
+  const { configPath, setConfigPath } = useNativeStore();
   const [pathInput, setPathInput] = useState(configPath);
   const [files, setFiles] = useState<api.NativeConfigFile[]>([]);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
@@ -30,7 +30,6 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
   const persistClearedMacroDesignerState = useCallback(async () => {
     const macroDesignerStore = useMacroDesignerStore.getState();
     macroDesignerStore.clearPersistedState();
-    if (!isNative) return;
 
     const graphState = useGraphStore.getState();
     await api.saveNativeLayout({
@@ -38,7 +37,7 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
       graphEdges: graphState.edges,
       macroDesigner: macroDesignerStore.exportPersistedState(),
     }).catch(() => {});
-  }, [isNative]);
+  }, []);
 
   const loadFiles = useCallback(async (path: string) => {
     setStatus('loading');
@@ -146,7 +145,7 @@ export default function OpenFromPiDialog({ onClose }: OpenFromPiDialogProps) {
       // The rebuild renumbers node ids — re-apply the saved layout so an
       // open doesn't auto-arrange over the user's arrangement, and the
       // macro-state persist below saves the restored arrangement.
-      await restoreLayoutAfterRebuild(useGraphStore.getState, isNative);
+      await restoreLayoutAfterRebuild(useGraphStore.getState);
 
       if (clearMacroDesignerState) {
         await persistClearedMacroDesignerState();

@@ -53,8 +53,10 @@ DOCS_SUMMARY_PATH = KWC_CUSTOM_DOCS_DIR / "Klipper_Docs_AI_Summary.md"
 # override, then the saved native setting, then the modern
 # ~/printer_data/config layout, then the legacy /home/pi/.klipper/config.
 SYSTEM_CONFIG_PATH = resolve_config_path()
-# Local storage dir for browser-mode Save (non-native); also scanned by the
-# user-config tools alongside the system path.
+# Scratch store scanned by the user-config tools alongside the system path.
+# Nothing writes here any more (the browser-mode Save endpoint is gone), so it
+# is normally empty — kept because the tools are part of the advertised
+# surface and a host that still has files from an older install keeps them.
 LOCAL_CONFIGS_DIR = BACKEND_DIR / "user_configs"
 
 # ── chat working-state overlay (live bug report 2026-09-27) ───────────

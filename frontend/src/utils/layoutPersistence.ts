@@ -21,14 +21,13 @@ import * as api from '../services/api';
  * that predate logical keys).
  *
  * SAVED SHAPES
- * All save paths now write the same payload (see buildLayoutPayload).
- * Older saves exist in the wild in two shapes — native mode used to store
- * FULL node objects, and browser mode stored edges WITHOUT source/target.
- * normalizeSavedLayout accepts both and upgrades them to the current shape
- * (computing logical keys from full node data where absent).
+ * All save paths write the same payload (see buildLayoutPayload). Older
+ * saves exist in the wild in two shapes — early native saves stored FULL
+ * node objects, and the retired browser mode stored edges WITHOUT
+ * source/target. normalizeSavedLayout accepts both and upgrades them to the
+ * current shape (computing logical keys from full node data where absent).
  */
 
-export const LAYOUT_STORAGE_KEY = 'kwc.graphLayout';
 
 /** Minimal saved node — identity fields plus position. `logicalKey` is
  *  optional: saves written before the key existed only match by id. */
@@ -51,8 +50,7 @@ export interface SavedLayoutEdge {
   targetHandle?: string;
 }
 
-/** Full layout payload shared by the backend (layout.json) and the
- *  browser localStorage fallback. */
+/** Full layout payload persisted as layout.json on the printer host. */
 export interface SavedLayout {
   graphNodes: SavedLayoutNode[];
   graphEdges: SavedLayoutEdge[];
@@ -203,10 +201,10 @@ export function normalizeSavedLayout(raw: unknown): SavedLayout {
 }
 
 /**
- * Canonical payload for BOTH save modes (native layout.json and browser
- * localStorage). Nodes are stored compact (id + position + logical key —
- * positions are all restore needs); edges carry endpoints so routing can
- * be remapped across rebuilds even when the id sequence shifted.
+ * Canonical payload written to layout.json on the printer host. Nodes are
+ * stored compact (id + position + logical key — positions are all restore
+ * needs); edges carry endpoints so routing can be remapped across rebuilds
+ * even when the id sequence shifted.
  */
 export function buildLayoutPayload(
   nodes: readonly AppNode[],
@@ -359,23 +357,13 @@ export function applySavedEdgeLayout(
   });
 }
 
-/** Read the saved layout from wherever this mode persists it: backend
- *  layout.json (native) or localStorage (browser). Returns null when absent
- *  or unreadable — callers keep auto-arranged positions. */
-export async function loadSavedLayout(isNative: boolean | null): Promise<SavedLayout | null> {
-  if (isNative === null) return null; // status check still in flight
-  if (isNative) {
-    try {
-      const res = await api.loadNativeLayout();
-      return normalizeSavedLayout(res.layout);
-    } catch {
-      return null;
-    }
-  }
+/** Read the saved layout from the backend (layout.json on the printer host).
+ *  Returns null when absent or unreadable — callers keep auto-arranged
+ *  positions. */
+export async function loadSavedLayout(): Promise<SavedLayout | null> {
   try {
-    const raw = localStorage.getItem(LAYOUT_STORAGE_KEY);
-    if (!raw) return null;
-    return normalizeSavedLayout(JSON.parse(raw));
+    const res = await api.loadNativeLayout();
+    return normalizeSavedLayout(res.layout);
   } catch {
     return null;
   }
@@ -404,9 +392,8 @@ export async function restoreLayoutAfterRebuild(
     setNodes: (n: AppNode[]) => void;
     setEdges: (e: AppEdge[]) => void;
   },
-  isNative: boolean | null,
 ): Promise<void> {
-  const saved = await loadSavedLayout(isNative);
+  const saved = await loadSavedLayout();
   if (!saved) return;
   const fresh = getGraphState();
   fresh.setNodes(applySavedNodePositions(fresh.nodes, saved.graphNodes));

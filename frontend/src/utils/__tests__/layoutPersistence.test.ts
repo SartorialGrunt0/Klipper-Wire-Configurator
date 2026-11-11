@@ -539,3 +539,49 @@ describe('in-session full rebuild (reference-add / import / revert)', () => {
     expect(m.graph.getState().nodes.length).toBe(0);
   });
 });
+
+// ── loadSavedLayout: backend only ──────────────────────────────────────
+// There is no browser fallback any more: the only source is layout.json on
+// the printer host. These lock that in, including that localStorage is never
+// even consulted (the retired browser-mode path).
+
+describe('loadSavedLayout', () => {
+  const savedLayout = { graphNodes: [], graphEdges: [], macroDesigner: null };
+
+  it('returns the layout served by the backend', async () => {
+    vi.resetModules();
+    vi.doMock('@/services/api', () => ({
+      loadNativeLayout: vi.fn(async () => ({ layout: savedLayout })),
+    }));
+
+    const { loadSavedLayout } = await import('../layoutPersistence');
+
+    await expect(loadSavedLayout()).resolves.toEqual(savedLayout);
+  });
+
+  it('returns null when the backend has no layout yet', async () => {
+    vi.resetModules();
+    vi.doMock('@/services/api', () => ({
+      loadNativeLayout: vi.fn(async () => { throw new Error('404'); }),
+    }));
+
+    const { loadSavedLayout } = await import('../layoutPersistence');
+
+    await expect(loadSavedLayout()).resolves.toBeNull();
+  });
+
+  it('never reads localStorage, even when the backend fails', async () => {
+    vi.resetModules();
+    const getItem = vi.fn(() => JSON.stringify(savedLayout));
+    vi.stubGlobal('localStorage', { getItem });
+    vi.doMock('@/services/api', () => ({
+      loadNativeLayout: vi.fn(async () => { throw new Error('404'); }),
+    }));
+
+    const { loadSavedLayout } = await import('../layoutPersistence');
+    await expect(loadSavedLayout()).resolves.toBeNull();
+
+    expect(getItem).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+});

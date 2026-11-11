@@ -227,8 +227,6 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   const [printerPrintFilename, setPrinterPrintFilename] = useState<string | null>(null);
 
   // Determine save mode
-  const isNativeMode = useNativeStore((s) => s.isNative);
-  const isLocalMode = isNativeMode === false || isNativeMode === null;
 
   /* ── Phase 4 save gate: findings for the selected files ─────────────
      Errors + warnings, never info (info is order-dependent context and
@@ -545,23 +543,12 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
       // that were deleted from the model are removed from storage.
       const deleted = files.filter((fn) => !(fn in configFiles));
 
-      if (isLocalMode) {
-        // Non-native mode: save to local config storage
-        setStatus('applying');
-        setMessage(`Saving ${Object.keys(exportedFiles).length} file${Object.keys(exportedFiles).length !== 1 ? 's' : ''} locally...`);
-        const result = await api.saveConfigsToLocal(exportedFiles, deleted);
-        setAppliedFiles(result.saved);
-        setStatus('success');
-        setMessage(`Successfully saved ${result.saved.length} file${result.saved.length !== 1 ? 's' : ''} locally${result.removed.length ? `, removed ${result.removed.length} file${result.removed.length !== 1 ? 's' : ''}` : ''}`);
-      } else {
-        // Native mode: save to the host config path
-        setStatus('applying');
-        setMessage(`Writing ${Object.keys(exportedFiles).length} files to ${configPath}...`);
-        const result = await api.applyNativeConfig(exportedFiles, configPath, deleted);
-        setAppliedFiles(result.files);
-        setStatus('success');
-        setMessage(`Successfully saved ${result.files.length} file${result.files.length !== 1 ? 's' : ''} to ${result.config_path}${result.removed.length ? `, removed ${result.removed.length} file${result.removed.length !== 1 ? 's' : ''}` : ''}`);
-      }
+      setStatus('applying');
+      setMessage(`Writing ${Object.keys(exportedFiles).length} files to ${configPath}...`);
+      const result = await api.applyNativeConfig(exportedFiles, configPath, deleted);
+      setAppliedFiles(result.files);
+      setStatus('success');
+      setMessage(`Successfully saved ${result.files.length} file${result.files.length !== 1 ? 's' : ''} to ${result.config_path}${result.removed.length ? `, removed ${result.removed.length} file${result.removed.length !== 1 ? 's' : ''}` : ''}`);
 
       // Update originalTexts to match what was saved, so diff resets
       const configStore = useConfigStore.getState();
@@ -591,7 +578,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
       setStatus('error');
       setMessage(err instanceof Error ? err.message : 'Save failed');
     }
-  }, [selectedFiles, configFiles, configPath, currentTexts, isLocalMode]);
+  }, [selectedFiles, configFiles, configPath, currentTexts]);
 
   const pollKlipperStatusAfterRestart = useCallback(async () => {
     const maxAttempts = 24;
@@ -727,7 +714,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   return (
     <Modal
       onClose={onClose}
-      label={isLocalMode ? 'Save Config Files' : 'Save to Host'}
+      label="Save to Host"
       backdropClassName="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
       panelClassName="bg-[var(--color-bg-secondary)] rounded-xl shadow-2xl flex flex-col border border-[var(--color-bg-tertiary)] overflow-hidden"
       panelStyle={{ width: showReviewPanel ? 900 : 480, maxHeight: '85vh' }}
@@ -736,13 +723,10 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
         <div className="flex items-center justify-between p-4 border-b border-[var(--color-bg-tertiary)]">
           <div>
             <h2 className="text-base font-semibold text-[var(--color-text-primary)]">
-              {isLocalMode ? 'Save Config Files' : 'Save to Host'}
+              Save to Host
             </h2>
             <p className="text-xs text-[var(--color-text-secondary)] mt-0.5">
-              {isLocalMode
-                ? 'Persist config changes to local storage'
-                : <>Write config files to <span className="font-mono">{configPath}</span></>
-              }
+              Write config files to <span className="font-mono">{configPath}</span>
             </p>
           </div>
           <button aria-label="Close" onClick={onClose} className="p-1 rounded hover:bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)]">
@@ -755,10 +739,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
         {/* Warning */}
         <div className="mx-4 mt-3 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30">
           <p className="text-xs text-amber-400">
-            {isLocalMode
-              ? 'This will overwrite the previously imported config files in local storage.'
-              : 'This will overwrite existing config files on the host. Make sure you have a backup.'
-            }
+            This will overwrite existing config files on the host. Make sure you have a backup.
           </p>
         </div>
 
@@ -1019,7 +1000,7 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
               </button>
             )
           )}
-          {status === 'success' && !isLocalMode && (
+          {status === 'success' && (
             <button
               onClick={handleFirmwareRestart}
               disabled={restartStatus === 'restarting' || restartStatus === 'success' || printerStatusLoading || printerIsPrinting}

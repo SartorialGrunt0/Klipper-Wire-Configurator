@@ -351,25 +351,9 @@ export async function loadProject(name: string): Promise<{
   return request(`/projects/${encodeURIComponent(name)}`);
 }
 
-export async function saveConfigsToLocal(
-  files: Record<string, string>,
-  deleted: string[] = [],
-): Promise<{ saved: string[]; removed: string[]; file_count: number; errors?: string[] }> {
-  return request('/configs/save', {
-    method: 'POST',
-    body: JSON.stringify({ files, deleted }),
-  });
-}
-
-
-export async function loadSavedConfigs(): Promise<ProjectImportResult> {
-  return request('/project/load-saved');
-}
-
 /* ── Native (host) API ───────────────────────────────── */
 
 export interface NativeStatus {
-  native: boolean;
   config_path: string;
 }
 

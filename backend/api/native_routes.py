@@ -70,14 +70,9 @@ async def native_status():
 
     Native mode is the only mode: a non-Linux backend refuses to start
     (see ``main._assert_native_platform``), so there is nothing to branch on.
-    ``native`` stays as a constant for the transition and is removed with the
-    frontend wire cleanup (plan Task 2.6).
     """
     settings = load_settings()
-    return {
-        "native": True,
-        "config_path": settings.get("config_path", get_default_config_path()),
-    }
+    return {"config_path": settings.get("config_path", get_default_config_path())}
 
 
 # ── Devices ─────────────────────────────────────────────────────

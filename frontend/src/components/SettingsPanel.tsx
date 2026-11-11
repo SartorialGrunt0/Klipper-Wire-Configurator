@@ -1438,15 +1438,15 @@ function DevicePicker({
   onSelect: (value: string) => void;
   commType?: string;
 }) {
-  const { isNative, devices, devicesLoading, refreshDevices, canbusQuery, canbusQueryLoading, queryCanbusUuids } = useNativeStore();
+  const { devices, devicesLoading, refreshDevices, canbusQuery, canbusQueryLoading, queryCanbusUuids } = useNativeStore();
 
   useEffect(() => {
-    if (isNative && !devices && !devicesLoading) {
+    if (!devices && !devicesLoading) {
       refreshDevices();
     }
-  }, [isNative, devices, devicesLoading, refreshDevices]);
+  }, [devices, devicesLoading, refreshDevices]);
 
-  if (!isNative || !devices) return null;
+  if (!devices) return null;
 
   const deviceType = DEVICE_PARAM_MAP[paramKey];
   if (!deviceType) return null;

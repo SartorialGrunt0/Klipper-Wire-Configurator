@@ -389,7 +389,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
 
   useEffect(() => {
     let cancelled = false;
-    const loadSavedConfigs = async () => {
+    const parseOriginalConfigs = async () => {
       const entries = Object.entries(originalTexts);
       if (entries.length === 0) {
         setSavedConfigFiles(configFiles);
@@ -409,7 +409,7 @@ export default function MacroDesignerDialog({ onClose }: MacroDesignerDialogProp
         }
       }
     };
-    void loadSavedConfigs();
+    void parseOriginalConfigs();
     return () => {
       cancelled = true;
     };

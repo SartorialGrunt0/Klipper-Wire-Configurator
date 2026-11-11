@@ -48,7 +48,6 @@ import { isBackupConfigFilename } from './utils/backupFiles';
 import { isSaveShortcut } from './utils/editorShortcuts';
 import { useUiStore } from './stores/uiStore';
 import {
-  LAYOUT_STORAGE_KEY,
   buildLayoutPayload,
   applySavedNodePositions,
   applySavedEdgeLayout,
@@ -137,82 +136,6 @@ function computeHardwareDragPreviewSize(nodes: Node[], hardwareId: string) {
   };
 }
 
-/**
- * Browser-mode fallback: restore the last saved config session from backend
- * storage (project/load-saved) and the saved graph layout from localStorage.
- * Only called when native mode is NOT active — native mode reads the real
- * config from the host disk via the native startup path instead.
- */
-async function restoreSavedConfigsFromBackend(): Promise<void> {
-  const configStore = useConfigStore.getState();
-  // Belt-and-suspenders: if another loader (e.g. native) already populated
-  // configs, don't clobber them.
-  if (Object.keys(configStore.configFiles).length > 0) {
-    return;
-  }
-
-  try {
-    const result = await api.loadSavedConfigs();
-    if (!result.files || Object.keys(result.files).length === 0) return;
-
-    let schemas = configStore.schemas;
-    if (Object.keys(schemas).length === 0) {
-      try {
-        const schemaResult = await api.getSchema();
-        configStore.setSchemas(schemaResult.schemas);
-        schemas = schemaResult.schemas;
-      } catch { /* proceed without */ }
-    }
-
-    // Use loadConfigs to replace all configs at once (avoids duplicates)
-    const allConfigs: Record<string, ConfigFile> = {};
-    const allValidations: Record<string, ValidationResult> = {};
-
-    for (const [filename, fileResult] of Object.entries(result.files)) {
-      allConfigs[filename] = fileResult.config;
-      allValidations[filename] = fileResult.validation;
-    }
-
-    configStore.loadConfigs(allConfigs);
-
-    for (const [filename, validation] of Object.entries(allValidations)) {
-      configStore.setValidation(filename, validation);
-    }
-
-    for (const [filename, config] of Object.entries(allConfigs)) {
-      if (config.raw_text) {
-        configStore.setOriginalText(filename, config.raw_text);
-      }
-    }
-
-    // Clear graph first, then rebuild to avoid duplicate nodes
-    const graphStore = useGraphStore.getState();
-    graphStore.clearGraph();
-    const { buildProjectGraph } = await import('./utils/graphBuilder');
-    buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
-
-    // Browser mode: restore saved layout from localStorage (if any).
-    // Position/edge restore is keyed by content identity (logicalKey) with
-    // exact-id fallback — see utils/layoutPersistence.
-    const layout = await loadSavedLayout(false);
-    if (layout) {
-      if (layout.macroDesigner) {
-        useMacroDesignerStore.getState().hydratePersistedState(layout.macroDesigner as MacroDesignerPersistedState);
-      }
-      const gs = useGraphStore.getState();
-      gs.setNodes(applySavedNodePositions(gs.nodes, layout.graphNodes));
-      // Restore edge routing: custom bend points + which side of each
-      // node the line connects to. Without this, a refresh resets every
-      // trace to default top/bottom routing even though card positions
-      // survived.
-      gs.setEdges(applySavedEdgeLayout(gs.edges, layout.graphEdges, gs.nodes, layout.graphNodes));
-    }
-
-    configStore.markClean();
-  } catch {
-    // No saved configs — that's fine, start empty
-  }
-}
 
 /** Sits inside <ReactFlow> and calls fitView whenever trigger increments. */
 function AutoFitController({ trigger }: { trigger: number }) {
@@ -272,152 +195,112 @@ export default function App() {
     });
   }, []);
 
-  // Check native mode on mount
+  // Startup: read the config from the printer host, build the graph, restore
+  // the saved layout. ONE unconditional path — there is no mode to branch on,
+  // because a non-Linux backend refuses to start (main._assert_native_platform).
+  // Re-reading on every page refresh is what clears unapplied changes.
+  const startupLoaded = useRef(false);
   useEffect(() => {
-    useNativeStore.getState().checkNativeStatus();
-  }, []);
+    // StrictMode mounts effects twice; buildProjectGraph is additive, so a
+    // second run would duplicate every card. One shot per app instance.
+    if (startupLoaded.current) return;
+    startupLoaded.current = true;
+    let cancelled = false;
 
-  // Auto-read config from the host on startup (native mode only).
-  // On every page refresh, re-read from disk so unapplied changes are cleared.
-  // Then restore graph positions from saved layout.
-  const layoutRestored = useRef(false);
-  useEffect(() => {
-    if (layoutRestored.current) return;
-    const unsub = useNativeStore.subscribe((state) => {
-      if (state.isNative && !layoutRestored.current) {
-        layoutRestored.current = true;
-        (async () => {
+    (async () => {
+      try {
+        await useNativeStore.getState().loadConfigPath();
+        if (cancelled) return;
+        const { configPath } = useNativeStore.getState();
+
+        // List config files from the default path
+        const listing = await api.listNativeConfigFiles(configPath);
+        const cfgFiles = listing.files;
+        if (cfgFiles.length === 0) return;
+
+        // Auto-select .cfg files, skip non-klipper and backup files
+        const filenames = cfgFiles
+          .filter((f) => {
+            if (isBackupConfigFilename(f.name)) return false;
+            const name = f.name.toLowerCase();
+            return !(
+              name === 'moonraker.conf' || name === 'crowsnest.conf' ||
+              name === 'klipperscreen.conf' || name === 'sonar.conf' ||
+              name.endsWith('.bak') || name.endsWith('.old')
+            );
+          })
+          .map((f) => f.name);
+
+        if (filenames.length === 0) return;
+
+        // Ensure schemas are loaded
+        let schemas = useConfigStore.getState().schemas;
+        if (Object.keys(schemas).length === 0) {
           try {
-            // List config files from the default path
-            const listing = await api.listNativeConfigFiles(state.configPath);
-            const cfgFiles = listing.files;
-            if (cfgFiles.length === 0) {
-              // No files found at default path. Skip auto-open behavior for now.
-              unsub();
-              return;
-            }
+            const schemaResult = await api.getSchema();
+            useConfigStore.getState().setSchemas(schemaResult.schemas);
+            schemas = schemaResult.schemas;
+          } catch { /* proceed without */ }
+        }
 
-            // Auto-select .cfg files, skip non-klipper and backup files
-            const filenames = cfgFiles
-              .filter((f) => {
-                if (isBackupConfigFilename(f.name)) return false;
-                const name = f.name.toLowerCase();
-                return !(
-                  name === 'moonraker.conf' || name === 'crowsnest.conf' ||
-                  name === 'klipperscreen.conf' || name === 'sonar.conf' ||
-                  name.endsWith('.bak') || name.endsWith('.old')
-                );
-              })
-              .map((f) => f.name);
+        // Read config files from the host
+        const result = await api.readNativeConfigFiles(filenames, configPath);
+        if (cancelled) return;
 
-            if (filenames.length === 0) {
-              // No usable Klipper config files found. Skip auto-open behavior for now.
-              unsub();
-              return;
-            }
+        const allConfigs: Record<string, ConfigFile> = {};
+        const allValidations: Record<string, ValidationResult> = {};
+        const configStore = useConfigStore.getState();
 
-            // Ensure schemas are loaded
-            let schemas = useConfigStore.getState().schemas;
-            if (Object.keys(schemas).length === 0) {
-              try {
-                const schemaResult = await api.getSchema();
-                useConfigStore.getState().setSchemas(schemaResult.schemas);
-                schemas = schemaResult.schemas;
-              } catch { /* proceed without */ }
-            }
+        for (const [filename, fileResult] of Object.entries(result.files)) {
+          configStore.setConfigFile(filename, fileResult.config);
+          configStore.setValidation(filename, fileResult.validation);
+          allConfigs[filename] = fileResult.config;
+          allValidations[filename] = fileResult.validation;
 
-            // Read config files from the host
-            const result = await api.readNativeConfigFiles(filenames, state.configPath);
-
-            const allConfigs: Record<string, import('./types/config').ConfigFile> = {};
-            const allValidations: Record<string, import('./types/config').ValidationResult> = {};
-            const configStore = useConfigStore.getState();
-
-            for (const [filename, fileResult] of Object.entries(result.files)) {
-              configStore.setConfigFile(filename, fileResult.config);
-              configStore.setValidation(filename, fileResult.validation);
-              allConfigs[filename] = fileResult.config;
-              allValidations[filename] = fileResult.validation;
-
-              if (fileResult.raw_text) {
-                configStore.setOriginalText(filename, fileResult.raw_text);
-              }
-            }
-
-            // Build graph from config
-            const graphStore = useGraphStore.getState();
-            const { buildProjectGraph } = await import('./utils/graphBuilder');
-            buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
-
-            // Now try to restore graph positions from saved layout
-            // (content-keyed with exact-id fallback — see utils/layoutPersistence)
-            const layout = await loadSavedLayout(true);
-            if (layout) {
-              if (layout.macroDesigner) {
-                useMacroDesignerStore.getState().hydratePersistedState(layout.macroDesigner as MacroDesignerPersistedState);
-              }
-              const gs = useGraphStore.getState();
-              gs.setNodes(applySavedNodePositions(gs.nodes, layout.graphNodes));
-              // Restore edge routing the same way as the browser-mode path.
-              gs.setEdges(applySavedEdgeLayout(gs.edges, layout.graphEdges, gs.nodes, layout.graphNodes));
-            }
-
-            configStore.markClean();
-          } catch {
-            // Auto-read failed. Skip auto-open behavior for now.
+          if (fileResult.raw_text) {
+            configStore.setOriginalText(filename, fileResult.raw_text);
           }
-        })();
-        unsub();
-      } else if (state.isNative === false) {
-        unsub();
+        }
+
+        // Build graph from config
+        const graphStore = useGraphStore.getState();
+        const { buildProjectGraph } = await import('./utils/graphBuilder');
+        buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
+
+        // Restore graph positions from the saved layout (content-keyed with
+        // exact-id fallback — see utils/layoutPersistence)
+        const layout = await loadSavedLayout();
+        if (layout) {
+          if (layout.macroDesigner) {
+            useMacroDesignerStore.getState().hydratePersistedState(layout.macroDesigner as MacroDesignerPersistedState);
+          }
+          const gs = useGraphStore.getState();
+          gs.setNodes(applySavedNodePositions(gs.nodes, layout.graphNodes));
+          // Restore edge routing: custom bend points + which side of each
+          // node the line connects to. Without this, a refresh resets every
+          // trace to default top/bottom routing even though card positions
+          // survived.
+          gs.setEdges(applySavedEdgeLayout(gs.edges, layout.graphEdges, gs.nodes, layout.graphNodes));
+        }
+
+        configStore.markClean();
+      } catch {
+        // Startup read failed — start empty rather than half-populated.
       }
-    });
-    return unsub;
+    })();
+
+    return () => { cancelled = true; };
   }, []);
 
-  // Restore saved configs from backend storage on startup (non-native fallback).
-  // Waits for the native status check so the two loaders can't race: native
-  // mode loads from the host config dir (effect above); browser mode restores
-  // the last saved session. Previously this fired on mount regardless —
-  // wasting ~400ms of load-saved work on native startups and racing
-  // buildProjectGraph (additive), a duplicate-cards source.
-  const savedConfigRestored = useRef(false);
-  useEffect(() => {
-    if (savedConfigRestored.current) return;
-
-    let unsub: () => void = () => {};
-    const maybeRestore = () => {
-      if (savedConfigRestored.current) return;
-      const state = useNativeStore.getState();
-      if (state.isNative === null) return; // status check still in flight
-      savedConfigRestored.current = true;
-      unsub();
-      if (!state.isNative) {
-        void restoreSavedConfigsFromBackend();
-      }
-    };
-    unsub = useNativeStore.subscribe(maybeRestore);
-    maybeRestore();
-    return unsub;
-  }, []);
-
-  // Auto-save layout (debounced). Native mode persists via the backend;
-  // browser mode falls back to localStorage so arrangements survive refresh.
-  // Both modes store the SAME canonical payload (id + position + logicalKey
-  // per node, endpoint-bearing edges) so restore can key on content identity.
+  // Auto-save layout (debounced) to layout.json on the printer host.
+  // One canonical payload (id + position + logicalKey per node,
+  // endpoint-bearing edges) so restore can key on content identity.
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveLayoutNow = useCallback((n: typeof nodes, e: typeof edges) => {
     if (n.length === 0) return;
     const macroDesigner = useMacroDesignerStore.getState().exportPersistedState();
     const layout = buildLayoutPayload(n, e, macroDesigner);
-    const isNative = useNativeStore.getState().isNative;
-    if (isNative) {
-      api.saveNativeLayout(layout).catch(() => { /* ignore save errors */ });
-    } else {
-      try {
-        localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(layout));
-      } catch { /* ignore quota / privacy-mode errors */ }
-    }
+    api.saveNativeLayout(layout).catch(() => { /* ignore save errors */ });
   }, []);
 
   useEffect(() => {
@@ -443,8 +326,7 @@ export default function App() {
   // close, navigate away). The debounced save races a quick refresh — the
   // last card move / trace bend never reaches disk, which is why positions
   // and pathing only "stuck" when a config save happened to give the timer
-  // time to fire. The browser's synchronous path covers unload for
-  // localStorage; the backend POST is fire-and-forget but usually completes.
+  // time to fire. The backend POST is fire-and-forget but usually completes.
   useEffect(() => {
     const onUnload = () => {
       const graph = useGraphStore.getState();
