@@ -28,8 +28,9 @@ python scripts/run_functional_tests.py
 | FTA-002 | REQ-FW-01, REQ-FW-02, REQ-FW-03, REQ-FW-04, REQ-NATIVE-06 | Validate firmware and flash-target API contract forwarding, artifact selection, flash-device candidate logic, flash profile persistence, and Klipper log excerpt handling. | Strict pass/fail | [tests/test_native_firmware_routes.py](tests/test_native_firmware_routes.py), [tests/test_flash_target_routes.py](tests/test_flash_target_routes.py), [tests/test_flash_target_service.py](tests/test_flash_target_service.py), [tests/test_klipper_firmware_service.py](tests/test_klipper_firmware_service.py), [tests/test_flash_profile_service.py](tests/test_flash_profile_service.py), [tests/test_native_klipper_service.py](tests/test_native_klipper_service.py) |
 | FTA-003 | REQ-AI-02, REQ-AI-03, REQ-AI-04 | Validate provider key gating, docs-grounded prompt preparation, provider payload building, response extraction, auto-search fallback, and the native tool-call loop on the backend proxy. | Strict pass/fail | [tests/test_ai_chat_routes.py](tests/test_ai_chat_routes.py) |
 | FTA-004 | REQ-AI-04, REQ-AI-06 | Validate text-based and native tool-call extraction, execution, and follow-up message building for the embedded MCP server. | Strict pass/fail | [tests/test_mcp_tool_calling.py](tests/test_mcp_tool_calling.py) |
-| FTA-005 | REQ-CONF-01, REQ-CONF-02, REQ-CONF-04, REQ-CONF-05, REQ-CONF-06, REQ-CONF-07, REQ-EDIT-05, REQ-VAL-02, REQ-OUT-01 | Validate the core editor API: single/multi-file import, validate, export, generate, examples listing/search, schema and reference doc endpoints, project persistence, config saving, and warning acknowledgements. | Strict pass/fail | [tests/test_api_routes.py](tests/test_api_routes.py) |
+| FTA-005 | REQ-CONF-01, REQ-CONF-02, REQ-CONF-04, REQ-CONF-05, REQ-CONF-06, REQ-CONF-07, REQ-EDIT-05, REQ-VAL-02, REQ-OUT-01 | Validate the core editor API: single/multi-file import, validate, export, generate, examples listing/search, schema and reference doc endpoints, project persistence, and warning acknowledgements. | Strict pass/fail | [tests/test_api_routes.py](tests/test_api_routes.py) |
 | FTA-006 | REQ-AI-04, REQ-AI-06 | Validate the embedded MCP server: DocIndex search/read/pagination, all tool handlers (docs, config reference, schema, examples, user configs, board detection, rotation distance, macro templates/validation), argument coercion, and the JSON-RPC protocol surface. | Strict pass/fail | [tests/test_mcp_server_tools.py](tests/test_mcp_server_tools.py) |
+| FTA-007 | REQ-NATIVE-01, REQ-NATIVE-07 | Validate the startup contract: `backend.main` refuses to import off Linux and names `KWC_FAKE_NATIVE`, the fake-native override boots, the Linux path boots with no override at all, the standalone MCP stdio entry refuses off Linux and its documented `python -m backend.mcp_server` form actually starts, and no per-route platform guard or 501 response can come back (static lock). | Strict pass/fail | [tests/test_native_startup.py](tests/test_native_startup.py), [tests/test_no_platform_guards.py](tests/test_no_platform_guards.py) |
 | FTF-001 | REQ-EDIT-04, REQ-GRAPH-01, REQ-GRAPH-02, REQ-GRAPH-03, REQ-MACRO-01, REQ-AI-04 | Validate frontend pure-logic layers: config diff/patch generation, pin prefix handling, section naming, validation status aggregation, assistant draft merge (incl. delete markers), reply-validation pipeline, graph building from configs, edge routing, printer-memory block parsing/validation, AI provider helpers, board-type markers, and the gcode simulator (parse, trapezoidal motion, step building/execution). | Strict pass/fail | [frontend/src/utils/__tests__/](frontend/src/utils/__tests__/) |
 | FTF-002 | REQ-EDIT-01, REQ-EDIT-02, REQ-EDIT-05, REQ-CONF-03, REQ-GRAPH-02 | Validate frontend zustand stores: config file/section/param CRUD, include management, dirty tracking, rename/copy, validation error aggregation, graph node/edge operations, undo/redo, auto-arrange, and printer-memory store load/save/update with mocked API. | Strict pass/fail | [frontend/src/stores/__tests__/](frontend/src/stores/__tests__/) |
 | FTI-001 | REQ-CONF-01, REQ-CONF-02, REQ-CONF-03, REQ-OUT-01 | Exercise corpus-wide parse/export round-tripping across bundled reference configs and backups. | Informational automation | [tests/test_roundtrip.py](tests/test_roundtrip.py) |
@@ -121,7 +122,7 @@ Expected result:
 Requirements: REQ-NATIVE-01, REQ-NATIVE-02, REQ-NATIVE-03, REQ-NATIVE-04, REQ-NATIVE-05, REQ-NATIVE-06, REQ-NATIVE-07
 
 Preconditions:
-1. Run the backend on the Linux printer host — or, for development only, set `KWC_FAKE_NATIVE=1` (`start-dev.ps1` does this); without it a non-Linux backend exits at startup.
+1. Run the backend on the Linux printer host — or, for development only, set `KWC_FAKE_NATIVE=1` (`start-dev.ps1 -FakeNative` exports it; the switch is required on a Windows/macOS dev box); without it a non-Linux backend exits at startup.
 2. Point the config path at a test Klipper config directory.
 
 Procedure:
@@ -142,7 +143,7 @@ Expected result:
 Requirements: REQ-FW-01, REQ-FW-02, REQ-FW-03, REQ-FW-04
 
 Preconditions:
-1. Native mode is active.
+1. The backend is running on the Linux printer host.
 2. Local Klipper and/or Katapult checkouts are available.
 3. Target hardware or a safe test environment is available.
 

@@ -80,7 +80,7 @@ The backend parser/exporter is the source of truth for config text. The graph an
 | --- | --- | --- |
 | `configStore` | Loaded config files, active file, validation, selected section, original text snapshots, dirty state, and config mutation helpers. | [frontend/src/stores/configStore.ts](frontend/src/stores/configStore.ts) |
 | `graphStore` | React Flow nodes/edges, graph mutations, history, grouping, drag/reparent behavior, and graph-driven config mutations. | [frontend/src/stores/graphStore.ts](frontend/src/stores/graphStore.ts) |
-| `nativeStore` | Native mode, config path, detected devices, and CAN UUID query state. | [frontend/src/stores/nativeStore.ts](frontend/src/stores/nativeStore.ts) |
+| `nativeStore` | Config path, detected devices (USB serial/UART/CAN), and CAN UUID query state. There is no "native mode" flag — the backend refuses to start off Linux. | [frontend/src/stores/nativeStore.ts](frontend/src/stores/nativeStore.ts) |
 | `macroDesignerStore` | Persistent macro designer drafts and UI state. | [frontend/src/stores/macroDesignerStore.ts](frontend/src/stores/macroDesignerStore.ts) |
 | `aiStore` | Persistent AI provider settings, local-provider host/port state, and chat message history. | [frontend/src/stores/aiStore.ts](frontend/src/stores/aiStore.ts) |
 
