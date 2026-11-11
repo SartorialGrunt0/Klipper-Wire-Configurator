@@ -10,7 +10,6 @@ import { selectSaveGateIssues, warningToBulkAck, type SaveGateFinding } from '..
 import { filterValidationMap } from '../../utils/validationVisibility';
 import * as api from '../../services/api';
 import type { ConfigFile } from '../../types/config';
-import type { NativeStatus } from '../../services/api';
 import Modal from '../Modal';
 import { StatusPill, FindingsPill } from '../FileStatusPill';
 
@@ -225,8 +224,6 @@ export default function ApplyDialog({ onClose, canAnalyzeWithAi = false, onAnaly
   const [printerIsPrinting, setPrinterIsPrinting] = useState(false);
   const [printerPrintState, setPrinterPrintState] = useState<string | null>(null);
   const [printerPrintFilename, setPrinterPrintFilename] = useState<string | null>(null);
-
-  // Determine save mode
 
   /* ── Phase 4 save gate: findings for the selected files ─────────────
      Errors + warnings, never info (info is order-dependent context and

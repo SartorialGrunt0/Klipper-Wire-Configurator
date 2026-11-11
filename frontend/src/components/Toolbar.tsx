@@ -303,7 +303,7 @@ export default function Toolbar({
         </button>
       )}
 
-      {/* Open from Host (native only) */}
+      {/* Open from Host */}
       {showOpenFromPiButton && (
         <button
           onClick={() => setShowOpenFromPi(true)}
@@ -334,7 +334,7 @@ export default function Toolbar({
         </button>
       )}
 
-      {/* Save to Host (native only) */}
+      {/* Save to Host */}
       {showSaveButton && (
         <button
           onClick={() => setShowApply(true)}
