@@ -203,14 +203,18 @@ export default function App() {
   useEffect(() => {
     // StrictMode mounts effects twice; buildProjectGraph is additive, so a
     // second run would duplicate every card. One shot per app instance.
+    //
+    // The ref is the ONLY guard. Do NOT add a `cancelled` flag here: StrictMode
+    // runs setup -> cleanup -> setup on the same fiber with refs preserved, so
+    // the first run would set the ref, its own cleanup would cancel it, and the
+    // second run would bail on the ref — the startup read would then never
+    // complete (empty workspace on every dev page load).
     if (startupLoaded.current) return;
     startupLoaded.current = true;
-    let cancelled = false;
 
     (async () => {
       try {
         await useNativeStore.getState().loadConfigPath();
-        if (cancelled) return;
         const { configPath } = useNativeStore.getState();
 
         // List config files from the default path
@@ -245,7 +249,6 @@ export default function App() {
 
         // Read config files from the host
         const result = await api.readNativeConfigFiles(filenames, configPath);
-        if (cancelled) return;
 
         const allConfigs: Record<string, ConfigFile> = {};
         const allValidations: Record<string, ValidationResult> = {};
@@ -288,19 +291,17 @@ export default function App() {
         // Startup read failed — start empty rather than half-populated.
       }
     })();
-
-    return () => { cancelled = true; };
   }, []);
 
   // Auto-save layout (debounced) to layout.json on the printer host.
   // One canonical payload (id + position + logicalKey per node,
   // endpoint-bearing edges) so restore can key on content identity.
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const saveLayoutNow = useCallback((n: typeof nodes, e: typeof edges) => {
+  const saveLayoutNow = useCallback((n: typeof nodes, e: typeof edges, keepalive = false) => {
     if (n.length === 0) return;
     const macroDesigner = useMacroDesignerStore.getState().exportPersistedState();
     const layout = buildLayoutPayload(n, e, macroDesigner);
-    api.saveNativeLayout(layout).catch(() => { /* ignore save errors */ });
+    api.saveNativeLayout(layout, { keepalive }).catch(() => { /* ignore save errors */ });
   }, []);
 
   useEffect(() => {
@@ -326,11 +327,12 @@ export default function App() {
   // close, navigate away). The debounced save races a quick refresh — the
   // last card move / trace bend never reaches disk, which is why positions
   // and pathing only "stuck" when a config save happened to give the timer
-  // time to fire. The backend POST is fire-and-forget but usually completes.
+  // time to fire. `keepalive` is what makes that work: a plain fetch is
+  // aborted when the document dies, and there is no local copy to fall back on.
   useEffect(() => {
     const onUnload = () => {
       const graph = useGraphStore.getState();
-      saveLayoutNow(graph.nodes, graph.edges);
+      saveLayoutNow(graph.nodes, graph.edges, true);
     };
     window.addEventListener('pagehide', onUnload);
     window.addEventListener('beforeunload', onUnload);

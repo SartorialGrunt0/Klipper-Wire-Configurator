@@ -838,10 +838,19 @@ export async function loadNativeLayout(): Promise<{ layout: unknown | null }> {
   return request('/native/layout');
 }
 
-export async function saveNativeLayout(layout: unknown): Promise<{ status: string }> {
+export async function saveNativeLayout(
+  layout: unknown,
+  opts?: { keepalive?: boolean },
+): Promise<{ status: string }> {
+  const body = JSON.stringify({ layout });
+  // Browsers cap keepalive bodies at 64 KiB and throw above it. A large graph
+  // can exceed that, so fall back to a normal fetch — which the unload path may
+  // abort, i.e. no worse than having no flush at all.
+  const keepalive = opts?.keepalive === true && body.length < 60_000;
   return request('/native/layout', {
     method: 'POST',
-    body: JSON.stringify({ layout }),
+    body,
+    ...(keepalive ? { keepalive: true } : {}),
   });
 }
 
