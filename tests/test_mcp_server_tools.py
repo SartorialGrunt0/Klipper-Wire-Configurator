@@ -1338,13 +1338,14 @@ def test_find_klipper_install_env_override_wins(tmp_path, monkeypatch):
 def test_find_klipper_install_requires_native_deployment(tmp_path, monkeypatch):
     # No env override: a ~/klipper checkout must NOT be picked up on a dev
     # box (no native deployment marker) — bundled docs stay the source.
+    # The platform half of this gate is now a startup assertion, so the
+    # marker directory is the only thing under test.
     import klipper_paths
 
     fake = tmp_path / "klipper"
     (fake / "docs").mkdir(parents=True)
     monkeypatch.delenv("KWC_KLIPPER_DIR", raising=False)
     monkeypatch.setattr(klipper_paths, "DEPLOYMENT_CONFIG_PATH", tmp_path / "no-marker")
-    monkeypatch.setattr(klipper_paths, "is_native_platform", lambda: True)
     monkeypatch.setattr(klipper_paths, "_COMMON_KLIPPER_PATHS", (fake,))
     assert klipper_paths.find_klipper_install() is None
 
@@ -1359,7 +1360,6 @@ def test_find_klipper_install_uses_install_when_deployed(tmp_path, monkeypatch):
     marker.mkdir(parents=True)
     monkeypatch.delenv("KWC_KLIPPER_DIR", raising=False)
     monkeypatch.setattr(klipper_paths, "DEPLOYMENT_CONFIG_PATH", marker)
-    monkeypatch.setattr(klipper_paths, "is_native_platform", lambda: True)
     monkeypatch.setattr(klipper_paths, "_COMMON_KLIPPER_PATHS", (fake,))
     assert klipper_paths.find_klipper_install() == fake
 

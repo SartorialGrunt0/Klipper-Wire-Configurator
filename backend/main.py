@@ -14,7 +14,30 @@ from api.printer_memory_routes import router as printer_memory_router
 from api.macro_log_routes import router as macro_log_router
 from mcp_server import McpServer, get_index
 from services.mainsail_sidebar import self_heal_sidebar
+from services.native_services import is_native_platform
 from fastapi.responses import JSONResponse
+
+
+def _assert_native_platform() -> None:
+    """Fail fast: KWC is a printer-host (Linux) application.
+
+    Every per-route ``is_native_platform()`` guard was removed on the
+    strength of this assertion, so it is load-bearing — not a convenience
+    check. It runs before any router is mounted, which is what makes the
+    unguarded native routes safe.
+
+    ``KWC_FAKE_NATIVE`` stays the supported Windows/macOS dev path
+    (start-dev.ps1 sets it); it is a dev override, not an escape hatch
+    for shipping a non-Linux deployment.
+    """
+    if not is_native_platform():
+        raise SystemExit(
+            "KWC requires Linux — normally the Klipper printer host. "
+            "On Windows/macOS: set KWC_FAKE_NATIVE=1 (see start-dev.ps1)."
+        )
+
+
+_assert_native_platform()
 
 
 @asynccontextmanager

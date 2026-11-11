@@ -19,7 +19,6 @@ from services.native_services import (
     get_all_devices,
     get_default_config_path,
     get_klippy_log_excerpt,
-    is_native_platform,
     list_flash_profiles,
     list_config_files,
     load_flash_profile,
@@ -67,10 +66,16 @@ router = APIRouter()
 
 @router.get("/status")
 async def native_status():
-    """Report whether native (printer-host) features are available."""
-    settings = load_settings() if is_native_platform() else {}
+    """Report the active config directory.
+
+    Native mode is the only mode: a non-Linux backend refuses to start
+    (see ``main._assert_native_platform``), so there is nothing to branch on.
+    ``native`` stays as a constant for the transition and is removed with the
+    frontend wire cleanup (plan Task 2.6).
+    """
+    settings = load_settings()
     return {
-        "native": is_native_platform(),
+        "native": True,
         "config_path": settings.get("config_path", get_default_config_path()),
     }
 
@@ -81,16 +86,12 @@ async def native_status():
 @router.get("/devices")
 def list_devices():
     """List available serial, CAN, and UART devices."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Device detection is only available in native mode")
     return get_all_devices()
 
 
 @router.get("/canbus-uuids")
 def get_canbus_uuids(interface: str = "can0"):
     """Query CAN bus UUIDs on a given interface."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="CAN bus query is only available in native mode")
     return query_canbus_uuids(interface)
 
 
@@ -104,16 +105,12 @@ class ConfigPathUpdate(BaseModel):
 @router.get("/settings")
 async def get_settings():
     """Get native settings (config path, etc.)."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Native settings require native mode")
     return load_settings()
 
 
 @router.put("/settings")
 async def update_settings(data: ConfigPathUpdate):
     """Update native settings."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Native settings require native mode")
     settings = load_settings()
     settings["config_path"] = data.config_path
     save_settings(settings)
@@ -126,8 +123,6 @@ async def update_settings(data: ConfigPathUpdate):
 @router.get("/config-files")
 async def get_config_files(path: str | None = None):
     """List .cfg files in the config directory."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     config_path = path or load_settings().get("config_path", get_default_config_path())
     files = list_config_files(config_path)
     return {"config_path": config_path, "files": files}
@@ -136,9 +131,6 @@ async def get_config_files(path: str | None = None):
 @router.post("/config-files/read")
 def read_config_files(data: dict):
     """Read and parse one or more config files from the host."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
-
     config_path = data.get("config_path") or load_settings().get("config_path", get_default_config_path())
     filenames: list[str] = data.get("filenames", [])
 
@@ -224,9 +216,6 @@ class ApplyRequest(BaseModel):
 @router.post("/apply")
 def apply_config(data: ApplyRequest):
     """Write config files back to the host filesystem."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
-
     config_path = data.config_path or load_settings().get("config_path", get_default_config_path())
     base = Path(config_path)
 
@@ -276,8 +265,6 @@ def apply_config(data: ApplyRequest):
 @router.post("/klipper/firmware-restart")
 def klipper_firmware_restart():
     """Send FIRMWARE_RESTART to Klipper via its Unix socket API."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     try:
         return firmware_restart_klipper()
     except FileNotFoundError as exc:
@@ -289,8 +276,6 @@ def klipper_firmware_restart():
 @router.get("/klipper/status")
 def klipper_status():
     """Get current Klipper state and recent log errors when not ready."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     try:
         return query_klipper_status()
     except FileNotFoundError as exc:
@@ -308,8 +293,6 @@ class KlippyLogExcerptRequest(BaseModel):
 @router.post("/klipper/log-excerpt")
 def klipper_log_excerpt(data: KlippyLogExcerptRequest):
     """Get a targeted klippy.log excerpt for a restart failure analysis request."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     try:
         return get_klippy_log_excerpt(
             section_name=data.section_name,
@@ -365,8 +348,6 @@ def _validated_target(target: str) -> str:
 @router.get("/flash/{target}")
 def flash_target_state(target: str, checkout_path: str | None = None, help_limit: int = 0):
     """Return menuconfig fields and artifacts for a local flash target checkout."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     return get_flash_target_state(_validated_target(target), checkout_path, help_limit=help_limit)
 
 
@@ -377,8 +358,6 @@ def flash_field_help(target: str, field_id: str, checkout_path: str | None = Non
     The frontend lazy-loads this when a field's help was truncated by
     ``help_limit`` on the main state payloads.
     """
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     return get_flash_field_help(_validated_target(target), field_id, checkout_path)
 
 
@@ -394,8 +373,6 @@ def scan_flash_target_devices_api(
     not blocked.  Results are cached for 30 seconds; pass ``force_refresh=true``
     to bypass the cache.
     """
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     return scan_flash_target_devices(_validated_target(target), checkout_path, force_refresh)
 
 
@@ -403,8 +380,6 @@ def scan_flash_target_devices_api(
 @router.post("/flash/{target}/preview")
 def preview_flash_target(target: str, data: FlashTargetConfigUpdate):
     """Preview menuconfig changes without persisting the target's .config file."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     assignments = [(item.symbol, item.value) for item in data.assignments]
     return preview_flash_target_config(_validated_target(target), assignments, data.checkout_path, help_limit=data.help_limit)
 
@@ -412,8 +387,6 @@ def preview_flash_target(target: str, data: FlashTargetConfigUpdate):
 @router.put("/flash/{target}/config")
 def save_flash_target(target: str, data: FlashTargetConfigUpdate):
     """Persist menuconfig selections to the target's active .config file."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     assignments = [(item.symbol, item.value) for item in data.assignments]
     return save_flash_target_config(_validated_target(target), assignments, data.checkout_path, help_limit=data.help_limit)
 
@@ -421,8 +394,6 @@ def save_flash_target(target: str, data: FlashTargetConfigUpdate):
 @router.post("/flash/{target}/build")
 def build_flash_target_api(target: str, data: FlashTargetCommandRequest):
     """Start a `make olddefconfig` + `make` job for a local flash target checkout."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     normalized = _validated_target(target)
     planned = plan_build_flash_job(normalized, data.checkout_path)
     if planned["immediate"]:
@@ -442,8 +413,6 @@ def build_flash_target_api(target: str, data: FlashTargetCommandRequest):
 @router.post("/flash/{target}/flash")
 def flash_target_api(target: str, data: FlashTargetCommandRequest):
     """Start the selected flash-method job for a local flash target checkout."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     normalized = _validated_target(target)
     planned = plan_flash_flash_job(
         normalized,
@@ -471,8 +440,6 @@ def flash_target_api(target: str, data: FlashTargetCommandRequest):
 @router.get("/flash/{target}/jobs/{job_id}")
 def flash_job_status_api(target: str, job_id: str):
     """Return live output for a build/flash job; the final result when done."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     try:
         status = flash_job_runner.status(job_id)
     except KeyError:
@@ -500,8 +467,6 @@ def flash_job_status_api(target: str, job_id: str):
 @router.post("/flash/{target}/jobs/{job_id}/cancel")
 def flash_job_cancel_api(target: str, job_id: str):
     """Cancel a running build/flash job."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     if not flash_job_runner.cancel(job_id):
         raise HTTPException(status_code=409, detail="Flash job is not running.")
     return {"job_id": job_id, "cancelled": True}
@@ -510,8 +475,6 @@ def flash_job_cancel_api(target: str, job_id: str):
 @router.get("/flash/{target}/artifacts/{filename}")
 def download_flash_target_artifact(target: str, filename: str, checkout_path: str | None = None):
     """Download a generated build artifact from a target's out directory."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     try:
         artifact_path = get_flash_target_artifact_path(_validated_target(target), filename, checkout_path)
     except ValueError as exc:
@@ -529,8 +492,6 @@ def download_flash_target_artifact(target: str, filename: str, checkout_path: st
 @router.delete("/flash/{target}/artifacts/{filename}")
 def delete_saved_flash_target_artifact(target: str, filename: str, checkout_path: str | None = None):
     """Delete a generated build artifact from a target's out directory."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     try:
         return delete_flash_target_artifact(_validated_target(target), filename, checkout_path)
     except ValueError as exc:
@@ -542,8 +503,6 @@ def delete_saved_flash_target_artifact(target: str, filename: str, checkout_path
 @router.get("/flash/{target}/profiles")
 async def list_saved_flash_profiles(target: str):
     """List saved flash profiles for a target."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     try:
         return {"profiles": list_flash_profiles(_validated_target(target))}
     except ValueError as exc:
@@ -553,8 +512,6 @@ async def list_saved_flash_profiles(target: str):
 @router.get("/flash/{target}/profiles/{name}")
 async def load_saved_flash_profile_api(target: str, name: str):
     """Load a saved flash profile for a target."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     try:
         return load_flash_profile(_validated_target(target), name)
     except ValueError as exc:
@@ -566,8 +523,6 @@ async def load_saved_flash_profile_api(target: str, name: str):
 @router.post("/flash/{target}/profiles")
 async def save_flash_profile_api(target: str, data: FlashProfileSaveRequest):
     """Save a named flash profile for a target."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     try:
         return save_flash_profile(
             _validated_target(target),
@@ -589,8 +544,6 @@ async def save_flash_profile_api(target: str, data: FlashProfileSaveRequest):
 @router.delete("/flash/{target}/profiles/{name}")
 async def delete_saved_flash_profile_api(target: str, name: str):
     """Delete a saved flash profile for a target."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     try:
         deleted = delete_flash_profile(_validated_target(target), name)
     except ValueError as exc:
@@ -603,16 +556,12 @@ async def delete_saved_flash_profile_api(target: str, name: str):
 @router.get("/firmware")
 def klipper_firmware_state(klipper_path: str | None = None):
     """Return Klipper menuconfig options and current firmware artifacts."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     return get_klipper_firmware_state(klipper_path)
 
 
 @router.put("/firmware")
 def update_klipper_firmware_config(data: FirmwareConfigUpdate):
     """Persist menuconfig selections to Klipper's active .config file."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     assignments = [(item.symbol, item.value) for item in data.assignments]
     return save_klipper_menuconfig(assignments, data.klipper_path)
 
@@ -620,8 +569,6 @@ def update_klipper_firmware_config(data: FirmwareConfigUpdate):
 @router.post("/firmware/preview")
 def preview_klipper_firmware_config(data: FirmwareConfigUpdate):
     """Preview Klipper menuconfig changes without writing `.config`."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     assignments = [(item.symbol, item.value) for item in data.assignments]
     return preview_klipper_menuconfig(assignments, data.klipper_path)
 
@@ -629,24 +576,18 @@ def preview_klipper_firmware_config(data: FirmwareConfigUpdate):
 @router.post("/firmware/build")
 def build_klipper_firmware_api(data: FirmwareBuildRequest):
     """Run Klipper's firmware build using the active local checkout."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     return build_klipper_firmware(data.klipper_path)
 
 
 @router.post("/firmware/flash")
 def flash_klipper_firmware_api(data: FlashTargetCommandRequest):
     """Run the selected flash method in the active Klipper checkout."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     return flash_klipper_firmware(data.checkout_path, data.flash_device, data.flash_method)
 
 
 @router.get("/firmware/artifacts/{filename}")
 async def download_klipper_firmware_artifact(filename: str, klipper_path: str | None = None):
     """Download a generated firmware artifact from Klipper's out directory."""
-    if not is_native_platform():
-        raise HTTPException(status_code=501, detail="Only available in native mode")
     try:
         artifact_path = get_klipper_firmware_artifact_path(filename, klipper_path)
     except ValueError as exc:

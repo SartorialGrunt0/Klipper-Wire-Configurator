@@ -128,7 +128,6 @@ def test_build_route_does_not_block_concurrent_status(monkeypatch):
             'flash_method': '',
         }
 
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(native_routes, 'plan_build_flash_job', fake_plan)
     monkeypatch.setattr(native_routes, 'flash_job_runner', SlowRunner())
 
@@ -195,7 +194,6 @@ def test_preview_flash_target_route_forwards_assignments(monkeypatch):
         captured['help_limit'] = help_limit
         return {'target': target, 'available': True, 'fields': []}
 
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(native_routes, 'preview_flash_target_config', fake_preview)
 
     response = client.post(
@@ -225,7 +223,6 @@ def test_flash_field_help_route_forwards_field_id(monkeypatch):
         captured['checkout_path'] = checkout_path
         return {'field_id': field_id, 'help': 'full help text'}
 
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(native_routes, 'get_flash_field_help', fake_help)
 
     response = client.get(
@@ -255,7 +252,6 @@ def test_flash_target_route_starts_job_and_forwards_device(monkeypatch):
             'flash_method': flash_method or '',
         }
 
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(native_routes, 'plan_flash_flash_job', fake_plan)
     monkeypatch.setattr(native_routes, 'flash_job_runner', runner)
 
@@ -306,7 +302,6 @@ def test_flash_target_route_returns_immediate_failure_without_job(monkeypatch):
         }
 
     runner = _FakeJobRunner()
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(native_routes, 'plan_flash_flash_job', fake_plan)
     monkeypatch.setattr(native_routes, 'flash_job_runner', runner)
 
@@ -330,7 +325,6 @@ def test_flash_job_status_route_returns_tail_and_final_result(monkeypatch):
         'raw_result': {'success': True, 'error': None, 'log': '$ make\noutput line', 'returncode': 0},
     })
 
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(native_routes, 'flash_job_runner', runner)
 
     response = client.get(f'/api/native/flash/klipper/jobs/{job_id}')
@@ -353,7 +347,6 @@ def test_flash_job_status_route_returns_live_tail_while_running(monkeypatch):
     job_id = runner.start('klipper', 'build', [['make']], '/home/pi/klipper')
     runner.statuses[job_id]['log_tail'] = ['$ make', 'compiling...']
 
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(native_routes, 'flash_job_runner', runner)
 
     response = client.get(f'/api/native/flash/klipper/jobs/{job_id}')
@@ -367,7 +360,6 @@ def test_flash_job_status_route_returns_live_tail_while_running(monkeypatch):
 
 def test_flash_job_status_route_404_for_unknown_job(monkeypatch):
     runner = _FakeJobRunner()
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(native_routes, 'flash_job_runner', runner)
 
     response = client.get('/api/native/flash/klipper/jobs/nope')
@@ -379,7 +371,6 @@ def test_flash_job_cancel_route(monkeypatch):
     runner = _FakeJobRunner()
     job_id = runner.start('klipper', 'build', [['make']], '/home/pi/klipper')
 
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(native_routes, 'flash_job_runner', runner)
 
     response = client.post(f'/api/native/flash/klipper/jobs/{job_id}/cancel')
@@ -393,7 +384,6 @@ def test_flash_job_cancel_route(monkeypatch):
 
 
 def test_list_flash_profiles_route_returns_profiles(monkeypatch):
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(
         native_routes,
         'list_flash_profiles',
@@ -436,7 +426,6 @@ def test_save_flash_profile_route_forwards_payload(monkeypatch):
         captured['overwrite'] = overwrite
         return {'target': target, 'name': name, **data}
 
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(native_routes, 'save_flash_profile', fake_save)
 
     response = client.post(
@@ -471,7 +460,6 @@ def test_save_flash_profile_route_forwards_overwrite_flag(monkeypatch):
         captured['overwrite'] = overwrite
         return {'target': target, 'name': name, **data}
 
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(native_routes, 'save_flash_profile', fake_save)
 
     response = client.post(
@@ -498,7 +486,6 @@ def test_delete_flash_profile_route_deletes_named_profile(monkeypatch):
         captured['name'] = name
         return True
 
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(native_routes, 'delete_flash_profile', fake_delete)
 
     response = client.delete('/api/native/flash/katapult/profiles/CAN%20Toolhead')
@@ -517,7 +504,6 @@ def test_delete_flash_target_artifact_route_forwards_filename(monkeypatch):
         captured['checkout_path'] = checkout_path
         return {'status': 'deleted', 'filename': filename, 'artifacts': [], 'primary_artifact': None}
 
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(native_routes, 'delete_flash_target_artifact', fake_delete)
 
     response = client.delete('/api/native/flash/klipper/artifacts/klipper.bin?checkout_path=%2Fhome%2Fpi%2Fklipper')

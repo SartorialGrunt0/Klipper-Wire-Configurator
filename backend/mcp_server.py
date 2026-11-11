@@ -3296,17 +3296,10 @@ class McpServer:
         and acknowledgement suppression apply exactly as in the UI.
         """
         from services.native_services import (
-            is_native_platform,
             load_native_project,
             list_config_files,
         )
         from parser.validator import validate_project_configs
-
-        if not is_native_platform():
-            return (
-                "validate_config_project is only available when KWC runs "
-                "natively on the printer host (Raspberry Pi/SBC)."
-            )
 
         config_dir = _system_config_path()
         if not config_dir.is_dir():
@@ -3398,12 +3391,6 @@ class McpServer:
     def _handle_list_connected_devices(self, args: dict[str, Any]) -> str:
         """Serial/CAN devices — the same data as the comm-line dropdowns."""
         import services.native_services as ns
-
-        if not ns.is_native_platform():
-            return (
-                "Device detection is only available when KWC runs natively "
-                "on the printer host (Raspberry Pi/SBC)."
-            )
 
         scan_uuids = bool(args.get("scan_can_uuids", True))
         devices = ns.get_all_devices()
@@ -3716,6 +3703,19 @@ class McpServer:
 
 def run_stdio() -> None:
     """Run the MCP server over stdin/stdout (standard MCP transport)."""
+    # Same startup contract as backend/main.py. The per-route native guards are
+    # gone, so a standalone stdio server (`python -m backend.mcp_server`, the
+    # Claude Desktop entry point) must refuse to start off-Linux rather than
+    # expose device/config tools that cannot work there.
+    from services.native_services import is_native_platform
+
+    if not is_native_platform():
+        sys.stderr.write(
+            "KWC MCP server requires Linux — normally the Klipper printer host. "
+            "On Windows/macOS: set KWC_FAKE_NATIVE=1 (see start-dev.ps1).\n"
+        )
+        raise SystemExit(1)
+
     server = McpServer()
     index = get_index()
 

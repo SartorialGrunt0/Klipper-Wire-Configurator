@@ -19,7 +19,6 @@ from pathlib import Path
 
 from services.native_services import (
     get_default_config_path,
-    is_native_platform,
     load_settings,
 )
 
@@ -70,9 +69,15 @@ DEPLOYMENT_CONFIG_PATH = resolve_config_path()
 
 
 def _deployment_looks_native() -> bool:
-    """True when KWC is natively deployed on the printer host (system config path present)
-    and we're on Linux — i.e., not a dev checkout / Windows box."""
-    return is_native_platform() and DEPLOYMENT_CONFIG_PATH.is_dir()
+    """True when KWC is natively deployed on the printer host.
+
+    The "are we on Linux?" half used to live here; it is now a startup
+    assertion (``main._assert_native_platform``), so this is purely the
+    deployment marker. The directory check stays: a Linux box without
+    ``~/printer_data/config`` is a real state (dev on a Pi with no printer
+    attached), and the docs-index tools must fall back to bundled docs there.
+    """
+    return DEPLOYMENT_CONFIG_PATH.is_dir()
 
 
 def find_klipper_install() -> Path | None:

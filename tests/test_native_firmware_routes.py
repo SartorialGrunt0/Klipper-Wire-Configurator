@@ -14,7 +14,6 @@ client = TestClient(app)
 
 def test_native_apply_deletes_removed_files(monkeypatch, tmp_path):
     """Deleting a file in the model must remove it from the Pi config dir."""
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(native_routes, 'load_settings', lambda: {})
     monkeypatch.setattr(native_routes, 'get_default_config_path', lambda: str(tmp_path))
     (tmp_path / 'printer.cfg').write_text('[printer]\nkinematics: cartesian\n', encoding='utf-8')
@@ -34,7 +33,6 @@ def test_native_apply_deletes_removed_files(monkeypatch, tmp_path):
 
 
 def test_native_apply_rejects_traversal_in_deleted(monkeypatch, tmp_path):
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(native_routes, 'load_settings', lambda: {})
     monkeypatch.setattr(native_routes, 'get_default_config_path', lambda: str(tmp_path))
 
@@ -60,7 +58,6 @@ def test_klipper_firmware_state_returns_service_payload(monkeypatch):
         'primary_artifact': None,
     }
 
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(native_routes, 'get_klipper_firmware_state', lambda klipper_path=None: payload)
 
     response = client.get('/api/native/firmware')
@@ -77,7 +74,6 @@ def test_update_klipper_firmware_config_forwards_assignments(monkeypatch):
         captured['klipper_path'] = klipper_path
         return {'available': True, 'error': None, 'fields': []}
 
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(native_routes, 'save_klipper_menuconfig', fake_save)
 
     response = client.put(
@@ -106,7 +102,6 @@ def test_build_klipper_firmware_route_returns_service_result(monkeypatch):
         'primary_artifact': None,
     }
 
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(native_routes, 'build_klipper_firmware', lambda klipper_path=None: payload)
 
     response = client.post('/api/native/firmware/build', json={'klipper_path': '/home/pi/klipper'})
@@ -123,7 +118,6 @@ def test_klippy_log_excerpt_route_returns_service_result(monkeypatch):
         'matched_on': 'mcu ebbcan',
     }
 
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     monkeypatch.setattr(native_routes, 'get_klippy_log_excerpt', lambda section_name=None, error_text=None, context_lines=40: payload)
 
     response = client.post(
