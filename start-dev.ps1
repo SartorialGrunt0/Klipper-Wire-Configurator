@@ -14,8 +14,9 @@ if (-not $rootDir) { $rootDir = Get-Location }
 $backendDir = Join-Path $rootDir 'backend'
 $frontendDir = Join-Path $rootDir 'frontend'
 
-# Optional: fake native (Raspberry Pi) environment for local dev.
-# When set, the backend will see the KWC_FAKE_NATIVE env var and report native features available.
+# REQUIRED on Windows/macOS: KWC only runs on the Linux printer host, and the
+# backend exits at startup without KWC_FAKE_NATIVE (see backend/main.py). This
+# is the dev override, not a deployment mode.
 $oldKwcFake = $null
 if ($FakeNative) {
     Write-Host 'Faking native device environment (KWC_FAKE_NATIVE=1).' -ForegroundColor Yellow

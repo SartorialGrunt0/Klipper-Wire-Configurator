@@ -27,11 +27,11 @@ React UI -> frontend/src/services/api.ts -> FastAPI routes -> parser/services ->
 - [frontend/src/main.tsx](frontend/src/main.tsx) mounts the SPA.
 - [frontend/src/App.tsx](frontend/src/App.tsx) is the main composition root.
 - On mount, `App.tsx` loads schema metadata through [frontend/src/services/api.ts](frontend/src/services/api.ts) and stores it in [frontend/src/stores/configStore.ts](frontend/src/stores/configStore.ts).
-- On mount, `App.tsx` also checks native status through [frontend/src/stores/nativeStore.ts](frontend/src/stores/nativeStore.ts).
+- On mount, `App.tsx` also loads the active config path through [frontend/src/stores/nativeStore.ts](frontend/src/stores/nativeStore.ts).
 
-### Native startup path
+### Printer-host startup path
 
-When native mode is true:
+Retiring browser mode left one unconditional startup path (a non-Linux backend exits at import, so there is no mode to branch on):
 
 1. `App.tsx` lists `.cfg` files from the configured path.
 2. `App.tsx` filters out known non-Klipper and backup files.
@@ -187,7 +187,7 @@ Key maintenance point:
 | Diff | [frontend/src/components/dialogs/DiffDialog.tsx](frontend/src/components/dialogs/DiffDialog.tsx) | Uses exported text from [frontend/src/services/api.ts](frontend/src/services/api.ts) |
 | Export | [frontend/src/components/dialogs/ExportDialog.tsx](frontend/src/components/dialogs/ExportDialog.tsx) | `/api/export` and `/api/export-project` in [backend/api/routes.py](backend/api/routes.py) |
 | Save to Host | [frontend/src/components/dialogs/ApplyDialog.tsx](frontend/src/components/dialogs/ApplyDialog.tsx) | `/api/native/apply` and `/api/native/klipper/firmware-restart` in [backend/api/native_routes.py](backend/api/native_routes.py) |
-| Revert | [frontend/src/components/dialogs/RevertDialog.tsx](frontend/src/components/dialogs/RevertDialog.tsx) | Browser mode reparses original text; native mode re-reads disk through `/api/native/config-files/read` |
+| Revert | [frontend/src/components/dialogs/RevertDialog.tsx](frontend/src/components/dialogs/RevertDialog.tsx) | Discards the buffer and re-reads every touched file from disk through `/api/native/config-files/read` |
 
 ### 6.7 Native mode and persistence
 

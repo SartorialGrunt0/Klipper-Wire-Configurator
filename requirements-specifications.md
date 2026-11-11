@@ -6,18 +6,17 @@ This document reflects the capabilities implemented in the current repository. I
 
 ## Scope
 
-Klipper Wire Configurator is a browser-based editor for Klipper configuration projects. It combines a React single-page application with a FastAPI backend to import, validate, generate, edit, export, diff, and optionally apply Klipper `.cfg` files. It also includes an AI chat workflow for documentation-grounded Klipper assistance and tool-mediated config edits (each validated write behind an in-chat approve/decline card). In native Linux/SBC mode it also interacts with the local filesystem, Klipper's Unix socket API, connected devices, and firmware build trees.
+Klipper Wire Configurator is a browser-based editor for Klipper configuration projects. It combines a React single-page application with a FastAPI backend to import, validate, generate, edit, export, diff, and optionally apply Klipper `.cfg` files. It also includes an AI chat workflow for documentation-grounded Klipper assistance and tool-mediated config edits (each validated write behind an in-chat approve/decline card). Running on the Linux printer host, it also interacts with the local filesystem, Klipper's Unix socket API, connected devices, and firmware build trees.
 
 ## Supported Operating Modes
 
-- Browser mode: the frontend consumes the backend API for import, generation, validation, export, and editing workflows.
-- Native SBC mode: the same UI enables direct file access, device discovery, layout persistence, Klipper restart/status checks, and firmware tooling when the backend is running on Linux or `KWC_FAKE_NATIVE` is enabled.
-- Development mode: the frontend runs under Vite and the backend under FastAPI/Uvicorn; frontend reference assets are generated before `dev` and `build` runs.
+- Printer-host mode: the only supported deployment. The backend runs on the Klipper host (Linux) and serves the frontend; the UI has direct file access, device discovery, layout persistence, Klipper restart/status checks, and firmware tooling. A non-Linux backend exits at startup with a message naming `KWC_FAKE_NATIVE`.
+- Development mode: the frontend runs under Vite and the backend under FastAPI/Uvicorn; frontend reference assets are generated before `dev` and `build` runs. On a Windows/macOS dev box, `KWC_FAKE_NATIVE=1` (set by `start-dev.ps1`) satisfies the host check — it is a dev override, not a deployment mode.
 
 ## Capability Legend
 
 - UI: available in the current shipped frontend.
-- Native UI: available only when native mode is active.
+- Native UI: printer-host features (filesystem, devices, Klipper socket, firmware). Always available — KWC only runs on the printer host.
 - API: implemented in the backend, but not surfaced by the current primary UI.
 
 ## Functional Requirements
@@ -92,19 +91,19 @@ Klipper Wire Configurator is a browser-based editor for Klipper configuration pr
 
 | ID | Requirement | Surface | Primary implementation |
 | --- | --- | --- | --- |
-| REQ-NATIVE-01 | The backend shall detect native mode and expose the active config directory setting to the frontend. | Native UI | [frontend/src/stores/nativeStore.ts](frontend/src/stores/nativeStore.ts), [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
-| REQ-NATIVE-02 | In native mode the UI shall be able to list and open `.cfg` files directly from the SBC config directory. | Native UI | [frontend/src/components/dialogs/OpenFromPiDialog.tsx](frontend/src/components/dialogs/OpenFromPiDialog.tsx), [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
-| REQ-NATIVE-03 | In native mode the backend shall list USB serial, UART, and CAN devices and support CAN UUID queries. | Native UI | [frontend/src/stores/nativeStore.ts](frontend/src/stores/nativeStore.ts), [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
-| REQ-NATIVE-04 | In native mode the UI shall be able to apply selected config files back to disk and then request a Klipper firmware restart. | Native UI | [frontend/src/components/dialogs/ApplyDialog.tsx](frontend/src/components/dialogs/ApplyDialog.tsx), [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
-| REQ-NATIVE-05 | The UI shall support revert by reloading original imported text in browser mode and by re-reading disk state in native mode. | UI / Native UI | [frontend/src/components/dialogs/RevertDialog.tsx](frontend/src/components/dialogs/RevertDialog.tsx), [frontend/src/stores/configStore.ts](frontend/src/stores/configStore.ts) |
-| REQ-NATIVE-06 | The backend shall expose Klipper state and recent log errors through the Unix socket API when native mode is active. | Native UI | [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
-| REQ-NATIVE-07 | The native backend shall persist UI layout and settings under the application state directory and restore them on reload. | Native UI | [frontend/src/App.tsx](frontend/src/App.tsx), [frontend/src/services/api.ts](frontend/src/services/api.ts), [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
+| REQ-NATIVE-01 | The backend shall refuse to start off Linux (naming `KWC_FAKE_NATIVE` as the dev override) and expose the active config directory setting to the frontend. | Native UI | [frontend/src/stores/nativeStore.ts](frontend/src/stores/nativeStore.ts), [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
+| REQ-NATIVE-02 | The UI shall be able to list and open `.cfg` files directly from the host config directory. | Native UI | [frontend/src/components/dialogs/OpenFromPiDialog.tsx](frontend/src/components/dialogs/OpenFromPiDialog.tsx), [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
+| REQ-NATIVE-03 | The backend shall list USB serial, UART, and CAN devices and support CAN UUID queries. | Native UI | [frontend/src/stores/nativeStore.ts](frontend/src/stores/nativeStore.ts), [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
+| REQ-NATIVE-04 | The UI shall be able to apply selected config files back to disk and then request a Klipper firmware restart. | Native UI | [frontend/src/components/dialogs/ApplyDialog.tsx](frontend/src/components/dialogs/ApplyDialog.tsx), [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
+| REQ-NATIVE-05 | The UI shall support revert by re-reading the current state of every touched file from the host disk. | UI / Native UI | [frontend/src/components/dialogs/RevertDialog.tsx](frontend/src/components/dialogs/RevertDialog.tsx), [frontend/src/stores/configStore.ts](frontend/src/stores/configStore.ts) |
+| REQ-NATIVE-06 | The backend shall expose Klipper state and recent log errors through the Unix socket API. | Native UI | [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
+| REQ-NATIVE-07 | The backend shall persist UI layout and settings under the application state directory and restore them on reload. | Native UI | [frontend/src/App.tsx](frontend/src/App.tsx), [frontend/src/services/api.ts](frontend/src/services/api.ts), [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
 
 ### Firmware Tooling
 
 | ID | Requirement | Surface | Primary implementation |
 | --- | --- | --- | --- |
-| REQ-FW-01 | The UI shall expose firmware tooling for both Klipper and Katapult targets when native mode is active. | Native UI | [frontend/src/components/dialogs/FirmwareDialog.tsx](frontend/src/components/dialogs/FirmwareDialog.tsx), [backend/api/native_routes.py](backend/api/native_routes.py) |
+| REQ-FW-01 | The UI shall expose firmware tooling for both Klipper and Katapult targets. | Native UI | [frontend/src/components/dialogs/FirmwareDialog.tsx](frontend/src/components/dialogs/FirmwareDialog.tsx), [backend/api/native_routes.py](backend/api/native_routes.py) |
 | REQ-FW-02 | The backend shall load current Kconfig state, expose editable fields, preview changes, and persist target `.config` assignments. | Native UI | [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/flash_targets.py](backend/services/flash_targets.py), [backend/services/klipper_firmware.py](backend/services/klipper_firmware.py) |
 | REQ-FW-03 | The backend shall build flash targets, run target-specific flash commands, and expose generated artifacts for download. | Native UI | [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/flash_targets.py](backend/services/flash_targets.py), [backend/services/klipper_firmware.py](backend/services/klipper_firmware.py) |
 | REQ-FW-04 | The firmware workflow shall surface flash-device candidates such as USB serial, UART, DFU VID:PID, and RP2040 mass-storage shortcuts when the target supports them. | Native UI | [backend/services/flash_targets.py](backend/services/flash_targets.py), [frontend/src/components/dialogs/FirmwareDialog.tsx](frontend/src/components/dialogs/FirmwareDialog.tsx) |
@@ -115,7 +114,7 @@ Klipper Wire Configurator is a browser-based editor for Klipper configuration pr
 | --- | --- | --- | --- |
 | REQ-MACRO-01 | The UI shall provide a macro designer for creating, updating, duplicating, and deleting macro drafts and no-go zones. | UI | [frontend/src/components/dialogs/MacroDesignerDialog.tsx](frontend/src/components/dialogs/MacroDesignerDialog.tsx), [frontend/src/stores/macroDesignerStore.ts](frontend/src/stores/macroDesignerStore.ts) |
 | REQ-MACRO-02 | The macro designer shall derive macros from loaded config files, normalize macro content for config output, and simulate motion/toolhead state. | UI | [frontend/src/components/dialogs/MacroDesignerDialog.tsx](frontend/src/components/dialogs/MacroDesignerDialog.tsx), [frontend/src/utils/macroDesigner.ts](frontend/src/utils/macroDesigner.ts), [frontend/src/utils/gcodeSimulator.ts](frontend/src/utils/gcodeSimulator.ts) |
-| REQ-MACRO-03 | Macro designer state shall persist in local storage and, in native mode, be included in saved layout payloads. | UI / Native UI | [frontend/src/stores/macroDesignerStore.ts](frontend/src/stores/macroDesignerStore.ts), [frontend/src/App.tsx](frontend/src/App.tsx), [backend/api/native_routes.py](backend/api/native_routes.py) |
+| REQ-MACRO-03 | Macro designer state shall persist in local storage and be included in saved layout payloads. | UI / Native UI | [frontend/src/stores/macroDesignerStore.ts](frontend/src/stores/macroDesignerStore.ts), [frontend/src/App.tsx](frontend/src/App.tsx), [backend/api/native_routes.py](backend/api/native_routes.py) |
 
 ### Backend-only Project Persistence
 
@@ -126,7 +125,7 @@ Klipper Wire Configurator is a browser-based editor for Klipper configuration pr
 ## Non-Functional and Operational Constraints
 
 - The parser/exporter path is the single source of truth for config text fidelity. Both the graph workspace and the text editor ultimately round-trip through backend parsing and export logic.
-- Native filesystem, device, Klipper socket, and firmware features are gated by native mode and return HTTP 501 outside that environment.
+- Native filesystem, device, Klipper socket, and firmware features are unconditional: a non-Linux backend exits at startup (naming `KWC_FAKE_NATIVE`), so no route carries a platform guard and none returns HTTP 501.
 - The frontend auto-generates reference assets before `dev` and `build` so example search and static schema fallbacks remain available.
 - The current repository does not implement authentication, authorization, or multi-user collaboration.
 
