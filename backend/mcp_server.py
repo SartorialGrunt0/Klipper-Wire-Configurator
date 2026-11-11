@@ -28,6 +28,17 @@ from typing import Any
 
 # ── Paths ────────────────────────────────────────────────────────────
 
+# The imports below are flat (`from klipper_paths import ...`), so this file's
+# own directory must be on sys.path. That holds when the app imports it with
+# cwd=backend and when mcp_wrapper.py runs it — but NOT for the standalone
+# entry point documented at the top of this module (`python -m
+# backend.mcp_server`), which used to die with ModuleNotFoundError right here
+# and never reach run_stdio()'s platform guard. Bootstrap it so the documented
+# command works.
+_BACKEND_DIR = str(Path(__file__).resolve().parent)
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+
 # Hard-failover resolution: installed Klipper repo when present (docs track
 # the installed firmware), bundled copies otherwise. KWC-authored docs load
 # alongside from reference/kwc_docs/ (see klipper_paths.py).
@@ -3706,9 +3717,10 @@ class McpServer:
 def run_stdio() -> None:
     """Run the MCP server over stdin/stdout (standard MCP transport)."""
     # Same startup contract as backend/main.py. The per-route native guards are
-    # gone, so a standalone stdio server (`python -m backend.mcp_server`, the
-    # Claude Desktop entry point) must refuse to start off-Linux rather than
-    # expose device/config tools that cannot work there.
+    # gone, so a standalone stdio server must refuse to start off-Linux rather
+    # than expose device/config tools that cannot work there. Both documented
+    # entry points land here: `python -m backend.mcp_server` and
+    # backend/mcp_wrapper.py (the one Claude Desktop is configured with).
     from services.native_services import is_native_platform
 
     if not is_native_platform():

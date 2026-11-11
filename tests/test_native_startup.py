@@ -87,3 +87,30 @@ def test_mcp_stdio_server_refuses_non_linux(tmp_path):
     assert proc.returncode != 0, "stdio MCP server started on a non-Linux host"
     assert "KWC MCP server requires Linux" in proc.stderr
     assert "KWC_FAKE_NATIVE" in proc.stderr
+
+
+def test_documented_mcp_entry_point_starts(tmp_path):
+    """`python -m backend.mcp_server` must actually reach run_stdio().
+
+    The test above imports `mcp_server` with PYTHONPATH=backend. That works, but
+    it is not the command this module documents, and the documented form used to
+    die at `from klipper_paths import ...` with ModuleNotFoundError — so the
+    platform guard was unreachable from the path it names. PYTHONPATH is cleared
+    here to prove the module's own sys.path bootstrap does the work.
+    """
+    env = {k: v for k, v in os.environ.items() if k != "KWC_FAKE_NATIVE"}
+    env.pop("PYTHONPATH", None)
+
+    proc = subprocess.run(
+        [sys.executable, "-m", "backend.mcp_server"],
+        cwd=str(BACKEND_DIR.parent),
+        env=env,
+        stdin=subprocess.DEVNULL,  # EOF ends the stdio loop immediately
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+    assert "ModuleNotFoundError" not in proc.stderr, proc.stderr
+    assert proc.returncode == 0, proc.stderr
+    assert "MCP server:" in proc.stderr
