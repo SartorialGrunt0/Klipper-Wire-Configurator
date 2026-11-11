@@ -142,6 +142,51 @@ def test_import_project_ignores_non_cfg():
     assert set(response.json()['files'].keys()) == {'printer.cfg'}
 
 
+def _legacy_store_snapshot() -> set[str]:
+    """Files under the retired user-config store and the projects directory.
+
+    Both used to be written by the deleted local-save endpoints. Import parses,
+    it never persists (REQ-CONF-01) — so neither may grow.
+    """
+    backend = Path(__file__).resolve().parents[1] / 'backend'
+    files: set[str] = set()
+    for sub in ('user_configs', 'projects'):
+        base = backend / sub
+        if not base.exists():
+            continue
+        files |= {
+            f'{sub}/{p.relative_to(base)}' for p in base.rglob('*') if p.is_file()
+        }
+    return files
+
+
+def test_import_single_cfg_writes_nothing_to_disk():
+    before = _legacy_store_snapshot()
+
+    response = client.post(
+        '/api/import',
+        files={'file': ('printer.cfg', SIMPLE_CFG.encode(), 'text/plain')},
+    )
+
+    assert response.status_code == 200
+    assert _legacy_store_snapshot() == before
+
+
+def test_import_project_writes_nothing_to_disk():
+    before = _legacy_store_snapshot()
+
+    response = client.post(
+        '/api/import-project',
+        files=[
+            ('files', ('printer.cfg', PROJECT_CFG.encode(), 'text/plain')),
+            ('files', ('other.cfg', OTHER_CFG.encode(), 'text/plain')),
+        ],
+    )
+
+    assert response.status_code == 200
+    assert _legacy_store_snapshot() == before
+
+
 def test_import_project_no_cfg_files():
     response = client.post(
         '/api/import-project',
@@ -544,14 +589,15 @@ def test_tool_context_snippets_cover_schema_params():
 
 
 def test_local_storage_endpoints_are_gone():
-    # Assert on the ROUTE TABLE, not on a status code: /api/configs/{name}
-    # still matches the path, so a removed POST answers 405 rather than 404
-    # and a status check would pass for the wrong reason.
-    registered = {
-        (getattr(route, 'path', ''), method)
-        for route in app.routes
-        for method in (getattr(route, 'methods', None) or ())
-    }
+    # Assert on the OpenAPI path map. app.routes is NOT usable here: FastAPI
+    # keeps included routers as opaque `_IncludedRouter` objects with path='',
+    # so a route-table scan sees no /api/* route at all — that is how the first
+    # version of this test passed with POST /api/configs/save re-registered and
+    # serving 200.
+    paths = app.openapi().get('paths', {})
 
-    assert ('/api/configs/save', 'POST') not in registered
-    assert ('/api/project/load-saved', 'GET') not in registered
+    # Anti-vacuity guard: only meaningful if the map is actually populated.
+    assert '/api/native/status' in paths
+
+    assert '/api/configs/save' not in paths
+    assert '/api/project/load-saved' not in paths
