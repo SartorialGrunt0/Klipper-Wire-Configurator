@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { useConfigStore } from '../stores/configStore';
 import { useGraphStore } from '../stores/graphStore';
 import { useNativeStore } from '../stores/nativeStore';
@@ -1420,7 +1420,7 @@ export default function SettingsPanel() {
 
 /* ── Device Picker for MCU params ────────────────────── */
 
-/** Param names that should show a device picker when in native mode */
+/** Param names that should show a device picker */
 const DEVICE_PARAM_MAP: Record<string, 'usb_serial' | 'can' | 'uart'> = {
   serial: 'usb_serial',
   canbus_uuid: 'can',
@@ -1440,8 +1440,16 @@ function DevicePicker({
 }) {
   const { devices, devicesLoading, refreshDevices, canbusQuery, canbusQueryLoading, queryCanbusUuids } = useNativeStore();
 
+  // One automatic attempt per mount. Do NOT remove the latch: a failed
+  // refreshDevices (backend down, device scan error) sets devicesLoading back
+  // to false while leaving devices null — exactly the state this effect
+  // watches — so React would re-run it forever. The old `isNative` gate used
+  // to make that unreachable; nothing gates it any more.
+  const autoRefreshDone = useRef(false);
   useEffect(() => {
+    if (autoRefreshDone.current) return;
     if (!devices && !devicesLoading) {
+      autoRefreshDone.current = true;
       refreshDevices();
     }
   }, [devices, devicesLoading, refreshDevices]);
