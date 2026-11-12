@@ -51,7 +51,7 @@ import {
   buildLayoutPayload,
   applySavedNodePositions,
   applySavedEdgeLayout,
-  loadSavedLayout,
+  readSavedLayout,
 } from './utils/layoutPersistence';
 import { useMacroDesignerStore } from './stores/macroDesignerStore';
 
@@ -200,6 +200,10 @@ export default function App() {
   // because a non-Linux backend refuses to start (main._assert_native_platform).
   // Re-reading on every page refresh is what clears unapplied changes.
   const startupLoaded = useRef(false);
+  // Set when the layout read FAILED (as opposed to found nothing): the
+  // autosave below must not POST the auto-arranged graph over a layout we
+  // failed to read. Cleared by the next successful read (page reload).
+  const layoutReadBlocked = useRef(false);
   useEffect(() => {
     // StrictMode mounts effects twice; buildProjectGraph is additive, so a
     // second run would duplicate every card. One shot per app instance.
@@ -272,7 +276,15 @@ export default function App() {
 
         // Restore graph positions from the saved layout (content-keyed with
         // exact-id fallback — see utils/layoutPersistence)
-        const layout = await loadSavedLayout();
+        const outcome = await readSavedLayout();
+        if (outcome.status === 'error') {
+          // The host HAS a layout we could not read. Without this block the
+          // debounced autosave 3 s later would POST the auto-arranged graph
+          // over it — silent, irreversible loss on a transient failure.
+          layoutReadBlocked.current = true;
+          console.error('Saved-layout read failed; layout autosave disabled for this page load');
+        }
+        const layout = outcome.status === 'ok' ? outcome.layout : null;
         if (layout) {
           if (layout.macroDesigner) {
             useMacroDesignerStore.getState().hydratePersistedState(layout.macroDesigner as MacroDesignerPersistedState);
@@ -287,8 +299,14 @@ export default function App() {
         }
 
         configStore.markClean();
-      } catch {
-        // Startup read failed — start empty rather than half-populated.
+      } catch (err) {
+        // Startup read failed — throw away whatever landed. The store mutates
+        // incrementally above, so a mid-way throw leaves configs populated
+        // with no graph — and setConfigFile never marks dirty, so the
+        // half-state reads as CLEAN, which is worse than empty.
+        console.error('Startup config read failed:', err);
+        useConfigStore.getState().clearAll();
+        useGraphStore.getState().clearGraph();
       }
     })();
   }, []);
@@ -299,6 +317,7 @@ export default function App() {
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveLayoutNow = useCallback((n: typeof nodes, e: typeof edges, keepalive = false) => {
     if (n.length === 0) return;
+    if (layoutReadBlocked.current) return;
     const macroDesigner = useMacroDesignerStore.getState().exportPersistedState();
     const layout = buildLayoutPayload(n, e, macroDesigner);
     api.saveNativeLayout(layout, { keepalive }).catch(() => { /* ignore save errors */ });
@@ -334,11 +353,13 @@ export default function App() {
       const graph = useGraphStore.getState();
       saveLayoutNow(graph.nodes, graph.edges, true);
     };
+    // pagehide ALONE: Chromium and Firefox fire beforeunload AND pagehide on a
+    // navigation, so registering both flushed the identical keepalive POST
+    // twice per reload. pagehide covers unload, bfcache entry, and the iOS
+    // Safari case where beforeunload is unreliable.
     window.addEventListener('pagehide', onUnload);
-    window.addEventListener('beforeunload', onUnload);
     return () => {
       window.removeEventListener('pagehide', onUnload);
-      window.removeEventListener('beforeunload', onUnload);
     };
   }, [saveLayoutNow]);
 
