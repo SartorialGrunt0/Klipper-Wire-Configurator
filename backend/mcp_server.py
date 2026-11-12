@@ -3716,19 +3716,14 @@ class McpServer:
 
 def run_stdio() -> None:
     """Run the MCP server over stdin/stdout (standard MCP transport)."""
-    # Same startup contract as backend/main.py. The per-route native guards are
-    # gone, so a standalone stdio server must refuse to start off-Linux rather
-    # than expose device/config tools that cannot work there. Both documented
-    # entry points land here: `python -m backend.mcp_server` and
+    # Same boot-anywhere contract as backend/main.py: warn, then serve.
+    # The warning goes to stderr — stdout is the JSON-RPC channel. Both
+    # documented entry points land here: `python -m backend.mcp_server` and
     # backend/mcp_wrapper.py (the one Claude Desktop is configured with).
-    from services.native_services import is_native_platform
+    from services.native_services import is_native_platform, OFF_HOST_WARNING
 
     if not is_native_platform():
-        sys.stderr.write(
-            "KWC MCP server requires Linux — normally the Klipper printer host. "
-            "On Windows/macOS: set KWC_FAKE_NATIVE=1 (see start-dev.ps1).\n"
-        )
-        raise SystemExit(1)
+        sys.stderr.write(f"KWC MCP server: {OFF_HOST_WARNING}\n")
 
     server = McpServer()
     index = get_index()

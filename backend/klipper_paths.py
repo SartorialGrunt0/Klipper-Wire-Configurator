@@ -1,12 +1,12 @@
 """Resolve which Klipper doc sources KWC serves.
 
 Hard failover, single source: when KWC is natively deployed on the printer
-host (the app's system config path exists — the only native signal left, as
-the startup contract in main.py already guarantees Linux) and an installed
+host (the app's system config path exists — the deployment marker is the
+only native signal; the Linux check is a boot-time warning in main.py) and an installed
 Klipper repo with a docs/ directory is found (env
 KWC_KLIPPER_DIR, then common install paths), the docs are served from THAT
 repo — they track the installed firmware version, which is the version the
-user's config must match. Otherwise (dev checkout or fake-native dev box
+user's config must match. Otherwise (dev checkout or off-host dev box
 without the marker dir) we fall back to the bundled copies in reference/.
 The env override KWC_KLIPPER_DIR always wins so a dev box can point at a
 specific checkout.
@@ -73,8 +73,8 @@ DEPLOYMENT_CONFIG_PATH = resolve_config_path()
 def _deployment_looks_native() -> bool:
     """True when KWC is natively deployed on the printer host.
 
-    The "are we on Linux?" half used to live here; it is now a startup
-    assertion (``main._assert_native_platform``), so this is purely the
+    The "are we on Linux?" half used to live here; it is now a boot-time
+    warning (``main._warn_off_host``), so this is purely the
     deployment marker. The directory check stays: a Linux box without
     ``~/printer_data/config`` is a real state (dev on a Pi with no printer
     attached), and the docs-index tools must fall back to bundled docs there.

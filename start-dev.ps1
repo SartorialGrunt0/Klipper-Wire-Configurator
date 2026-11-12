@@ -2,18 +2,8 @@
 # Starts both backend (FastAPI) and frontend (Vite) servers in parallel
 
 param(
-    [switch]$StopExisting,
-    # Accepted so pre-retirement invocations keep working; fake-native is the
-    # default, so it only prints a notice (see the check below).
-    [switch]$FakeNative,
-    # Opt out of the dev override: with this set the backend exercises the
-    # real startup contract and refuses to start off Linux.
-    [switch]$NoFakeNative
+    [switch]$StopExisting
 )
-
-if ($FakeNative) {
-    Write-Host '-FakeNative is unnecessary: fake-native is the default (it is only accepted for compatibility).' -ForegroundColor DarkGray
-}
 
 
 Write-Host 'Starting Klipper Wire Configurator...' -ForegroundColor Cyan
@@ -27,21 +17,8 @@ $frontendDir = Join-Path $rootDir 'frontend'
 # pre-check must watch the same port the child will bind, not a hardcoded one.
 $kwcPort = if ($env:KWC_PORT) { [int]$env:KWC_PORT } else { 8099 }
 
-# KWC only runs on the Linux printer host: off Linux the backend exits at
-# startup unless KWC_FAKE_NATIVE is set (see backend/main.py). Fake-native is
-# therefore the default here — it is the dev override, not a deployment mode.
-# is_native_platform() is its ONLY consumer (backend/services/native_services.py)
-# and on Linux it is already true, so exporting it is a no-op on the host and
-# required everywhere else.
-$oldKwcFake = $env:KWC_FAKE_NATIVE
-if ($NoFakeNative) {
-    Remove-Item Env:KWC_FAKE_NATIVE -ErrorAction SilentlyContinue
-    Write-Host 'FakeNative disabled (-NoFakeNative) — the backend will refuse to start off Linux.' -ForegroundColor Yellow
-}
-else {
-    $env:KWC_FAKE_NATIVE = '1'
-}
-
+# The backend boots on every OS; off a Linux printer host it warns at startup
+# (main._warn_off_host) and the native features find nothing.
 function Get-ProcessDetails {
     param([int]$ProcessId)
 
@@ -297,12 +274,6 @@ finally {
     }
     if ($backendProcess) {
         Stop-ProcessTree -ProcessId $backendProcess.Id
-    }
-    if ($null -ne $oldKwcFake) {
-        $env:KWC_FAKE_NATIVE = $oldKwcFake
-    }
-    else {
-        Remove-Item Env:\KWC_FAKE_NATIVE -ErrorAction SilentlyContinue
     }
     Write-Host 'Servers stopped.' -ForegroundColor Yellow
 }

@@ -4,10 +4,6 @@ REM Starts both backend (FastAPI) and frontend (Vite) servers in parallel
 
 setlocal enabledelayedexpansion
 
-REM KWC only runs on the Linux printer host: off Linux the backend exits at
-REM startup unless KWC_FAKE_NATIVE is set (see backend\main.py). Fake-native is
-REM the dev override, not a deployment mode; on Linux it is already a no-op.
-set KWC_FAKE_NATIVE=1
 if "%KWC_PORT%"=="" set KWC_PORT=8099
 
 echo.

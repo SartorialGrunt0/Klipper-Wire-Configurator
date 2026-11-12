@@ -1,14 +1,16 @@
 """Static locks for the retired non-native mode (branch: retire-non-native-mode).
 
-The backend now refuses to start off-Linux (``main._assert_native_platform``) and
-the standalone MCP stdio server refuses too (``mcp_server.run_stdio``). Those two
-assertions are the ONLY platform gates left.
+The backend boots on every OS. The only platform decision left anywhere is the
+boot-time warning (``main._warn_off_host`` and the same shape in
+``mcp_server.run_stdio``). Native features never gate: they degrade defensively
+off the printer host (empty device lists, 503 from the missing Klipper socket),
+which is what makes booting anywhere honest.
 
-A re-added per-route ``if not is_native_platform(): raise HTTPException(501)`` is
-invisible to every behavioural test: it is a no-op on the Linux printer host, so
-the suite stays green and the regression only surfaces months later on a
-fake-native dev box the docs no longer mention. That is why this file asserts on
-the source instead of on behaviour.
+A re-added per-route ``if not is_native_platform(): raise HTTPException(501)``
+would be invisible to every behavioural test on the Linux printer host, so the
+suite would stay green and the regression would only surface months later on a
+Windows dev box — where it would now actually fire. That is why this file
+asserts on the source instead of on behaviour.
 
 The detectors are deliberately wider than the one historical spelling: the
 positional ``HTTPException(501, ...)`` form, the ``status.HTTP_501_*`` constant,
@@ -73,8 +75,8 @@ def test_is_native_platform_is_only_the_startup_contract():
 
     assert offenders == [], (
         'per-route platform guard re-introduced in: '
-        f'{offenders} — the backend refuses to start off-Linux, so route-level '
-        'gating is dead code that hides the contract'
+        f'{offenders} — the backend boots on every OS and features degrade '
+        'defensively; the boot warning is the ONLY platform decision'
     )
 
 
@@ -102,7 +104,7 @@ def test_no_inline_platform_predicates():
 
     assert offenders == [], (
         f'inline platform check in: {offenders} — the ONLY platform decision '
-        'is the startup contract (main._assert_native_platform / run_stdio)'
+        'is the boot-time warning (main._warn_off_host / run_stdio)'
     )
 
 

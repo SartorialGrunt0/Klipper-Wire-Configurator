@@ -1,10 +1,14 @@
-"""Startup contract: KWC refuses to boot on a non-Linux host.
+"""Startup contract: KWC boots on any OS and says so off the printer host.
 
 Retiring non-native (browser/dev-server) mode deleted every per-route
-``is_native_platform()`` guard on the strength of this assertion, so it is
-load-bearing, not a convenience check. These tests therefore exercise the
-real import of ``backend/main.py`` in a subprocess — patching the module
-in-process would not prove the assertion actually runs at boot.
+``is_native_platform()`` guard, and the native services degrade defensively
+instead (empty device lists, 503 from the missing Klipper socket), so a
+non-Linux boot is a legitimate dev run — not a misconfiguration. The
+contract is therefore: boot everywhere, warn once off a Linux host, and
+keep every platform decision OUT of the request paths (the static locks
+live in tests/test_no_platform_guards.py). These tests exercise the real
+import of ``backend/main.py`` in a subprocess — patching the module
+in-process would not prove the boot warning actually runs at startup.
 """
 import os
 import subprocess
@@ -13,17 +17,19 @@ from pathlib import Path
 
 BACKEND_DIR = Path(__file__).resolve().parent.parent / "backend"
 
+# Stable substring of services.native_services.OFF_HOST_WARNING.
+OFF_HOST_PHRASE = "not running on a Linux printer host"
+
 # Patched before `import main` so services.native_services sees it.
 # `platform` is already in sys.modules, so setting the attribute on the
 # module is enough — is_native_platform() calls platform.system().
 _IMPORT_MAIN = "import platform; platform.system = lambda: {target!r}\nimport main\n"
 
 
-def _import_main(target: str, extra_env: dict, tmp_path: Path) -> subprocess.CompletedProcess:
-    env = {k: v for k, v in os.environ.items() if k != "KWC_FAKE_NATIVE"}
+def _import_main(target: str, tmp_path: Path) -> subprocess.CompletedProcess:
+    env = dict(os.environ)
     env["KWC_PROJECTS_DIR"] = str(tmp_path / "projects")
     env["PYTHONPATH"] = str(BACKEND_DIR)
-    env.update(extra_env)
     return subprocess.run(
         [sys.executable, "-c", _IMPORT_MAIN.format(target=target)],
         cwd=str(BACKEND_DIR),
@@ -34,35 +40,29 @@ def _import_main(target: str, extra_env: dict, tmp_path: Path) -> subprocess.Com
     )
 
 
-def test_non_linux_backend_exits_and_names_the_override(tmp_path):
-    """A non-Linux host must fail at import, and say how to dev around it."""
-    proc = _import_main("Windows", {}, tmp_path)
+def test_non_linux_host_boots_and_warns(tmp_path):
+    """Off the printer host: boot anyway, but say what will find nothing."""
+    proc = _import_main("Windows", tmp_path)
 
-    assert proc.returncode != 0, "main.py imported on a non-Linux host"
-    assert "KWC requires Linux" in proc.stderr
-    assert "KWC_FAKE_NATIVE" in proc.stderr, "the failure message must name the dev override"
-    # A bare SystemExit(str) prints only the message — a traceback here would
-    # mean something else crashed before the assertion could run.
+    assert proc.returncode == 0, proc.stderr
+    assert OFF_HOST_PHRASE in proc.stdout, "the boot warning must fire off Linux"
+    # Nothing may crash on the way — a traceback means some module still
+    # assumes Linux instead of degrading defensively.
     assert "Traceback" not in proc.stderr
 
 
-def test_fake_native_override_boots_on_non_linux(tmp_path):
-    """KWC_FAKE_NATIVE (what start-dev.ps1 exports) is the Windows dev path."""
-    proc = _import_main("Windows", {"KWC_FAKE_NATIVE": "1"}, tmp_path)
+def test_linux_host_boots_silently(tmp_path):
+    """The printer host needs no warning and no env var at all."""
+    proc = _import_main("Linux", tmp_path)
 
     assert proc.returncode == 0, proc.stderr
-
-
-def test_linux_boots_without_any_override(tmp_path):
-    """The printer host needs no env var at all."""
-    proc = _import_main("Linux", {}, tmp_path)
-
-    assert proc.returncode == 0, proc.stderr
+    assert OFF_HOST_PHRASE not in proc.stdout
 
 
 # ── standalone stdio MCP entry (`python -m backend.mcp_server`) ──
 # main.py documents this as the Claude Desktop path, so it is a separate
-# process the HTTP backend's assertion cannot protect. Same contract applies.
+# process with the same boot-anywhere contract. The warning must go to
+# stderr: stdout is the JSON-RPC channel.
 
 _RUN_STDIO = (
     "import platform; platform.system = lambda: {target!r}\n"
@@ -71,22 +71,23 @@ _RUN_STDIO = (
 )
 
 
-def test_mcp_stdio_server_refuses_non_linux(tmp_path):
-    env = {k: v for k, v in os.environ.items() if k != "KWC_FAKE_NATIVE"}
+def test_mcp_stdio_warns_but_starts_off_linux(tmp_path):
+    env = dict(os.environ)
     env["PYTHONPATH"] = str(BACKEND_DIR)
     proc = subprocess.run(
         [sys.executable, "-c", _RUN_STDIO.format(target="Windows")],
         cwd=str(BACKEND_DIR),
         env=env,
-        stdin=subprocess.DEVNULL,  # the assertion must fire before any read
+        stdin=subprocess.DEVNULL,  # EOF ends the stdio loop immediately
         capture_output=True,
         text=True,
         timeout=180,
     )
 
-    assert proc.returncode != 0, "stdio MCP server started on a non-Linux host"
-    assert "KWC MCP server requires Linux" in proc.stderr
-    assert "KWC_FAKE_NATIVE" in proc.stderr
+    assert proc.returncode == 0, proc.stderr  # warns, then serves — no refusal
+    assert OFF_HOST_PHRASE in proc.stderr
+    # The warning must never leak into the JSON-RPC stdout channel.
+    assert OFF_HOST_PHRASE not in proc.stdout
 
 
 def test_documented_mcp_entry_point_starts(tmp_path):
@@ -95,10 +96,10 @@ def test_documented_mcp_entry_point_starts(tmp_path):
     The test above imports `mcp_server` with PYTHONPATH=backend. That works, but
     it is not the command this module documents, and the documented form used to
     die at `from klipper_paths import ...` with ModuleNotFoundError — so the
-    platform guard was unreachable from the path it names. PYTHONPATH is cleared
-    here to prove the module's own sys.path bootstrap does the work.
+    entry point itself must be proven from the path it names. PYTHONPATH is
+    cleared here to prove the module's own sys.path bootstrap does the work.
     """
-    env = {k: v for k, v in os.environ.items() if k != "KWC_FAKE_NATIVE"}
+    env = dict(os.environ)
     env.pop("PYTHONPATH", None)
 
     proc = subprocess.run(

@@ -8,12 +8,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$ROOT_DIR/backend"
 FRONTEND_DIR="$ROOT_DIR/frontend"
 
-# KWC only runs on the Linux printer host: off Linux the backend exits at
-# startup unless KWC_FAKE_NATIVE is set (see backend/main.py). Fake-native is
-# the dev override, not a deployment mode — and on Linux it is already a no-op,
-# because is_native_platform() is its only consumer.
-export KWC_FAKE_NATIVE=1
-
 KWC_PORT="${KWC_PORT:-8099}"
 HEALTH_URL="http://127.0.0.1:${KWC_PORT}/health"
 

@@ -68,8 +68,9 @@ router = APIRouter()
 async def native_status():
     """Report the active config directory.
 
-    Native mode is the only mode: a non-Linux backend refuses to start
-    (see ``main._assert_native_platform``), so there is nothing to branch on.
+    There is no mode to branch on: the backend boots on every OS and warns
+    off a Linux printer host (``main._warn_off_host``); off-host these
+    native reads simply find nothing.
     """
     settings = load_settings()
     return {"config_path": settings.get("config_path", get_default_config_path())}

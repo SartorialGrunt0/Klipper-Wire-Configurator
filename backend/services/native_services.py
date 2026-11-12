@@ -23,15 +23,21 @@ _KLIPPY_OPTION_RE = re.compile(r"option ['\"]?([^'\"]+)['\"]?", re.IGNORECASE)
 # ── Platform detection ──────────────────────────────────────────
 
 
-def is_native_platform() -> bool:
-    """Return True when running on Linux (Raspberry Pi / SBC).
+OFF_HOST_WARNING = (
+    "KWC is not running on a Linux printer host - device lists, the Klipper "
+    "socket, and firmware tooling will find nothing here."
+)
 
-    The environment variable `KWC_FAKE_NATIVE` may be set to a truthy
-    value (1/true/yes/on) to force native mode for development runs.
+
+def is_native_platform() -> bool:
+    """True on Linux (Raspberry Pi / SBC) - a plain platform fact.
+
+    There is no override variable: the backend boots on every OS and the
+    native services degrade defensively off-host (empty device lists, 503
+    from the missing Klipper socket). The only consumers are the two boot
+    warnings (`main._warn_off_host`, `mcp_server.run_stdio`); no request
+    path may call this (locked by tests/test_no_platform_guards.py).
     """
-    fake = os.environ.get("KWC_FAKE_NATIVE")
-    if fake and str(fake).lower() in ("1", "true", "yes", "on"):
-        return True
     return platform.system() == "Linux"
 
 

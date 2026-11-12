@@ -76,11 +76,10 @@ cd backend
 python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-# The backend refuses to start off Linux unless the dev override is set,
-# so export it before launching (use ./start-dev.ps1 to skip this bookkeeping):
-$env:KWC_FAKE_NATIVE = '1'
 python main.py
 ```
+
+The backend boots on every OS. Off a Linux printer host it prints one startup warning and reports nothing for devices, Klipper status, and firmware — everything else (editing, validation, AI chat) works normally. Use `./start-dev.ps1` to bring up the full stack.
 
 ## Manual build and deploy
 

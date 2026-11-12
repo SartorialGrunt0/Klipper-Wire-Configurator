@@ -196,8 +196,9 @@ export default function App() {
   }, []);
 
   // Startup: read the config from the printer host, build the graph, restore
-  // the saved layout. ONE unconditional path — there is no mode to branch on,
-  // because a non-Linux backend refuses to start (main._assert_native_platform).
+  // the saved layout. ONE unconditional path — there is no mode to branch on:
+  // the backend boots on every OS (off the printer host these reads simply
+  // find nothing, and main._warn_off_host says so at boot).
   // Re-reading on every page refresh is what clears unapplied changes.
   const startupLoaded = useRef(false);
   // Set when the layout read FAILED (as opposed to found nothing): the

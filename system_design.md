@@ -31,7 +31,7 @@ React UI -> frontend/src/services/api.ts -> FastAPI routes -> parser/services ->
 
 ### Printer-host startup path
 
-Retiring browser mode left one unconditional startup path (a non-Linux backend exits at import, so there is no mode to branch on):
+Retiring browser mode left one unconditional startup path (the backend boots on every OS, so there is no mode to branch on):
 
 1. `App.tsx` lists `.cfg` files from the configured path.
 2. `App.tsx` filters out known non-Klipper and backup files.
@@ -80,7 +80,7 @@ The backend parser/exporter is the source of truth for config text. The graph an
 | --- | --- | --- |
 | `configStore` | Loaded config files, active file, validation, selected section, original text snapshots, dirty state, and config mutation helpers. | [frontend/src/stores/configStore.ts](frontend/src/stores/configStore.ts) |
 | `graphStore` | React Flow nodes/edges, graph mutations, history, grouping, drag/reparent behavior, and graph-driven config mutations. | [frontend/src/stores/graphStore.ts](frontend/src/stores/graphStore.ts) |
-| `nativeStore` | Config path, detected devices (USB serial/UART/CAN), and CAN UUID query state. There is no "native mode" flag — the backend refuses to start off Linux. | [frontend/src/stores/nativeStore.ts](frontend/src/stores/nativeStore.ts) |
+| `nativeStore` | Config path, detected devices (USB serial/UART/CAN), and CAN UUID query state. There is no "native mode" flag — the backend boots on every OS and warns off a Linux printer host. | [frontend/src/stores/nativeStore.ts](frontend/src/stores/nativeStore.ts) |
 | `macroDesignerStore` | Persistent macro designer drafts and UI state. | [frontend/src/stores/macroDesignerStore.ts](frontend/src/stores/macroDesignerStore.ts) |
 | `aiStore` | Persistent AI provider settings (incl. the `toolProtocol` chat setting), local-provider host/port state, and chat message history. | [frontend/src/stores/aiStore.ts](frontend/src/stores/aiStore.ts) |
 | `chatHistoryStore` | Saved conversations: messages, provider settings, attached config files. | [frontend/src/stores/chatHistoryStore.ts](frontend/src/stores/chatHistoryStore.ts) |
@@ -130,7 +130,7 @@ The backend parser/exporter is the source of truth for config text. The graph an
 | --- | --- | --- |
 | Board detection and example listing | Match imported configs to board types and enumerate reference examples. | [backend/services/board_detector.py](backend/services/board_detector.py) |
 | Warning acknowledgements | Persist accepted unknown-section warnings. | [backend/services/warning_acknowledgments.py](backend/services/warning_acknowledgments.py) |
-| Native device/filesystem/state helpers | Native platform check, config file I/O, layout/settings persistence, Klipper socket API. | [backend/services/native_services.py](backend/services/native_services.py) |
+| Native device/filesystem/state helpers | Platform fact + off-host warning text (boot warnings only), config file I/O, layout/settings persistence, Klipper socket API. | [backend/services/native_services.py](backend/services/native_services.py) |
 | Shared flash target engine | Kconfig state, artifact discovery, build/flash orchestration for Klipper and Katapult. | [backend/services/flash_targets.py](backend/services/flash_targets.py) |
 | Klipper compatibility wrapper | Target-specific wrappers and legacy payload keys for Klipper firmware flow. | [backend/services/klipper_firmware.py](backend/services/klipper_firmware.py) |
 
@@ -194,7 +194,7 @@ Key maintenance point:
 
 ### 6.7 Printer-host persistence
 
-1. The host check is the startup contract in [backend/main.py](backend/main.py) (`_assert_native_platform`, with the same shape in `mcp_server.run_stdio`); `is_native_platform()` lives in [backend/services/native_services.py](backend/services/native_services.py) and is consulted only there. There is no runtime "am I native?" detection.
+1. The host check is a boot-time warning, not a gate: [backend/main.py](backend/main.py) (`_warn_off_host`, with the same shape in `mcp_server.run_stdio`) warns once off a Linux printer host; `is_native_platform()` lives in [backend/services/native_services.py](backend/services/native_services.py) as a plain platform fact and has no other consumer. Off-host, native reads simply find nothing (empty device lists, 503 from the Klipper socket). There is no runtime "am I native?" branching and no override variable.
 2. The frontend keeps native state in [frontend/src/stores/nativeStore.ts](frontend/src/stores/nativeStore.ts).
 3. Layout and settings are stored via `/api/native/layout` and `/api/native/settings` in JSON files under the native app state directory.
 4. Warning acknowledgements are stored separately by [backend/services/warning_acknowledgments.py](backend/services/warning_acknowledgments.py).

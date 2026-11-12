@@ -10,13 +10,13 @@ Klipper Wire Configurator is a browser-based editor for Klipper configuration pr
 
 ## Supported Operating Modes
 
-- Printer-host mode: the only supported deployment. The backend runs on the Klipper host (Linux) and serves the frontend; the UI has direct file access, device discovery, layout persistence, Klipper restart/status checks, and firmware tooling. A non-Linux backend exits at startup with a message naming `KWC_FAKE_NATIVE`.
-- Development mode: the frontend runs under Vite and the backend under FastAPI/Uvicorn; frontend reference assets are generated before `dev` and `build` runs. Off the printer host, `KWC_FAKE_NATIVE=1` satisfies the host check — `start-dev.sh`, `start-dev.ps1` and `start-dev.bat` export it for you (`start-dev.ps1 -NoFakeNative` opts out, exercising the real refusal), and all three wait for `GET /health` before reporting the backend up. It is a dev override, not a deployment mode. `KWC_RELOAD=1` enables uvicorn's reloader for backend work; it belongs on the printer host only, because off Linux the reloader's supervisor would outlive the child that refuses to start.
+- Printer-host mode: the only supported deployment. The backend runs on the Klipper host (Linux) and serves the frontend; the UI has direct file access, device discovery, layout persistence, Klipper restart/status checks, and firmware tooling. The backend boots on every OS: off a Linux host it prints one startup warning and these host features report nothing (empty device lists, 503 from the missing Klipper socket, no firmware checkouts).
+On a non-Linux machine the backend boots with its off-host warning and the app is fully usable for everything that does not touch the printer; there is no override variable. All three `start-dev` scripts wait for `GET /health` before reporting the backend up. `KWC_RELOAD=1` enables uvicorn's reloader for backend work.
 
 ## Capability Legend
 
 - UI: available in the current shipped frontend.
-- Native UI: printer-host features (filesystem, devices, Klipper socket, firmware). Always available — KWC only runs on the printer host.
+- Native UI: printer-host features (filesystem, devices, Klipper socket, firmware). Always available on the printer host; off-host they degrade to empty results (the backend warns at boot).
 - API: implemented in the backend, but not surfaced by the current primary UI.
 
 ## Functional Requirements
@@ -92,7 +92,7 @@ Klipper Wire Configurator is a browser-based editor for Klipper configuration pr
 
 | ID | Requirement | Surface | Primary implementation |
 | --- | --- | --- | --- |
-| REQ-NATIVE-01 | The backend shall refuse to start off Linux (naming `KWC_FAKE_NATIVE` as the dev override) and expose the active config directory setting to the frontend. `/api/native/status` reports only `config_path` — the legacy `native` field is gone, so a stale frontend bundle must be reloaded, not feature-detected. | Native UI | [backend/main.py](backend/main.py) (`_assert_native_platform`), [backend/mcp_server.py](backend/mcp_server.py) (`run_stdio`), [frontend/src/stores/nativeStore.ts](frontend/src/stores/nativeStore.ts), [backend/api/native_routes.py](backend/api/native_routes.py) |
+| REQ-NATIVE-01 | The backend shall boot on every OS, with the Linux printer host the only fully supported environment: off a Linux host it prints one startup warning and native features degrade defensively (empty device lists, 503 from the Klipper socket) rather than gate per-route; there is no override variable. It shall expose the active config directory setting to the frontend. `/api/native/status` reports only `config_path` — the legacy `native` field is gone, so a stale frontend bundle must be reloaded, not feature-detected. | Native UI | [backend/main.py](backend/main.py) (`_warn_off_host`), [backend/mcp_server.py](backend/mcp_server.py) (`run_stdio`), [frontend/src/stores/nativeStore.ts](frontend/src/stores/nativeStore.ts), [backend/api/native_routes.py](backend/api/native_routes.py) |
 | REQ-NATIVE-02 | The UI shall be able to list and open `.cfg` files directly from the host config directory. | Native UI | [frontend/src/components/dialogs/OpenFromPiDialog.tsx](frontend/src/components/dialogs/OpenFromPiDialog.tsx), [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
 | REQ-NATIVE-03 | The backend shall list USB serial, UART, and CAN devices and support CAN UUID queries. | Native UI | [frontend/src/stores/nativeStore.ts](frontend/src/stores/nativeStore.ts), [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
 | REQ-NATIVE-04 | The UI shall be able to apply selected config files back to disk and then request a Klipper firmware restart. | Native UI | [frontend/src/components/dialogs/ApplyDialog.tsx](frontend/src/components/dialogs/ApplyDialog.tsx), [backend/api/native_routes.py](backend/api/native_routes.py), [backend/services/native_services.py](backend/services/native_services.py) |
@@ -126,7 +126,7 @@ Klipper Wire Configurator is a browser-based editor for Klipper configuration pr
 ## Non-Functional and Operational Constraints
 
 - The parser/exporter path is the single source of truth for config text fidelity. Both the graph workspace and the text editor ultimately round-trip through backend parsing and export logic.
-- Native filesystem, device, Klipper socket, and firmware features are unconditional: a non-Linux backend exits at startup (naming `KWC_FAKE_NATIVE`), so no route carries a platform guard and none returns HTTP 501.
+- Native filesystem, device, Klipper socket, and firmware features are unconditional: no route carries a platform guard and none returns HTTP 501; off the printer host they degrade defensively (empty lists, 503 from the missing Klipper socket). The only platform decision in the process is the startup warning.
 - The frontend auto-generates reference assets before `dev` and `build` so example search and static schema fallbacks remain available.
 - The current repository does not implement authentication, authorization, or multi-user collaboration.
 

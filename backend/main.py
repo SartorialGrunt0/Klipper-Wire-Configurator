@@ -14,34 +14,28 @@ from api.printer_memory_routes import router as printer_memory_router
 from api.macro_log_routes import router as macro_log_router
 from mcp_server import McpServer, get_index
 from services.mainsail_sidebar import self_heal_sidebar
-from services.native_services import is_native_platform
+from services.native_services import is_native_platform, OFF_HOST_WARNING
 from fastapi.responses import JSONResponse
 
 
-def _assert_native_platform() -> None:
-    """Fail fast: KWC is a printer-host (Linux) application.
+def _warn_off_host() -> None:
+    """Boot-anywhere contract: warn once, never refuse.
 
-    Every per-route ``is_native_platform()`` guard was removed on the
-    strength of this assertion, so it is load-bearing — not a convenience
-    check. It runs before any router is mounted and before PROJECTS_DIR is
-    created, which is what makes the unguarded native routes safe. Modules
-    imported above may still have done side-effectful work by then —
-    api.ai_routes builds the MCP doc index and opens the AI chat log at
-    import time — so off-Linux the refusal can arrive slightly late, not
-    before the very first byte of import.
-
-    ``KWC_FAKE_NATIVE`` stays the supported Windows/macOS dev path (all three
-    dev scripts — start-dev.sh / .ps1 / .bat — export it); it is a dev
-    override, not an escape hatch for shipping a non-Linux deployment.
+    KWC's product surface is the Linux printer host, but every native
+    service degrades defensively off-host — empty device lists from the
+    missing /sys/class/net and dev globs, 503 from the missing Klipper
+    socket, no firmware checkouts — so a non-Linux boot is a legitimate
+    dev run. What was retired is the old dual browser/native MODE, and
+    with it any need for an override variable: this one warning is the
+    ONLY platform decision in the process, and no router is gated on it
+    (locked by tests/test_no_platform_guards.py). Runs before any router
+    is mounted.
     """
     if not is_native_platform():
-        raise SystemExit(
-            "KWC requires Linux — normally the Klipper printer host. "
-            "On Windows/macOS: set KWC_FAKE_NATIVE=1 (see start-dev.ps1)."
-        )
+        print(f"[startup] Warning: {OFF_HOST_WARNING}")
 
 
-_assert_native_platform()
+_warn_off_host()
 
 
 @asynccontextmanager

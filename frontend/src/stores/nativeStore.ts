@@ -26,9 +26,9 @@ interface NativeStore {
 
 /**
  * Printer-host state. There is no "am I native?" flag any more: the backend
- * refuses to start off-Linux (main._assert_native_platform), so every action
- * here is unconditionally available and simply finds nothing on a host with
- * no printer attached.
+ * boots on every OS (main._warn_off_host warns once off a Linux printer
+ * host), so every action here is unconditionally available and simply finds
+ * nothing off-host or with no printer attached.
  */
 export const useNativeStore = create<NativeStore>((set) => ({
   configPath: '/home/pi/printer_data/config',
