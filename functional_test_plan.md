@@ -122,7 +122,7 @@ Expected result:
 Requirements: REQ-NATIVE-01, REQ-NATIVE-02, REQ-NATIVE-03, REQ-NATIVE-04, REQ-NATIVE-05, REQ-NATIVE-06, REQ-NATIVE-07
 
 Preconditions:
-1. Run the backend on the Linux printer host — or, for development only, set `KWC_FAKE_NATIVE=1` (`start-dev.ps1 -FakeNative` exports it; the switch is required on a Windows/macOS dev box); without it a non-Linux backend exits at startup.
+1. Run the backend on the Linux printer host — or, for development only, let a start-up script export `KWC_FAKE_NATIVE=1` (`start-dev.sh` / `.ps1` / `.bat` all do); without it a non-Linux backend exits at startup.
 2. Point the config path at a test Klipper config directory.
 
 Procedure:

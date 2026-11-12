@@ -11,7 +11,7 @@ Klipper Wire Configurator is a browser-based editor for Klipper configuration pr
 ## Supported Operating Modes
 
 - Printer-host mode: the only supported deployment. The backend runs on the Klipper host (Linux) and serves the frontend; the UI has direct file access, device discovery, layout persistence, Klipper restart/status checks, and firmware tooling. A non-Linux backend exits at startup with a message naming `KWC_FAKE_NATIVE`.
-- Development mode: the frontend runs under Vite and the backend under FastAPI/Uvicorn; frontend reference assets are generated before `dev` and `build` runs. On a Windows/macOS dev box, `KWC_FAKE_NATIVE=1` satisfies the host check — `start-dev.ps1 -FakeNative` exports it (the switch is required; without it the backend exits at startup). It is a dev override, not a deployment mode.
+- Development mode: the frontend runs under Vite and the backend under FastAPI/Uvicorn; frontend reference assets are generated before `dev` and `build` runs. Off the printer host, `KWC_FAKE_NATIVE=1` satisfies the host check — `start-dev.sh`, `start-dev.ps1` and `start-dev.bat` export it for you, and all three wait for `GET /health` before reporting the stack up. It is a dev override, not a deployment mode. `KWC_RELOAD=1` enables uvicorn's reloader for backend work; it belongs on the printer host only, because off Linux the reloader's supervisor would outlive the child that refuses to start.
 
 ## Capability Legend
 
