@@ -53,4 +53,15 @@ describe('saveNativeLayout keepalive', () => {
     expect(calls).toHaveLength(1);
     expect(calls[0].init?.keepalive).toBeUndefined();
   });
+
+  it('measures the cap in encoded BYTES, not UTF-16 code units', async () => {
+    const calls = stubFetch();
+
+    // 40 000 two-byte chars: body.length says 40k ("fits"), UTF-8 says ~80k.
+    // keepalive would throw in the browser, so it must be dropped here.
+    await saveNativeLayout({ blob: 'ф'.repeat(40_000) }, { keepalive: true });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].init?.keepalive).toBeUndefined();
+  });
 });
