@@ -1454,10 +1454,28 @@ function DevicePicker({
     }
   }, [devices, devicesLoading, refreshDevices]);
 
-  if (!devices) return null;
-
   const deviceType = DEVICE_PARAM_MAP[paramKey];
   if (!deviceType) return null;
+
+  if (!devices) {
+    // A failed scan leaves devices null forever (the latch above means nothing
+    // retries on its own), and hiding the row reads as "this field has no
+    // picker". Offer the manual path — refreshDevices() is not latch-gated.
+    if (autoRefreshDone.current) {
+      return (
+        <div className="mt-1">
+          <button
+            onClick={() => refreshDevices()}
+            disabled={devicesLoading}
+            className="w-full px-2 py-1 rounded text-[10px] bg-[var(--color-bg-tertiary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)] transition-colors"
+          >
+            {devicesLoading ? 'Scanning devices…' : 'Device scan failed — Retry'}
+          </button>
+        </div>
+      );
+    }
+    return null;
+  }
 
   // For serial param: show USB or UART devices depending on comm type
   if (paramKey === 'serial') {
