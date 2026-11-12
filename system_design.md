@@ -189,9 +189,9 @@ Key maintenance point:
 | Save to Host | [frontend/src/components/dialogs/ApplyDialog.tsx](frontend/src/components/dialogs/ApplyDialog.tsx) | `/api/native/apply` and `/api/native/klipper/firmware-restart` in [backend/api/native_routes.py](backend/api/native_routes.py) |
 | Revert | [frontend/src/components/dialogs/RevertDialog.tsx](frontend/src/components/dialogs/RevertDialog.tsx) | Discards the buffer and re-reads every touched file from disk through `/api/native/config-files/read` |
 
-### 6.7 Native mode and persistence
+### 6.7 Printer-host persistence
 
-1. Native capability is detected in [backend/services/native_services.py](backend/services/native_services.py).
+1. The host check is the startup contract in [backend/main.py](backend/main.py) (`_assert_native_platform`, with the same shape in `mcp_server.run_stdio`); `is_native_platform()` lives in [backend/services/native_services.py](backend/services/native_services.py) and is consulted only there. There is no runtime "am I native?" detection.
 2. The frontend keeps native state in [frontend/src/stores/nativeStore.ts](frontend/src/stores/nativeStore.ts).
 3. Layout and settings are stored via `/api/native/layout` and `/api/native/settings` in JSON files under the native app state directory.
 4. Warning acknowledgements are stored separately by [backend/services/warning_acknowledgments.py](backend/services/warning_acknowledgments.py).

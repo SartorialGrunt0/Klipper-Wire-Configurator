@@ -23,8 +23,12 @@ def _assert_native_platform() -> None:
 
     Every per-route ``is_native_platform()`` guard was removed on the
     strength of this assertion, so it is load-bearing — not a convenience
-    check. It runs before any router is mounted, which is what makes the
-    unguarded native routes safe.
+    check. It runs before any router is mounted and before PROJECTS_DIR is
+    created, which is what makes the unguarded native routes safe. Modules
+    imported above may still have done side-effectful work by then —
+    api.ai_routes builds the MCP doc index and opens the AI chat log at
+    import time — so off-Linux the refusal can arrive slightly late, not
+    before the very first byte of import.
 
     ``KWC_FAKE_NATIVE`` stays the supported Windows/macOS dev path (all three
     dev scripts — start-dev.sh / .ps1 / .bat — export it); it is a dev

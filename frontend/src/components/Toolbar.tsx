@@ -348,7 +348,7 @@ export default function Toolbar({
         </button>
       )}
 
-      {/* Revert Changes (native or when originals exist) */}
+      {/* Revert Changes (only when originals exist) */}
       {showRevertButton && (
         <button
           onClick={() => setShowRevert(true)}

@@ -1,13 +1,15 @@
 """Resolve which Klipper doc sources KWC serves.
 
-Hard failover, single source: when KWC is NATIVELY deployed on the printer host (the
-app's system config path exists — the same marker routes.py uses) and an
-installed Klipper repo with a docs/ directory is found (env
+Hard failover, single source: when KWC is natively deployed on the printer
+host (the app's system config path exists — the only native signal left, as
+the startup contract in main.py already guarantees Linux) and an installed
+Klipper repo with a docs/ directory is found (env
 KWC_KLIPPER_DIR, then common install paths), the docs are served from THAT
 repo — they track the installed firmware version, which is the version the
-user's config must match. Otherwise (dev checkout, Windows, no marker) we
-fall back to the bundled copies in reference/. The env override
-KWC_KLIPPER_DIR always wins so a dev box can point at a specific checkout.
+user's config must match. Otherwise (dev checkout or fake-native dev box
+without the marker dir) we fall back to the bundled copies in reference/.
+The env override KWC_KLIPPER_DIR always wins so a dev box can point at a
+specific checkout.
 
 KWC-authored docs always load alongside from reference/kwc_docs/ (they are
 not duplicates of official docs, so they do not break the single-source
