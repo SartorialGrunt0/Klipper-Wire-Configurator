@@ -145,7 +145,7 @@ def test_build_route_does_not_block_concurrent_status(monkeypatch):
         with httpx.Client(base_url=base_url) as probe:
             while True:
                 try:
-                    if probe.get('/api/native/status').status_code in (200, 501):
+                    if probe.get('/api/native/status').status_code == 200:
                         break
                 except Exception:
                     pass

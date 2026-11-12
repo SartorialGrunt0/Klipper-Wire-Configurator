@@ -1,7 +1,7 @@
 """Tests for the main config editor API routes (api/routes.py).
 
 Covers import/parse, validate, export, generate, examples, reference docs,
-schema lookup, project persistence, config saving, and warning
+schema lookup, project persistence, and warning
 acknowledgements — the core workflow endpoints the frontend uses.
 """
 import re
