@@ -3,10 +3,17 @@
 
 param(
     [switch]$StopExisting,
-    # Kept for compatibility: fake-native is now the default, so this is a no-op.
+    # Accepted so pre-retirement invocations keep working; fake-native is the
+    # default, so it only prints a notice (see the check below).
     [switch]$FakeNative,
+    # Opt out of the dev override: with this set the backend exercises the
+    # real startup contract and refuses to start off Linux.
     [switch]$NoFakeNative
 )
+
+if ($FakeNative) {
+    Write-Host '-FakeNative is unnecessary: fake-native is the default (it is only accepted for compatibility).' -ForegroundColor DarkGray
+}
 
 
 Write-Host 'Starting Klipper Wire Configurator...' -ForegroundColor Cyan
@@ -15,6 +22,10 @@ $rootDir = $PSScriptRoot
 if (-not $rootDir) { $rootDir = Get-Location }
 $backendDir = Join-Path $rootDir 'backend'
 $frontendDir = Join-Path $rootDir 'frontend'
+
+# The backend honors KWC_PORT (REQ-PLAT-03); the health wait and the conflict
+# pre-check must watch the same port the child will bind, not a hardcoded one.
+$kwcPort = if ($env:KWC_PORT) { [int]$env:KWC_PORT } else { 8099 }
 
 # KWC only runs on the Linux printer host: off Linux the backend exits at
 # startup unless KWC_FAKE_NATIVE is set (see backend/main.py). Fake-native is
@@ -173,7 +184,7 @@ function Resolve-CommandPath {
     throw "Unable to resolve any of these commands: $($CommandNames -join ', ')"
 }
 
-foreach ($port in 8099, 5173) {
+foreach ($port in $kwcPort, 5173) {
     $listener = Get-PortListenerInfo -Port $port
     if (-not $listener) {
         continue
@@ -193,7 +204,7 @@ $frontendProcess = $null
 
 try {
     # Start Backend (FastAPI on port 8099)
-    Write-Host 'Starting backend (FastAPI on port 8099)...' -ForegroundColor Green
+    Write-Host "Starting backend (FastAPI on port $kwcPort)..." -ForegroundColor Green
     $venvPython = Join-Path $backendDir 'venv\Scripts\python.exe'
     if (-not (Test-Path $venvPython)) {
         Write-Host 'Creating backend venv...' -ForegroundColor Yellow
@@ -219,7 +230,7 @@ try {
 
     # Wait for the backend to actually answer. A fixed sleep only pretends to:
     # the process can be dead and this script used to announce success anyway.
-    $healthUrl = 'http://127.0.0.1:8099/health'
+    $healthUrl = "http://127.0.0.1:$kwcPort/health"
     $backendUp = $false
     $deadline = (Get-Date).AddSeconds(60)
     while ((Get-Date) -lt $deadline) {
@@ -251,6 +262,10 @@ try {
     Push-Location $frontendDir
     try {
         & $npmPath install
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host 'npm install failed - fix it and run this script again.' -ForegroundColor Red
+            exit 1
+        }
     }
     finally {
         Pop-Location
@@ -261,9 +276,9 @@ try {
     Start-Sleep -Seconds 3
 
     Write-Host ''
-    Write-Host 'Both servers started successfully!' -ForegroundColor Green
+    Write-Host "Backend verified on port $kwcPort; frontend launched - give Vite a moment to bind 5173." -ForegroundColor Green
     Write-Host ''
-    Write-Host 'Backend:  http://localhost:8099' -ForegroundColor Cyan
+    Write-Host "Backend:  http://localhost:$kwcPort" -ForegroundColor Cyan
     Write-Host 'Frontend: http://localhost:5173' -ForegroundColor Cyan
     Write-Host ''
     Write-Host 'Opening browser...' -ForegroundColor Green

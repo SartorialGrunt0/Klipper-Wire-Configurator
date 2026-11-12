@@ -8,6 +8,7 @@ REM KWC only runs on the Linux printer host: off Linux the backend exits at
 REM startup unless KWC_FAKE_NATIVE is set (see backend\main.py). Fake-native is
 REM the dev override, not a deployment mode; on Linux it is already a no-op.
 set KWC_FAKE_NATIVE=1
+if "%KWC_PORT%"=="" set KWC_PORT=8099
 
 echo.
 echo Starting Klipper Wire Configurator...
@@ -17,8 +18,18 @@ set ROOT_DIR=%~dp0
 set BACKEND_DIR=%ROOT_DIR%backend
 set FRONTEND_DIR=%ROOT_DIR%frontend
 
-REM Start Backend (FastAPI on port 8099)
-echo Starting backend (FastAPI on port 8099)...
+REM Pre-flight: a backend orphaned by a previous failed run answers the health
+REM check below, so this script could report "success" while its own child
+REM died of "address in use". Refuse to start against an occupied port instead.
+powershell -NoProfile -Command "if (Get-NetTCPConnection -LocalPort %KWC_PORT% -State Listen -ErrorAction SilentlyContinue) { exit 1 }"
+if errorlevel 1 (
+    echo ERROR: port %KWC_PORT% is already in use - a backend from a previous run is probably still listening.
+    echo Close it, or use start-dev.ps1 -StopExisting, then run this script again.
+    exit /b 1
+)
+
+REM Start Backend (FastAPI on the dev port)
+echo Starting backend (FastAPI on port %KWC_PORT%)...
 if not exist "%BACKEND_DIR%\venv\Scripts\python.exe" (
     echo Creating backend venv...
     cd /d "%BACKEND_DIR%"
@@ -34,11 +45,13 @@ start "Klipper Wire Configurator - Backend" cmd /k cd /d "%BACKEND_DIR%" ^&^& ve
 REM Wait for the backend to actually answer. A fixed timeout only pretends to:
 REM the process can be dead and this script used to announce success anyway.
 echo Waiting for the backend to answer...
-powershell -NoProfile -Command "$deadline=(Get-Date).AddSeconds(60); $ok=$false; while ((Get-Date) -lt $deadline) { try { $r=Invoke-WebRequest -Uri 'http://127.0.0.1:8099/health' -UseBasicParsing -TimeoutSec 2; if ($r.StatusCode -eq 200) { $ok=$true; break } } catch {} ; Start-Sleep -Milliseconds 500 }; if (-not $ok) { exit 1 }"
+powershell -NoProfile -Command "$deadline=(Get-Date).AddSeconds(60); $ok=$false; while ((Get-Date) -lt $deadline) { try { $r=Invoke-WebRequest -Uri 'http://127.0.0.1:%KWC_PORT%/health' -UseBasicParsing -TimeoutSec 2; if ($r.StatusCode -eq 200) { $ok=$true; break } } catch {} ; Start-Sleep -Milliseconds 500 }; if (-not $ok) { exit 1 }"
 if errorlevel 1 (
     echo.
-    echo ERROR: the backend did not answer http://127.0.0.1:8099/health within 60s.
+    echo ERROR: the backend did not answer http://127.0.0.1:%KWC_PORT%/health within 60s.
     echo Check the "Klipper Wire Configurator - Backend" window for the error.
+    REM Don't leave that window's python holding the port for the next run.
+    taskkill /FI "WINDOWTITLE eq Klipper Wire Configurator - Backend*" /T /F >nul 2>&1
     exit /b 1
 )
 
@@ -47,15 +60,19 @@ echo Starting frontend (Vite on port 5173)...
 echo Installing frontend dependencies...
 cd /d "%FRONTEND_DIR%"
 npm install
+if errorlevel 1 (
+    echo ERROR: npm install failed - fix it and run this script again.
+    exit /b 1
+)
 start "Klipper Wire Configurator - Frontend" cmd /k cd /d "%FRONTEND_DIR%" ^&^& npm run dev
 
 REM Wait a moment for frontend to start
 timeout /t 3 /nobreak
 
 echo.
-echo Both servers started successfully!
+echo Backend verified on port %KWC_PORT%; frontend launched - watch the Vite window until it serves.
 echo.
-echo Backend:  http://localhost:8099
+echo Backend:  http://localhost:%KWC_PORT%
 echo Frontend: http://localhost:5173
 echo.
 echo Opening browser...

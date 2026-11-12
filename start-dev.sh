@@ -21,8 +21,8 @@ echo ""
 echo "Starting Klipper Wire Configurator..."
 echo ""
 
-# Start Backend (FastAPI on port 8099)
-echo "Starting backend (FastAPI on port 8099)..."
+# Start Backend (FastAPI on the dev port)
+echo "Starting backend (FastAPI on port ${KWC_PORT})..."
 if [ ! -f "$BACKEND_DIR/venv/bin/python" ]; then
     echo "Creating backend venv..."
     cd "$BACKEND_DIR"
@@ -41,6 +41,13 @@ echo "Refreshing backend Python dependencies..."
 venv/bin/pip install -r requirements.txt
 venv/bin/python main.py &
 BACKEND_PID=$!
+
+# Register cleanup BEFORE the first early exit: from this point on a health
+# failure (or Ctrl+C during the wait) must take the backend down with it, or
+# it is orphaned holding the port and the next run's health wait gets answered
+# by the stale process. FRONTEND_PID is expanded at trap time, so it is
+# included once the frontend exists.
+trap 'echo ""; echo "Stopping servers..."; kill "$BACKEND_PID" ${FRONTEND_PID:+"$FRONTEND_PID"} 2>/dev/null || true; echo "Servers stopped."' EXIT
 
 # Wait for the backend to actually answer. A fixed sleep only pretends to: the
 # process can be dead and this script used to announce success anyway.
@@ -73,9 +80,9 @@ FRONTEND_PID=$!
 sleep 3
 
 echo ""
-echo "Both servers started successfully!"
+echo "Backend verified on port ${KWC_PORT}; frontend launched - watch the Vite output until it serves."
 echo ""
-echo "Backend:  http://localhost:8099"
+echo "Backend:  http://localhost:${KWC_PORT}"
 echo "Frontend: http://localhost:5173"
 echo ""
 
@@ -89,6 +96,5 @@ fi
 echo "Press Ctrl+C to stop both servers."
 echo ""
 
-# Wait and clean up on exit
-trap "echo ''; echo 'Stopping servers...'; kill $BACKEND_PID $FRONTEND_PID 2>/dev/null; echo 'Servers stopped.'" EXIT
+# Cleanup runs via the EXIT trap registered right after the backend launch.
 wait
