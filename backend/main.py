@@ -26,9 +26,9 @@ def _assert_native_platform() -> None:
     check. It runs before any router is mounted, which is what makes the
     unguarded native routes safe.
 
-    ``KWC_FAKE_NATIVE`` stays the supported Windows/macOS dev path
-    (start-dev.ps1 sets it); it is a dev override, not an escape hatch
-    for shipping a non-Linux deployment.
+    ``KWC_FAKE_NATIVE`` stays the supported Windows/macOS dev path (all three
+    dev scripts — start-dev.sh / .ps1 / .bat — export it); it is a dev
+    override, not an escape hatch for shipping a non-Linux deployment.
     """
     if not is_native_platform():
         raise SystemExit(

@@ -3,7 +3,9 @@
 
 param(
     [switch]$StopExisting,
-    [switch]$FakeNative
+    # Kept for compatibility: fake-native is now the default, so this is a no-op.
+    [switch]$FakeNative,
+    [switch]$NoFakeNative
 )
 
 
@@ -14,13 +16,18 @@ if (-not $rootDir) { $rootDir = Get-Location }
 $backendDir = Join-Path $rootDir 'backend'
 $frontendDir = Join-Path $rootDir 'frontend'
 
-# REQUIRED on Windows/macOS: KWC only runs on the Linux printer host, and the
-# backend exits at startup without KWC_FAKE_NATIVE (see backend/main.py). This
-# is the dev override, not a deployment mode.
-$oldKwcFake = $null
-if ($FakeNative) {
-    Write-Host 'Faking native device environment (KWC_FAKE_NATIVE=1).' -ForegroundColor Yellow
-    $oldKwcFake = $env:KWC_FAKE_NATIVE
+# KWC only runs on the Linux printer host: off Linux the backend exits at
+# startup unless KWC_FAKE_NATIVE is set (see backend/main.py). Fake-native is
+# therefore the default here — it is the dev override, not a deployment mode.
+# is_native_platform() is its ONLY consumer (backend/services/native_services.py)
+# and on Linux it is already true, so exporting it is a no-op on the host and
+# required everywhere else.
+$oldKwcFake = $env:KWC_FAKE_NATIVE
+if ($NoFakeNative) {
+    Remove-Item Env:KWC_FAKE_NATIVE -ErrorAction SilentlyContinue
+    Write-Host 'FakeNative disabled (-NoFakeNative) — the backend will refuse to start off Linux.' -ForegroundColor Yellow
+}
+else {
     $env:KWC_FAKE_NATIVE = '1'
 }
 
@@ -208,17 +215,33 @@ try {
     finally {
         Pop-Location
     }
-    if ($FakeNative) {
-        Write-Host 'FakeNative mode enabled — backend will report as native platform.' -ForegroundColor Magenta
-        $env:KWC_FAKE_NATIVE = '1'
-    }
     $backendProcess = Start-Process -FilePath $venvPython -ArgumentList 'main.py' -WorkingDirectory $backendDir -WindowStyle Hidden -PassThru
-    if ($FakeNative) {
-        Remove-Item Env:KWC_FAKE_NATIVE -ErrorAction SilentlyContinue
-    }
 
-    # Give backend a moment to start
-    Start-Sleep -Seconds 2
+    # Wait for the backend to actually answer. A fixed sleep only pretends to:
+    # the process can be dead and this script used to announce success anyway.
+    $healthUrl = 'http://127.0.0.1:8099/health'
+    $backendUp = $false
+    $deadline = (Get-Date).AddSeconds(60)
+    while ((Get-Date) -lt $deadline) {
+        if ($backendProcess.HasExited) { break }
+        try {
+            $response = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 2
+            if ($response.StatusCode -eq 200) { $backendUp = $true; break }
+        }
+        catch { }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $backendUp) {
+        if ($backendProcess.HasExited) {
+            Write-Host "Backend exited during startup (exit code $($backendProcess.ExitCode))." -ForegroundColor Red
+        }
+        else {
+            Write-Host "Backend did not answer $healthUrl within 60s." -ForegroundColor Red
+        }
+        Write-Host 'Run backend\main.py directly to see its error output.' -ForegroundColor Yellow
+        exit 1
+    }
+    Write-Host "Backend is answering on $healthUrl." -ForegroundColor Green
 
     # Start Frontend (Vite on port 5173)
     Write-Host 'Starting frontend (Vite on port 5173)...' -ForegroundColor Green
@@ -260,13 +283,11 @@ finally {
     if ($backendProcess) {
         Stop-ProcessTree -ProcessId $backendProcess.Id
     }
-    if ($FakeNative) {
-        if ($null -ne $oldKwcFake) {
-            $env:KWC_FAKE_NATIVE = $oldKwcFake
-        }
-        else {
-            Remove-Item Env:\KWC_FAKE_NATIVE -ErrorAction SilentlyContinue
-        }
+    if ($null -ne $oldKwcFake) {
+        $env:KWC_FAKE_NATIVE = $oldKwcFake
+    }
+    else {
+        Remove-Item Env:\KWC_FAKE_NATIVE -ErrorAction SilentlyContinue
     }
     Write-Host 'Servers stopped.' -ForegroundColor Yellow
 }

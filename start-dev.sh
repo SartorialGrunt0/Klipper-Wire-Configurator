@@ -8,6 +8,15 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$ROOT_DIR/backend"
 FRONTEND_DIR="$ROOT_DIR/frontend"
 
+# KWC only runs on the Linux printer host: off Linux the backend exits at
+# startup unless KWC_FAKE_NATIVE is set (see backend/main.py). Fake-native is
+# the dev override, not a deployment mode — and on Linux it is already a no-op,
+# because is_native_platform() is its only consumer.
+export KWC_FAKE_NATIVE=1
+
+KWC_PORT="${KWC_PORT:-8099}"
+HEALTH_URL="http://127.0.0.1:${KWC_PORT}/health"
+
 echo ""
 echo "Starting Klipper Wire Configurator..."
 echo ""
@@ -33,8 +42,24 @@ venv/bin/pip install -r requirements.txt
 venv/bin/python main.py &
 BACKEND_PID=$!
 
-# Give backend a moment to start
-sleep 2
+# Wait for the backend to actually answer. A fixed sleep only pretends to: the
+# process can be dead and this script used to announce success anyway.
+backend_up=0
+for _ in $(seq 1 60); do
+    if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+        break
+    fi
+    if curl -fsS --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
+        backend_up=1
+        break
+    fi
+    sleep 1
+done
+if [ "$backend_up" -ne 1 ]; then
+    echo "Backend did not answer ${HEALTH_URL} — check its output above." >&2
+    exit 1
+fi
+echo "Backend is answering on ${HEALTH_URL}."
 
 # Start Frontend (Vite on port 5173)
 echo "Starting frontend (Vite on port 5173)..."
