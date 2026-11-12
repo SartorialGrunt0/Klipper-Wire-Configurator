@@ -358,15 +358,33 @@ export function applySavedEdgeLayout(
 }
 
 /** Read the saved layout from the backend (layout.json on the printer host).
- *  Returns null when absent or unreadable — callers keep auto-arranged
- *  positions. */
-export async function loadSavedLayout(): Promise<SavedLayout | null> {
+ *  Distinguishes the three outcomes: content, "nothing saved yet" (the host
+ *  answers with a null payload), and "the read failed". The last two must not
+ *  be collapsed at startup — after a failed read the app has to skip layout
+ *  autosave, or it POSTs the auto-arranged graph over the real layout.json
+ *  with no local copy to recover from. */
+export type LayoutReadOutcome =
+  | { status: 'ok'; layout: SavedLayout }
+  | { status: 'absent' }
+  | { status: 'error' };
+
+export async function readSavedLayout(): Promise<LayoutReadOutcome> {
+  let res: { layout: unknown | null };
   try {
-    const res = await api.loadNativeLayout();
-    return normalizeSavedLayout(res.layout);
+    res = await api.loadNativeLayout();
   } catch {
-    return null;
+    return { status: 'error' };
   }
+  if (res.layout == null) return { status: 'absent' };
+  return { status: 'ok', layout: normalizeSavedLayout(res.layout) };
+}
+
+/** Read the saved layout, or null when absent or unreadable — callers keep
+ *  auto-arranged positions. Use readSavedLayout when a failed read must be
+ *  told apart from an absent one. */
+export async function loadSavedLayout(): Promise<SavedLayout | null> {
+  const outcome = await readSavedLayout();
+  return outcome.status === 'ok' ? outcome.layout : null;
 }
 
 /**
