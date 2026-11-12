@@ -5,7 +5,7 @@ import { useMacroDesignerStore } from '../../stores/macroDesignerStore';
 import { useNativeStore } from '../../stores/nativeStore';
 import * as api from '../../services/api';
 import { buildProjectGraph } from '../../utils/graphBuilder';
-import { restoreLayoutAfterRebuild } from '../../utils/layoutPersistence';
+import { buildLayoutPayload, restoreLayoutAfterRebuild } from '../../utils/layoutPersistence';
 import { discardReview } from '../../services/changeSetReview';
 import type { ConfigFile, ValidationResult } from '../../types/config';
 import Modal from '../Modal';
@@ -25,11 +25,9 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
     macroDesignerStore.clearPersistedState();
 
     const graphState = useGraphStore.getState();
-    await api.saveNativeLayout({
-      graphNodes: graphState.nodes,
-      graphEdges: graphState.edges,
-      macroDesigner: macroDesignerStore.exportPersistedState(),
-    }).catch(() => {});
+    await api.saveNativeLayout(
+      buildLayoutPayload(graphState.nodes, graphState.edges, macroDesignerStore.exportPersistedState()),
+    ).catch(() => {});
   }, []);
 
   const handleRevert = useCallback(async () => {
