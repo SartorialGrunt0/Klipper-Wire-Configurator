@@ -354,6 +354,18 @@ class ChatRequest(BaseModel):
     # None/False = the model must call load_skill to unlock the write
     # tools.
     editSkill: bool | None = None
+    # Sticky per-conversation skill activation (W0): derived by the CLIENT
+    # from its stored tool trace (frontend/src/utils/chatSkillTrace.ts) —
+    # True means load_skill('config-editing') actually ran in THIS
+    # conversation. The frontend's lean replay strips native tool_calls, so
+    # without this flag the gate re-closes on every follow-up turn and the
+    # model continues cold (no write tools, no rulebook — the confabulation
+    # setup). Conversation-scoped (derived per send from the conversation's
+    # own trace, never a global setting); when True, the request STARTS with
+    # the skill active and the skill body re-injects as a trailing system
+    # message (atomic armament: tools and body always move together). The
+    # harness editSkill override above still wins.
+    editSkillLoaded: bool = False
     # Approval-gate override (harness A/B runs ONLY; the frontend never
     # sends it). INERT since the post-hoc review change (2026-10-02):
     # nothing in the edit path suspends, so there is no wait to skip and
@@ -923,7 +935,8 @@ def _prepare_messages(messages: list[dict],
                       skill_active: bool = False,
                       native_mode: bool = False,
                       context_files: dict | None = None,
-                      context_references: list | None = None) -> list[dict]:
+                      context_references: list | None = None,
+                      inject_edit_skill_body: bool = False) -> list[dict]:
     """Build a clean system prompt with MCP tool descriptions, printer memory,
     and user messages.
     """
@@ -1082,12 +1095,27 @@ def _prepare_messages(messages: list[dict],
         [{"role": "system", "content": references_text}] if references_text else []
     )
 
+    # W0 sticky skill armament (Invariant B — trailing injection): while the
+    # conversation has earned the edit surface, the skill body re-rides every
+    # request as a trailing system message at this same seam. Appending (like
+    # the references) keeps the replayed prefix byte-identical for the KV
+    # cache, and trailing placement means head-truncation clips chat, never
+    # the rulebook. Idempotent: a trail that already carries the body (this
+    # turn's or a prior turn's load_skill result) gets no second copy.
+    # Invariant A pairs this with the write-tool advertisement — the caller
+    # only sets the flag when the effective skill state is active, so tools
+    # and body always move together.
+    skill_body_messages: list[dict] = []
+    if inject_edit_skill_body and not _edit_skill_body_in_trail(messages):
+        skill_body_messages = [{"role": "system", "content": _edit_skill_body()}]
+
     if prepared:
         return [
             *([] if no_system else [{"role": "system", "content": system_text}]),
             *prepared,
             *([] if (minimal or no_system) else [{"role": "system", "content": task_anchor}]),
             *([] if (minimal or no_system) else reference_messages),
+            *([] if (minimal or no_system) else skill_body_messages),
         ]
     return ([] if no_system else [{"role": "system", "content": system_text}]) + prepared
 
@@ -1470,7 +1498,13 @@ def _memory_skill_body() -> str:
 def _load_skill_active(messages: list[dict]) -> bool:
     """True once the model has actually invoked load_skill in this
     conversation. Mechanical evidence only (tool-result markers / echoed
-    native tool_calls) — never keyword heuristics."""
+    native tool_calls) — never keyword heuristics.
+
+    Follow-up turns from the frontend now carry the client-derived
+    editSkillLoaded flag instead (W0 sticky activation: the lean replay
+    strips native tool_calls, so this scan sees nothing on replayed
+    trails). This scan STAYS — the text protocol writes its tool-result
+    marker into content, and harness arms still rely on it."""
     for msg in messages:
         if str(msg.get("role", "")) not in ("user", "assistant"):
             continue
@@ -1495,6 +1529,23 @@ def _load_skill_active(messages: list[dict]) -> bool:
             if not name or name == EDIT_SKILL_NAME:
                 return True
     return False
+
+
+# The skill body in text: its own first line (native echoes and re-injected
+# bodies) or the text-protocol tool-result marker (which wraps the body).
+_EDIT_SKILL_TRAIL_RE = re.compile(
+    r"Skill '" + re.escape(EDIT_SKILL_NAME) + r"' loaded"
+    r"|\[Tool result: load_skill\(name=?['\"]?" + re.escape(EDIT_SKILL_NAME)
+)
+
+
+def _edit_skill_body_in_trail(messages: list[dict]) -> bool:
+    """True when the trail already carries the edit-skill body — either the
+    body's own first line or the text-protocol result marker. Keeps the W0
+    re-injection idempotent: the body rides the prompt exactly once per
+    conversation, from whichever source arrived first."""
+    return any(_EDIT_SKILL_TRAIL_RE.search(str(m.get("content", "")))
+               for m in messages)
 
 
 def _build_mcp_tool_context(edit_capable: bool = False, *,
@@ -3532,7 +3583,14 @@ async def chat_proxy(req: ChatRequest):
     # soon as the load_skill result lands. Product behavior since the
     # Phase-6 flag removal (2026-09-24); the harness can force the
     # unlocked arm per request via editSkill=True.
-    _skill_state = {'active': _load_skill_active(req.messages)}
+    _skill_state = {'active': (
+        req.editSkillLoaded or _load_skill_active(req.messages)
+    )}
+    # W0 sticky activation: editSkillLoaded is derived by the client from
+    # this conversation's stored tool trace — the lean replay strips native
+    # tool_calls, so the scan above alone re-closes the gate on every
+    # follow-up turn. The flag only changes the STARTING state of a request;
+    # the mid-loop load_skill handler and _skill_gate_closed stay untouched.
     # Harness A/B: --force-skill-active forces activation evidence WITHOUT
     # requiring a live load_skill call (grades tool-call traces directly).
     if edit_capable and getattr(req, 'editSkill', None) is True:
@@ -3548,6 +3606,12 @@ async def chat_proxy(req: ChatRequest):
                                  skill_active=_skill_state['active'],
                                  context_files=req.contextFiles,
                                  context_references=req.context_references,
+                                 # Invariant A (atomic armament): the body
+                                 # re-injects exactly when this request
+                                 # starts armed with the write surface —
+                                 # active skill state AND a session.
+                                 inject_edit_skill_body=(
+                                     edit_capable and _skill_state['active']),
                                  native_mode=_resolve_native_tools(
                                      req.apiProvider, req.apiUrl, req.toolProtocol,
                                      edit_capable=edit_capable,
