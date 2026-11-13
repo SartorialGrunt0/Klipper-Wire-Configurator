@@ -7,6 +7,8 @@ tools/call, resources, ping).
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 
 import mcp_server  # noqa: E402
@@ -1191,7 +1193,99 @@ def test_validate_macro_unbalanced_jinja(tmp_path):
         "    {% if printer.bed_mesh %}\n"
         "    G28\n"
     )})
-    assert "Unbalanced {% if %}" in out
+    # W1: verdict unchanged (error), wording now comes from the real Jinja
+    # compiler instead of the old substring count.
+    assert "Jinja syntax error" in out
+
+
+def test_validate_macro_commented_jinja_not_counted(tmp_path):
+    """A '#' comment containing '{% if %}' must not report an imbalance.
+
+    The old substring counting scanned raw lines including comments and
+    false-fired here; Klipper strips '#' before templating, so the real
+    compiler sees clean Jinja.
+    """
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro TEST]\n"
+        "description: ok\n"
+        "gcode:\n"
+        "    # {% if printer.x %}\n"
+        "    G28\n"
+        "    G90\n"
+    )})
+    assert "Unbalanced" not in out
+    assert "Jinja syntax error" not in out
+
+
+def test_validate_macro_dashed_block_missing_endif(tmp_path):
+    """'{%- if -%}' (dashed) with no '{% endif %}' is a real syntax error.
+
+    The old check only matched '{% if '/'{%if ' literals and missed the
+    dashed whitespace-control form entirely.
+    """
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro TEST]\n"
+        "gcode:\n"
+        "    {%- if printer.x -%}\n"
+        "    G28\n"
+    )})
+    assert "Jinja syntax error" in out
+    assert "issue(s) found" in out
+
+
+def test_validate_macro_stray_endraw(tmp_path):
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro TEST]\n"
+        "gcode:\n"
+        "    {% endraw %}\n"
+        "    G28\n"
+    )})
+    assert "endraw" in out
+    assert "Jinja syntax error" in out
+
+
+def test_validate_macro_reports_body_line_number(tmp_path):
+    """The compiler's body-relative line rides in the finding."""
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro TEST]\n"
+        "gcode:\n"
+        "    G28\n"
+        "    {% endif %}\n"
+    )})
+    assert "Jinja syntax error" in out
+    assert "line 2" in out
+
+
+@pytest.mark.parametrize("body,expect_error", [
+    ("    G28\n    G90\n", False),
+    ("    {% if printer.x %}\n    G28\n", True),
+    ("    {%- if printer.x -%}\n    G28\n", True),
+    ("    # {% if printer.x %}\n    G28\n", False),
+    ("    {% for i in [1,2] %}\n    M117 hi\n", True),
+    ("    {% raw %}\n    literal {brace}\n", True),
+])
+def test_validate_macro_parity_with_project_validator(tmp_path, body, expect_error):
+    """validate_macro must reach the SAME Jinja verdict as the project
+    validator (which gates save) — one engine, tool never weaker than gate."""
+    from parser.config_parser import parse_config
+    from parser.validator import validate_config
+
+    server, _ = _server(tmp_path)
+    macro_text = "[gcode_macro TEST]\ndescription: parity\n"
+    tool_out = _call_tool(server, "validate_macro", {
+        "macro_text": macro_text + "gcode:\n" + body})
+    tool_bad = "Jinja syntax error" in tool_out
+
+    cfg = parse_config(macro_text + "gcode:\n" + body)
+    result = validate_config(cfg)
+    proj_bad = any("Jinja template error" in e.message for e in result.errors)
+
+    assert tool_bad is expect_error
+    assert proj_bad is expect_error
 
 
 def test_validate_macro_save_restore_state(tmp_path):

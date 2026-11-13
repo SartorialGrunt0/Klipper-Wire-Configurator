@@ -3013,6 +3013,37 @@ class McpServer:
             f"Adjust park coordinates, temperatures, and purge distances to match your printer geometry."
         )
 
+    @staticmethod
+    def _extract_gcode_body(lines: list[str]) -> str | None:
+        """Extract the gcode body text from macro section lines.
+
+        Mirrors how the config parser (and Klipper's configparser) reads a
+        'gcode:' value: an inline value ('gcode: G28') is the whole body;
+        otherwise the body is the indented continuation lines following the
+        bare 'gcode:' key, ending at the first dedented non-blank line.
+        Returns None when there is no 'gcode:' key (a separate finding).
+        """
+        gcode_idx = None
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith("gcode:") or stripped.startswith("gcode :"):
+                gcode_idx = i
+                break
+        if gcode_idx is None:
+            return None
+        inline = lines[gcode_idx].split(":", 1)[1]
+        if inline.strip():
+            return inline
+        body_lines: list[str] = []
+        for line in lines[gcode_idx + 1:]:
+            if not line.strip() or line[:1] in (" ", "\t"):
+                body_lines.append(line)
+            else:
+                break
+        return "\n".join(body_lines)
+
     def _handle_validate_macro(self, args: dict[str, Any]) -> str:
         """Validate a Klipper gcode_macro for common structural issues."""
         macro_text = args.get("macro_text", "")
@@ -3054,24 +3085,26 @@ class McpServer:
             if not has_description:
                 issues.append({"severity": "info", "message": f"Macro '{macro_name}' is missing a 'description:' field. Adding one makes the macro self-documenting."})
 
-        # ── 2. Jinja2 template balance ──
-        # Check {% raw %}...{% endraw %} pairs
-        raw_starts = [i for i, line in enumerate(lines) if "{% raw %}" in line or "{%- raw -%}" in line or "{%raw%}" in line]
-        raw_ends = [i for i, line in enumerate(lines) if "{% endraw %}" in line or "{%- endraw -%}" in line or "{%endraw%}" in line]
-        if len(raw_starts) != len(raw_ends):
-            issues.append({"severity": "error", "message": f"Unbalanced {{% raw %}} / {{% endraw %}} blocks ({len(raw_starts)} starts, {len(raw_ends)} ends)."})
+        # ── 2. Jinja2 template compile (the real Klipper engine) ──
+        # Same env, same Klipper-style comment stripping, same compile entry
+        # as the project validator that gates save (parser/validator.py
+        # _validate_macro_jinja) — imported, not re-implemented, so this tool
+        # can never drift weaker than the save gate. Substring block-counting
+        # (raw/if/for) used to live here: it false-fired on '{% if %}' inside
+        # comments, missed the dashed '{%- if -%}' form, and could not see any
+        # other syntax error. The compiler subsumes all of it and adds
+        # message + body-relative line.
+        from parser.validator import _compile_macro_template, _strip_inline_comments
 
-        # Check {% if %}...{% endif %} pairs (rough count)
-        if_opens = sum(1 for line in lines if "{% if " in line or "{%if " in line)
-        if_closes = sum(1 for line in lines if "{% endif %}" in line or "{%endif%}" in line)
-        if if_opens != if_closes:
-            issues.append({"severity": "error", "message": f"Unbalanced {{% if %}} / {{% endif %}} blocks ({if_opens} opens, {if_closes} closes)."})
-
-        # Check {% for %}...{% endfor %} pairs
-        for_opens = sum(1 for line in lines if "{% for " in line or "{%for " in line)
-        for_closes = sum(1 for line in lines if "{% endfor %}" in line or "{%endfor%}" in line)
-        if for_opens != for_closes:
-            issues.append({"severity": "error", "message": f"Unbalanced {{% for %}} / {{% endfor %}} blocks ({for_opens} opens, {for_closes} closes)."})
+        gcode_body = self._extract_gcode_body(lines)
+        if gcode_body is not None and gcode_body.strip():
+            compile_error = _compile_macro_template(_strip_inline_comments(gcode_body))
+            if compile_error is not None:
+                message, body_lineno = compile_error
+                issues.append({
+                    "severity": "error",
+                    "message": f"Jinja syntax error at gcode body line {body_lineno}: {message}",
+                })
 
         # ── 3. Save/restore state pairing ──
         save_count = len(re.findall(r"SAVE_GCODE_STATE", code_text))
