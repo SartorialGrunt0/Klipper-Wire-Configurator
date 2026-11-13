@@ -780,6 +780,91 @@ def build_macro_questions() -> list[TestQuestion]:
                 ("regex", r"no-?go|zone hit|inside a zone|crosses? a zone"),
             ),
         ),
+        # ── W2 runtime-class questions (2026-11-13) ────────────────────
+        # These pin the defect class the Jinja compiler cannot see: a
+        # macro that COMPILES but renders a broken command at its
+        # default invocation (`SET_LED ... RED=` from an empty params_
+        # default). The write-side question is graded with
+        # staged_renders_clean — the shared render simulator decides,
+        # because "empty default + brace ref" is cross-line and no
+        # staged-text regex can grade it without false-failing the
+        # correct fix (giving the params real defaults). Trident is the
+        # context: its own macro tree simulates error-free, so every
+        # finding is the model's own doing.
+        TestQuestion(
+            qid="MACRO-12",
+            title="Macros: LED toggle renders clean at default run",
+            text=("I want a new macro TOGGLE_LEDS that turns my "
+                  "Chamber_LEDs neopixels on and off, with optional RED, "
+                  "GREEN and BLUE parameters so I can pick the color when "
+                  "they turn on."),
+            context_files=(("printer.cfg", TRIDENT_FILE_LABEL,
+                            _load_trident_config("printer.cfg")),),
+            expected_tools=("validate_macro",),
+            require_tool=False,
+            edit_criteria=(
+                ("staged_renders_clean", "printer\\.cfg"),
+                ("staged_section_regex",
+                 r"printer\.cfg::gcode_macro TOGGLE_LEDS::SET_LED"),
+            ),
+        ),
+        TestQuestion(
+            qid="MACRO-13",
+            title="Macros: spot the empty-render defect (review)",
+            text=("Will this macro work when I run TOGGLE_LEDS with no "
+                  "arguments? Check it and tell me exactly what will "
+                  "happen:\n\n"
+                  "```cfg\n"
+                  "[gcode_macro TOGGLE_LEDS]\n"
+                  "description: toggle chamber leds\n"
+                  "params_RED:\n"
+                  "params_GREEN:\n"
+                  "params_BLUE:\n"
+                  "gcode:\n"
+                  "    SET_LED LED=Chamber_LEDs RED={params.RED} "
+                  "GREEN={params.GREEN} BLUE={params.BLUE}\n"
+                  "```"),
+            expected_tools=("validate_macro",),
+            require_tool=False,
+            criteria=(
+                # The defect is the EMPTY expansion; an answer that
+                # notices must say so in value terms, and localize it —
+                # quoting the broken line. Negative controls ("looks
+                # fine", generic Jinja advice) match neither arm.
+                ("regex", r"(?i)empty|blank|no value|unable to parse|"
+                          r"can.?t (be )?pars|malformed"),
+                ("regex", r"RED=|params\.RED"),
+            ),
+        ),
+        TestQuestion(
+            qid="MACRO-14",
+            title="Macros: live-state read must NOT be flagged (cry-wolf guard)",
+            text=("Does this macro have any problems? Check it before I "
+                  "save it:\n\n"
+                  "```cfg\n"
+                  "[gcode_macro WHERE_ARE_WE]\n"
+                  "description: report toolhead position\n"
+                  "gcode:\n"
+                  "    {% set pos = printer.toolhead.position %}\n"
+                  "    RESPOND TYPE=echo MSG=\"X is {pos.x} mm\"\n"
+                  "```"),
+            expected_tools=("validate_macro",),
+            require_tool=False,
+            criteria=(
+                # printer.toolhead is runtime state — unknown at author
+                # time, which is INFO, never an error. The answer must
+                # confirm the macro is fine; the inverse class to
+                # MACRO-13. Over-flagging pressure on the sim must not
+                # silently turn this question's correct answer into a
+                # defect report.
+                ("regex", r"(?i)\b(fine|correct|valid|looks good|"
+                          r"no (issues|problems|errors)|works|ok)\b"),
+                ("not_contains", "unable to parse"),
+                ("not_contains", "unbalanced"),
+                ("not_contains", "syntax error"),
+                ("not_contains", "renders empty"),
+            ),
+        ),
     ]
 
 
