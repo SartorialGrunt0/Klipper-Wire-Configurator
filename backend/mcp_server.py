@@ -3131,14 +3131,22 @@ class McpServer:
             issues.append({"severity": "error", "message": "Missing or invalid [gcode_macro <name>] header."})
         else:
             macro_name = header_match.group(1)
-            # Check gcode: key
-            for line in lines[1:]:
-                stripped = line.strip()
-                if stripped.startswith("gcode:") or stripped.startswith("gcode :"):
-                    break
-                if stripped and not stripped.startswith("#") and not stripped.startswith("description:"):
-                    issues.append({"severity": "warning", "message": f"Macro '{macro_name}' is missing the 'gcode:' key. A gcode_macro must have a 'gcode:' section with the commands to run."})
-                    break
+            # Check gcode: key — Klipper section keys sit at column 0.
+            # Collect the top-level keys after the header line and test
+            # membership. The previous scan stopped at the first
+            # non-description line (false "missing" warning on the
+            # canonical variable_* toggle pattern — the chat model then
+            # loop-validated the same macro chasing the phantom, MACRO-12
+            # trace) and accepted an indented "gcode:" as a key because it
+            # stripped before checking (missed the real defect).
+            header_line_idx = macro_text[:header_match.start()].count("\n")
+            top_level_keys = set()
+            for line in lines[header_line_idx + 1:]:
+                key_match = re.match(r"([A-Za-z_][A-Za-z0-9_-]*)\s*:", line)
+                if key_match:
+                    top_level_keys.add(key_match.group(1).lower())
+            if "gcode" not in top_level_keys:
+                issues.append({"severity": "warning", "message": f"Macro '{macro_name}' is missing the 'gcode:' key. A gcode_macro must have a 'gcode:' section with the commands to run."})
 
             # Check description:
             has_description = any(line.strip().startswith("description:") for line in lines[1:10])

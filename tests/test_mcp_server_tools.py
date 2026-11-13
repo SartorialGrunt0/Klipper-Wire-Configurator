@@ -1185,6 +1185,50 @@ def test_validate_macro_missing_header(tmp_path):
     assert "issue(s) found" in out
 
 
+def test_validate_macro_variable_lines_before_gcode(tmp_path):
+    # The canonical toggle pattern puts variable_* lines between
+    # description: and gcode:. The old gcode-key scan gave up at the
+    # first non-description line, so this standard shape fired a bogus
+    # "missing the 'gcode:' key" warning — MACRO-12 trace showed the
+    # model loop-validating the same macro 4x chasing that phantom.
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro TOGGLE_LEDS]\n"
+        "description: toggle the chamber leds\n"
+        "variable_leds_on: 0\n"
+        "variable_last_red: 1\n"
+        "gcode:\n"
+        "    {% if printer['gcode_macro TOGGLE_LEDS'].leds_on %}\n"
+        "        SET_LED LED=Chamber_LEDs RED=0 GREEN=0 BLUE=0\n"
+        "    {% endif %}\n"
+    )})
+    assert "missing the 'gcode:' key" not in out
+
+
+def test_validate_macro_gcode_really_missing_still_warns(tmp_path):
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro NO_BODY]\n"
+        "description: nothing to run\n"
+        "variable_x: 1\n"
+    )})
+    assert "missing the 'gcode:' key" in out
+
+
+def test_validate_macro_indented_gcode_still_warns(tmp_path):
+    # Klipper section keys sit at column 0; an indented "gcode:" is not
+    # a key, so the warning must still fire (the fix must not just
+    # substring-search the whole text).
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro BAD_INDENT]\n"
+        "description: wrong\n"
+        "    gcode:\n"
+        "        G28\n"
+    )})
+    assert "missing the 'gcode:' key" in out
+
+
 def test_validate_macro_unbalanced_jinja(tmp_path):
     server, _ = _server(tmp_path)
     out = _call_tool(server, "validate_macro", {"macro_text": (
