@@ -1,7 +1,6 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import { useConfigStore } from '../stores/configStore';
 import { useGraphStore } from '../stores/graphStore';
-import { useNativeStore } from '../stores/nativeStore';
 import { useVisibility } from '../stores/validationSettingsStore';
 import * as api from '../services/api';
 import ConfigReferenceDialog from './dialogs/ConfigReferenceDialog';
@@ -1845,7 +1844,7 @@ function TextEditor({ isActive = true }: { isActive?: boolean }) {
       // The rebuild renumbers node ids — re-apply the saved layout so the
       // new file appears in the user's existing arrangement instead of
       // resetting every card to auto-arranged.
-      await restoreLayoutAfterRebuild(useGraphStore.getState, useNativeStore.getState().isNative);
+      await restoreLayoutAfterRebuild(useGraphStore.getState);
     } catch (err) {
       console.error('Failed to load reference config:', err);
     }

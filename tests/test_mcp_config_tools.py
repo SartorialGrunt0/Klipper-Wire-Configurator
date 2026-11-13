@@ -62,14 +62,7 @@ def test_new_tools_registered():
 # ── validate_config_project ─────────────────────────────────────────────
 
 
-def _force_native(monkeypatch):
-    import services.native_services as ns
-
-    monkeypatch.setattr(ns, "is_native_platform", lambda: True)
-
-
 def test_validate_project_reports_severities(tmp_path, monkeypatch):
-    _force_native(monkeypatch)
     server, config_dir = _server(tmp_path)
     config_dir.mkdir(parents=True)
     (config_dir / "printer.cfg").write_text(
@@ -102,7 +95,6 @@ def test_validate_project_reports_severities(tmp_path, monkeypatch):
 
 
 def test_validate_project_accepts_filenames(tmp_path, monkeypatch):
-    _force_native(monkeypatch)
     server, config_dir = _server(tmp_path)
     config_dir.mkdir(parents=True)
     (config_dir / "printer.cfg").write_text(
@@ -118,7 +110,6 @@ def test_validate_project_accepts_filenames(tmp_path, monkeypatch):
 
 
 def test_validate_project_no_config_dir(tmp_path, monkeypatch):
-    _force_native(monkeypatch)
     server, config_dir = _server(tmp_path)
     out = _call(server, "validate_config_project", {})
     assert "no config files" in out.lower()
@@ -127,19 +118,9 @@ def test_validate_project_no_config_dir(tmp_path, monkeypatch):
 # ── list_connected_devices ──────────────────────────────────────────────
 
 
-def test_list_devices_non_native(tmp_path, monkeypatch):
-    import services.native_services as ns
-
-    monkeypatch.setattr(ns, "is_native_platform", lambda: False)
-    server, _ = _server(tmp_path)
-    out = _call(server, "list_connected_devices", {})
-    assert "only available" in out.lower()
-
-
 def test_list_devices_formats_dropdown_data(tmp_path, monkeypatch):
     import services.native_services as ns
 
-    monkeypatch.setattr(ns, "is_native_platform", lambda: True)
     monkeypatch.setattr(ns, "get_all_devices", lambda: {
         "usb_serial": [{
             "path": "/dev/ttyACM0",
@@ -171,7 +152,6 @@ def test_list_devices_formats_dropdown_data(tmp_path, monkeypatch):
 def test_list_devices_can_scan_toggle(tmp_path, monkeypatch):
     import services.native_services as ns
 
-    monkeypatch.setattr(ns, "is_native_platform", lambda: True)
     monkeypatch.setattr(ns, "get_all_devices", lambda: {
         "usb_serial": [], "uart": [], "can": [{"name": "can0", "state": "down", "bitrate": None}],
     })

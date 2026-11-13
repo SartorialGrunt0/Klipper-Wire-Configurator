@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
 import { useConfigStore } from '../stores/configStore';
-import { useNativeStore } from '../stores/nativeStore';
 import { useAiStore } from '../stores/aiStore';
 import { useUiStore } from '../stores/uiStore';
 import { useMediaQuery, WIDE_VIEWPORT_QUERY } from '../hooks/useMediaQuery';
@@ -136,7 +135,6 @@ export default function Toolbar({
   const dockUsable = showTextView && wideViewport && aiConfigured;
   const [showFlash, setShowFlash] = useState(false);
   const hasOriginals = Object.keys(useConfigStore((s) => s.originalTexts)).length > 0;
-  const isNative = useNativeStore((s) => s.isNative);
   const hasConfig = Object.keys(useConfigStore((s) => s.configFiles)).length > 0;
   const isConfigDirty = useConfigStore((s) => s.isDirty);
   const validation = useConfigStore((s) => s.validation);
@@ -146,13 +144,13 @@ export default function Toolbar({
   const settingsMenuRef = useRef<HTMLDivElement | null>(null);
 
   const showImportButton = !hiddenItems.import;
-  const showOpenFromPiButton = isNative && !hiddenItems.openFromPi;
+  const showOpenFromPiButton = !hiddenItems.openFromPi;
   const showExportButton = !hiddenItems.export;
-  const showSaveButton = hasConfig && !hiddenItems.save && (isNative === true || hasPendingChanges);
+  const showSaveButton = hasConfig && !hiddenItems.save;
   const showRevertButton = hasPendingChanges && hasOriginals && !hiddenItems.revert;
   const showDiffButton = hasOriginals && !hiddenItems.diff;
   const showAiChatButton = !hiddenItems.aiChat;
-  const showFlashButton = isNative && !hiddenItems.flash;
+  const showFlashButton = !hiddenItems.flash;
   const showComponentButton = Boolean(onToggleAddMenu) && !hiddenItems.component;
   const showMacroButton = Boolean(onOpenMacroDesigner) && !hiddenItems.macro;
 
@@ -305,7 +303,7 @@ export default function Toolbar({
         </button>
       )}
 
-      {/* Open from Host (native only) */}
+      {/* Open from Host */}
       {showOpenFromPiButton && (
         <button
           onClick={() => setShowOpenFromPi(true)}
@@ -336,7 +334,7 @@ export default function Toolbar({
         </button>
       )}
 
-      {/* Save to Host (native only) */}
+      {/* Save to Host */}
       {showSaveButton && (
         <button
           onClick={() => setShowApply(true)}
@@ -350,7 +348,7 @@ export default function Toolbar({
         </button>
       )}
 
-      {/* Revert Changes (native or when originals exist) */}
+      {/* Revert Changes (only when originals exist) */}
       {showRevertButton && (
         <button
           onClick={() => setShowRevert(true)}

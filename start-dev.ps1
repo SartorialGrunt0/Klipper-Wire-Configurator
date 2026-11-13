@@ -2,8 +2,7 @@
 # Starts both backend (FastAPI) and frontend (Vite) servers in parallel
 
 param(
-    [switch]$StopExisting,
-    [switch]$FakeNative
+    [switch]$StopExisting
 )
 
 
@@ -14,15 +13,12 @@ if (-not $rootDir) { $rootDir = Get-Location }
 $backendDir = Join-Path $rootDir 'backend'
 $frontendDir = Join-Path $rootDir 'frontend'
 
-# Optional: fake native (Raspberry Pi) environment for local dev.
-# When set, the backend will see the KWC_FAKE_NATIVE env var and report native features available.
-$oldKwcFake = $null
-if ($FakeNative) {
-    Write-Host 'Faking native device environment (KWC_FAKE_NATIVE=1).' -ForegroundColor Yellow
-    $oldKwcFake = $env:KWC_FAKE_NATIVE
-    $env:KWC_FAKE_NATIVE = '1'
-}
+# The backend honors KWC_PORT (REQ-PLAT-03); the health wait and the conflict
+# pre-check must watch the same port the child will bind, not a hardcoded one.
+$kwcPort = if ($env:KWC_PORT) { [int]$env:KWC_PORT } else { 8099 }
 
+# The backend boots on every OS; off a Linux printer host it warns at startup
+# (main._warn_off_host) and the native features find nothing.
 function Get-ProcessDetails {
     param([int]$ProcessId)
 
@@ -165,7 +161,7 @@ function Resolve-CommandPath {
     throw "Unable to resolve any of these commands: $($CommandNames -join ', ')"
 }
 
-foreach ($port in 8099, 5173) {
+foreach ($port in $kwcPort, 5173) {
     $listener = Get-PortListenerInfo -Port $port
     if (-not $listener) {
         continue
@@ -185,7 +181,7 @@ $frontendProcess = $null
 
 try {
     # Start Backend (FastAPI on port 8099)
-    Write-Host 'Starting backend (FastAPI on port 8099)...' -ForegroundColor Green
+    Write-Host "Starting backend (FastAPI on port $kwcPort)..." -ForegroundColor Green
     $venvPython = Join-Path $backendDir 'venv\Scripts\python.exe'
     if (-not (Test-Path $venvPython)) {
         Write-Host 'Creating backend venv...' -ForegroundColor Yellow
@@ -207,17 +203,33 @@ try {
     finally {
         Pop-Location
     }
-    if ($FakeNative) {
-        Write-Host 'FakeNative mode enabled — backend will report as native platform.' -ForegroundColor Magenta
-        $env:KWC_FAKE_NATIVE = '1'
-    }
     $backendProcess = Start-Process -FilePath $venvPython -ArgumentList 'main.py' -WorkingDirectory $backendDir -WindowStyle Hidden -PassThru
-    if ($FakeNative) {
-        Remove-Item Env:KWC_FAKE_NATIVE -ErrorAction SilentlyContinue
-    }
 
-    # Give backend a moment to start
-    Start-Sleep -Seconds 2
+    # Wait for the backend to actually answer. A fixed sleep only pretends to:
+    # the process can be dead and this script used to announce success anyway.
+    $healthUrl = "http://127.0.0.1:$kwcPort/health"
+    $backendUp = $false
+    $deadline = (Get-Date).AddSeconds(60)
+    while ((Get-Date) -lt $deadline) {
+        if ($backendProcess.HasExited) { break }
+        try {
+            $response = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 2
+            if ($response.StatusCode -eq 200) { $backendUp = $true; break }
+        }
+        catch { }
+        Start-Sleep -Milliseconds 500
+    }
+    if (-not $backendUp) {
+        if ($backendProcess.HasExited) {
+            Write-Host "Backend exited during startup (exit code $($backendProcess.ExitCode))." -ForegroundColor Red
+        }
+        else {
+            Write-Host "Backend did not answer $healthUrl within 60s." -ForegroundColor Red
+        }
+        Write-Host 'Run backend\main.py directly to see its error output.' -ForegroundColor Yellow
+        exit 1
+    }
+    Write-Host "Backend is answering on $healthUrl." -ForegroundColor Green
 
     # Start Frontend (Vite on port 5173)
     Write-Host 'Starting frontend (Vite on port 5173)...' -ForegroundColor Green
@@ -227,6 +239,10 @@ try {
     Push-Location $frontendDir
     try {
         & $npmPath install
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host 'npm install failed - fix it and run this script again.' -ForegroundColor Red
+            exit 1
+        }
     }
     finally {
         Pop-Location
@@ -237,9 +253,9 @@ try {
     Start-Sleep -Seconds 3
 
     Write-Host ''
-    Write-Host 'Both servers started successfully!' -ForegroundColor Green
+    Write-Host "Backend verified on port $kwcPort; frontend launched - give Vite a moment to bind 5173." -ForegroundColor Green
     Write-Host ''
-    Write-Host 'Backend:  http://localhost:8099' -ForegroundColor Cyan
+    Write-Host "Backend:  http://localhost:$kwcPort" -ForegroundColor Cyan
     Write-Host 'Frontend: http://localhost:5173' -ForegroundColor Cyan
     Write-Host ''
     Write-Host 'Opening browser...' -ForegroundColor Green
@@ -258,14 +274,6 @@ finally {
     }
     if ($backendProcess) {
         Stop-ProcessTree -ProcessId $backendProcess.Id
-    }
-    if ($FakeNative) {
-        if ($null -ne $oldKwcFake) {
-            $env:KWC_FAKE_NATIVE = $oldKwcFake
-        }
-        else {
-            Remove-Item Env:\KWC_FAKE_NATIVE -ErrorAction SilentlyContinue
-        }
     }
     Write-Host 'Servers stopped.' -ForegroundColor Yellow
 }

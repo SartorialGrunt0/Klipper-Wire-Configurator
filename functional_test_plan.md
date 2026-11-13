@@ -1,6 +1,6 @@
 # Functional Test Plan
 
-Last reviewed: 2026-08-05
+Last reviewed: 2026-11-12
 
 This plan verifies the requirements captured in [requirements-specifications.md](requirements-specifications.md). It separates strict automated suites, informational automation that produces diagnostics without hard assertions, and manual scenarios that still require a running UI or real hardware.
 
@@ -26,10 +26,11 @@ python scripts/run_functional_tests.py
 | --- | --- | --- | --- | --- |
 | FTA-001 | REQ-CONF-03, REQ-EDIT-05, REQ-VAL-01, REQ-VAL-02, REQ-VAL-03, REQ-OUT-01 | Validate parser, validator, save-config handling, cross-file validation, shared-pin allowances, and warning acknowledgement behavior. | Strict pass/fail | [tests/test_delta_validation.py](tests/test_delta_validation.py), [tests/test_warning_acknowledgments.py](tests/test_warning_acknowledgments.py), [tests/test_save_config_handling.py](tests/test_save_config_handling.py) |
 | FTA-002 | REQ-FW-01, REQ-FW-02, REQ-FW-03, REQ-FW-04, REQ-NATIVE-06 | Validate firmware and flash-target API contract forwarding, artifact selection, flash-device candidate logic, flash profile persistence, and Klipper log excerpt handling. | Strict pass/fail | [tests/test_native_firmware_routes.py](tests/test_native_firmware_routes.py), [tests/test_flash_target_routes.py](tests/test_flash_target_routes.py), [tests/test_flash_target_service.py](tests/test_flash_target_service.py), [tests/test_klipper_firmware_service.py](tests/test_klipper_firmware_service.py), [tests/test_flash_profile_service.py](tests/test_flash_profile_service.py), [tests/test_native_klipper_service.py](tests/test_native_klipper_service.py) |
-| FTA-003 | REQ-AI-02, REQ-AI-03, REQ-AI-04 | Validate provider key gating, docs-grounded prompt preparation, provider payload building, response extraction, auto-search fallback, and the native tool-call loop on the backend proxy. | Strict pass/fail | [tests/test_ai_chat_routes.py](tests/test_ai_chat_routes.py) |
+| FTA-003 | REQ-AI-02, REQ-AI-03, REQ-AI-04 | Validate provider key gating, docs-grounded prompt preparation, provider payload building, response extraction, and the native tool-call loop on the backend proxy. | Strict pass/fail | [tests/test_ai_chat_routes.py](tests/test_ai_chat_routes.py) |
 | FTA-004 | REQ-AI-04, REQ-AI-06 | Validate text-based and native tool-call extraction, execution, and follow-up message building for the embedded MCP server. | Strict pass/fail | [tests/test_mcp_tool_calling.py](tests/test_mcp_tool_calling.py) |
-| FTA-005 | REQ-CONF-01, REQ-CONF-02, REQ-CONF-04, REQ-CONF-05, REQ-CONF-06, REQ-CONF-07, REQ-EDIT-05, REQ-VAL-02, REQ-OUT-01 | Validate the core editor API: single/multi-file import, validate, export, generate, examples listing/search, schema and reference doc endpoints, project persistence, config saving, and warning acknowledgements. | Strict pass/fail | [tests/test_api_routes.py](tests/test_api_routes.py) |
+| FTA-005 | REQ-CONF-01, REQ-CONF-02, REQ-CONF-04, REQ-CONF-05, REQ-CONF-06, REQ-CONF-07, REQ-EDIT-05, REQ-VAL-02, REQ-OUT-01 | Validate the core editor API: single/multi-file import, validate, export, generate, examples listing/search, schema and reference doc endpoints, project persistence, and warning acknowledgements. | Strict pass/fail | [tests/test_api_routes.py](tests/test_api_routes.py) |
 | FTA-006 | REQ-AI-04, REQ-AI-06 | Validate the embedded MCP server: DocIndex search/read/pagination, all tool handlers (docs, config reference, schema, examples, user configs, board detection, rotation distance, macro templates/validation), argument coercion, and the JSON-RPC protocol surface. | Strict pass/fail | [tests/test_mcp_server_tools.py](tests/test_mcp_server_tools.py) |
+| FTA-007 | REQ-NATIVE-01 | Validate the boot contract: `backend.main` imports on every OS — no refusal, no override variable — warning once on a simulated non-Linux host and silently on Linux; the standalone MCP stdio entry warns (to stderr, never the JSON-RPC stdout) and still serves; its documented `python -m backend.mcp_server` form actually starts; and no per-route platform guard or 501 response can come back (static lock). | Strict pass/fail | [tests/test_native_startup.py](tests/test_native_startup.py), [tests/test_no_platform_guards.py](tests/test_no_platform_guards.py) |
 | FTF-001 | REQ-EDIT-04, REQ-GRAPH-01, REQ-GRAPH-02, REQ-GRAPH-03, REQ-MACRO-01, REQ-AI-04 | Validate frontend pure-logic layers: config diff/patch generation, pin prefix handling, section naming, validation status aggregation, assistant draft merge (incl. delete markers), reply-validation pipeline, graph building from configs, edge routing, printer-memory block parsing/validation, AI provider helpers, board-type markers, and the gcode simulator (parse, trapezoidal motion, step building/execution). | Strict pass/fail | [frontend/src/utils/__tests__/](frontend/src/utils/__tests__/) |
 | FTF-002 | REQ-EDIT-01, REQ-EDIT-02, REQ-EDIT-05, REQ-CONF-03, REQ-GRAPH-02 | Validate frontend zustand stores: config file/section/param CRUD, include management, dirty tracking, rename/copy, validation error aggregation, graph node/edge operations, undo/redo, auto-arrange, and printer-memory store load/save/update with mocked API. | Strict pass/fail | [frontend/src/stores/__tests__/](frontend/src/stores/__tests__/) |
 | FTI-001 | REQ-CONF-01, REQ-CONF-02, REQ-CONF-03, REQ-OUT-01 | Exercise corpus-wide parse/export round-tripping across bundled reference configs and backups. | Informational automation | [tests/test_roundtrip.py](tests/test_roundtrip.py) |
@@ -121,7 +122,7 @@ Expected result:
 Requirements: REQ-NATIVE-01, REQ-NATIVE-02, REQ-NATIVE-03, REQ-NATIVE-04, REQ-NATIVE-05, REQ-NATIVE-06, REQ-NATIVE-07
 
 Preconditions:
-1. Run the backend on a Linux SBC or enable `KWC_FAKE_NATIVE` for development.
+1. Run the backend on the Linux printer host. (Off-host the backend still boots — with its startup warning — but every step below finds nothing; run it that way only for non-native UI work.)
 2. Point the config path at a test Klipper config directory.
 
 Procedure:
@@ -142,7 +143,7 @@ Expected result:
 Requirements: REQ-FW-01, REQ-FW-02, REQ-FW-03, REQ-FW-04
 
 Preconditions:
-1. Native mode is active.
+1. The backend is running on the Linux printer host.
 2. Local Klipper and/or Katapult checkouts are available.
 3. Target hardware or a safe test environment is available.
 
@@ -185,18 +186,18 @@ Procedure:
 1. Open AI Chat from the toolbar.
 2. Verify provider settings, switch between a hosted and local provider if available, and save the configuration.
 3. Ask a documentation-grounded Klipper question that references a specific section or parameter.
-4. Attach at least one local config file or reference one or more loaded config files by name.
+4. Attach context through a reference chip — pin a section or parameter from the text view, or @-mention it in the composer — and leave at least one file with unsaved editor drafts so it rides along with the request automatically.
 5. Request a config edit that targets the active file and, for multi-file projects, a second named file.
-6. Decide the in-chat approval card for each proposed change: approve one, decline another, and leave a third unanswered long enough to watch the 90s auto-decline.
+6. After the reply, exercise the review bar: keep one change, undo another, hand-edit inside a third pending run, and jump a row to its file and line.
 
 Expected result:
 1. Provider settings and message history persist across closing and reopening the dialog.
 2. The response arrives through the proxy or returns a clear provider error without corrupting the stored conversation history.
-3. Each validated write raises an in-chat approval card showing a diff of the proposed change computed from the server-prepared before/after text (never model prose); an unanswered card auto-declines after 90s.
-4. An approved change stages into the editor's working state (dirty, unsaved) with untouched comments and unrelated section content preserved; a declined change leaves the file untouched.
+3. Each validated write stages into the editor's working state immediately, while the request is still running (dirty, unsaved — never written to disk); no approve/decline card interrupts the reply. The review bar lists one row per changed run of the reply's change set, computed mechanically (never model prose).
+4. Keeping a run freezes the live version; undoing puts the pre-edit version back; a hand edit inside a run folds into that run instead of showing as an AI change; when every run is decided the bar disappears. Untouched comments and unrelated section content are preserved, and files the reply never changed stay untouched.
 
 ## Result Interpretation
 
 - A passing automated run means the strict backend/service regression suite, including AI chat backend routing, is currently green.
 - Informational suites should be reviewed for drift trends even when they do not fail the run.
-- Manual scenarios remain required before release because the current automated suite does not exercise browser interaction fidelity, AI draft-apply UX, external provider connectivity, or physical hardware behavior.
+- Manual scenarios remain required before release because the current automated suite does not exercise browser interaction fidelity, the post-hoc AI edit-review ledger, external provider connectivity, or physical hardware behavior.

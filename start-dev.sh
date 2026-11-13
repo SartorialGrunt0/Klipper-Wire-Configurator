@@ -8,12 +8,15 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$ROOT_DIR/backend"
 FRONTEND_DIR="$ROOT_DIR/frontend"
 
+KWC_PORT="${KWC_PORT:-8099}"
+HEALTH_URL="http://127.0.0.1:${KWC_PORT}/health"
+
 echo ""
 echo "Starting Klipper Wire Configurator..."
 echo ""
 
-# Start Backend (FastAPI on port 8099)
-echo "Starting backend (FastAPI on port 8099)..."
+# Start Backend (FastAPI on the dev port)
+echo "Starting backend (FastAPI on port ${KWC_PORT})..."
 if [ ! -f "$BACKEND_DIR/venv/bin/python" ]; then
     echo "Creating backend venv..."
     cd "$BACKEND_DIR"
@@ -33,8 +36,31 @@ venv/bin/pip install -r requirements.txt
 venv/bin/python main.py &
 BACKEND_PID=$!
 
-# Give backend a moment to start
-sleep 2
+# Register cleanup BEFORE the first early exit: from this point on a health
+# failure (or Ctrl+C during the wait) must take the backend down with it, or
+# it is orphaned holding the port and the next run's health wait gets answered
+# by the stale process. FRONTEND_PID is expanded at trap time, so it is
+# included once the frontend exists.
+trap 'echo ""; echo "Stopping servers..."; kill "$BACKEND_PID" ${FRONTEND_PID:+"$FRONTEND_PID"} 2>/dev/null || true; echo "Servers stopped."' EXIT
+
+# Wait for the backend to actually answer. A fixed sleep only pretends to: the
+# process can be dead and this script used to announce success anyway.
+backend_up=0
+for _ in $(seq 1 60); do
+    if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+        break
+    fi
+    if curl -fsS --max-time 2 "$HEALTH_URL" >/dev/null 2>&1; then
+        backend_up=1
+        break
+    fi
+    sleep 1
+done
+if [ "$backend_up" -ne 1 ]; then
+    echo "Backend did not answer ${HEALTH_URL} — check its output above." >&2
+    exit 1
+fi
+echo "Backend is answering on ${HEALTH_URL}."
 
 # Start Frontend (Vite on port 5173)
 echo "Starting frontend (Vite on port 5173)..."
@@ -48,9 +74,9 @@ FRONTEND_PID=$!
 sleep 3
 
 echo ""
-echo "Both servers started successfully!"
+echo "Backend verified on port ${KWC_PORT}; frontend launched - watch the Vite output until it serves."
 echo ""
-echo "Backend:  http://localhost:8099"
+echo "Backend:  http://localhost:${KWC_PORT}"
 echo "Frontend: http://localhost:5173"
 echo ""
 
@@ -64,6 +90,5 @@ fi
 echo "Press Ctrl+C to stop both servers."
 echo ""
 
-# Wait and clean up on exit
-trap "echo ''; echo 'Stopping servers...'; kill $BACKEND_PID $FRONTEND_PID 2>/dev/null; echo 'Servers stopped.'" EXIT
+# Cleanup runs via the EXIT trap registered right after the backend launch.
 wait

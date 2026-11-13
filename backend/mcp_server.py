@@ -28,6 +28,17 @@ from typing import Any
 
 # ── Paths ────────────────────────────────────────────────────────────
 
+# The imports below are flat (`from klipper_paths import ...`), so this file's
+# own directory must be on sys.path. That holds when the app imports it with
+# cwd=backend and when mcp_wrapper.py runs it — but NOT for the standalone
+# entry point documented at the top of this module (`python -m
+# backend.mcp_server`), which used to die with ModuleNotFoundError right here
+# and never reach run_stdio()'s platform guard. Bootstrap it so the documented
+# command works.
+_BACKEND_DIR = str(Path(__file__).resolve().parent)
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+
 # Hard-failover resolution: installed Klipper repo when present (docs track
 # the installed firmware), bundled copies otherwise. KWC-authored docs load
 # alongside from reference/kwc_docs/ (see klipper_paths.py).
@@ -53,8 +64,10 @@ DOCS_SUMMARY_PATH = KWC_CUSTOM_DOCS_DIR / "Klipper_Docs_AI_Summary.md"
 # override, then the saved native setting, then the modern
 # ~/printer_data/config layout, then the legacy /home/pi/.klipper/config.
 SYSTEM_CONFIG_PATH = resolve_config_path()
-# Local storage dir for browser-mode Save (non-native); also scanned by the
-# user-config tools alongside the system path.
+# Scratch store scanned by the user-config tools alongside the system path.
+# Nothing writes here any more (the browser-mode Save endpoint is gone), so it
+# is normally empty — kept because the tools are part of the advertised
+# surface and a host that still has files from an older install keeps them.
 LOCAL_CONFIGS_DIR = BACKEND_DIR / "user_configs"
 
 # ── chat working-state overlay (live bug report 2026-09-27) ───────────
@@ -3296,17 +3309,10 @@ class McpServer:
         and acknowledgement suppression apply exactly as in the UI.
         """
         from services.native_services import (
-            is_native_platform,
             load_native_project,
             list_config_files,
         )
         from parser.validator import validate_project_configs
-
-        if not is_native_platform():
-            return (
-                "validate_config_project is only available when KWC runs "
-                "natively on the printer host (Raspberry Pi/SBC)."
-            )
 
         config_dir = _system_config_path()
         if not config_dir.is_dir():
@@ -3398,12 +3404,6 @@ class McpServer:
     def _handle_list_connected_devices(self, args: dict[str, Any]) -> str:
         """Serial/CAN devices — the same data as the comm-line dropdowns."""
         import services.native_services as ns
-
-        if not ns.is_native_platform():
-            return (
-                "Device detection is only available when KWC runs natively "
-                "on the printer host (Raspberry Pi/SBC)."
-            )
 
         scan_uuids = bool(args.get("scan_can_uuids", True))
         devices = ns.get_all_devices()
@@ -3716,6 +3716,15 @@ class McpServer:
 
 def run_stdio() -> None:
     """Run the MCP server over stdin/stdout (standard MCP transport)."""
+    # Same boot-anywhere contract as backend/main.py: warn, then serve.
+    # The warning goes to stderr — stdout is the JSON-RPC channel. Both
+    # documented entry points land here: `python -m backend.mcp_server` and
+    # backend/mcp_wrapper.py (the one Claude Desktop is configured with).
+    from services.native_services import is_native_platform, OFF_HOST_WARNING
+
+    if not is_native_platform():
+        sys.stderr.write(f"KWC MCP server: {OFF_HOST_WARNING}\n")
+
     server = McpServer()
     index = get_index()
 

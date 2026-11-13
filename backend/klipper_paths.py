@@ -1,13 +1,15 @@
 """Resolve which Klipper doc sources KWC serves.
 
-Hard failover, single source: when KWC is NATIVELY deployed on the printer host (the
-app's system config path exists — the same marker routes.py uses) and an
-installed Klipper repo with a docs/ directory is found (env
+Hard failover, single source: when KWC is natively deployed on the printer
+host (the app's system config path exists — the deployment marker is the
+only native signal; the Linux check is a boot-time warning in main.py) and an installed
+Klipper repo with a docs/ directory is found (env
 KWC_KLIPPER_DIR, then common install paths), the docs are served from THAT
 repo — they track the installed firmware version, which is the version the
-user's config must match. Otherwise (dev checkout, Windows, no marker) we
-fall back to the bundled copies in reference/. The env override
-KWC_KLIPPER_DIR always wins so a dev box can point at a specific checkout.
+user's config must match. Otherwise (dev checkout or off-host dev box
+without the marker dir) we fall back to the bundled copies in reference/.
+The env override KWC_KLIPPER_DIR always wins so a dev box can point at a
+specific checkout.
 
 KWC-authored docs always load alongside from reference/kwc_docs/ (they are
 not duplicates of official docs, so they do not break the single-source
@@ -19,7 +21,6 @@ from pathlib import Path
 
 from services.native_services import (
     get_default_config_path,
-    is_native_platform,
     load_settings,
 )
 
@@ -70,9 +71,15 @@ DEPLOYMENT_CONFIG_PATH = resolve_config_path()
 
 
 def _deployment_looks_native() -> bool:
-    """True when KWC is natively deployed on the printer host (system config path present)
-    and we're on Linux — i.e., not a dev checkout / Windows box."""
-    return is_native_platform() and DEPLOYMENT_CONFIG_PATH.is_dir()
+    """True when KWC is natively deployed on the printer host.
+
+    The "are we on Linux?" half used to live here; it is now a boot-time
+    warning (``main._warn_off_host``), so this is purely the
+    deployment marker. The directory check stays: a Linux box without
+    ``~/printer_data/config`` is a real state (dev on a Pi with no printer
+    attached), and the docs-index tools must fall back to bundled docs there.
+    """
+    return DEPLOYMENT_CONFIG_PATH.is_dir()
 
 
 def find_klipper_install() -> Path | None:

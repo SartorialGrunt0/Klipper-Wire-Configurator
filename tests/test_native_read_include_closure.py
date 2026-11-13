@@ -102,7 +102,6 @@ def test_listing_hides_symlinked_include_targets(tmp_path):
 def test_native_read_expands_to_disk_include_closure(monkeypatch, tmp_path):
     """Read returns the include closure even for files hidden from the listing,
     so no missing_include error fires for on-disk include targets."""
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     config_dir, visible = _make_fixture(tmp_path)
 
     response = client.post('/api/native/config-files/read', json={
@@ -135,7 +134,6 @@ def test_native_read_expands_to_disk_include_closure(monkeypatch, tmp_path):
 
 def test_native_read_still_flags_genuinely_missing_include(monkeypatch, tmp_path):
     """A truly absent include target keeps its missing_include error."""
-    monkeypatch.setattr(native_routes, 'is_native_platform', lambda: True)
     config_dir = tmp_path / 'config'
     config_dir.mkdir()
     (config_dir / 'printer.cfg').write_text(

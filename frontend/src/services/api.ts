@@ -314,7 +314,7 @@ export async function getKlipperDoc(filename: string): Promise<KlipperDocRespons
 
 /* ── Schema ──────────────────────────────────────────── */
 
-export async function getSchema(): Promise<{ schemas: Record<string, SectionSchema> }> {
+async function fetchSchema(): Promise<{ schemas: Record<string, SectionSchema> }> {
   try {
     return await request('/schema');
   } catch {
@@ -322,6 +322,21 @@ export async function getSchema(): Promise<{ schemas: Record<string, SectionSche
     if (!res.ok) throw new Error('Static schema unavailable');
     return res.json() as Promise<{ schemas: Record<string, SectionSchema> }>;
   }
+}
+
+// In-flight dedupe: the App mount effect and the startup read both call this
+// on every cold start; without it the host answers /schema twice per load.
+// Deduped per FLIGHT, not cached per session — the next page load fetches
+// fresh schemas.
+let schemaInFlight: Promise<{ schemas: Record<string, SectionSchema> }> | null = null;
+
+export function getSchema(): Promise<{ schemas: Record<string, SectionSchema> }> {
+  if (!schemaInFlight) {
+    schemaInFlight = fetchSchema().finally(() => {
+      schemaInFlight = null;
+    });
+  }
+  return schemaInFlight;
 }
 
 export async function getSectionSchema(sectionType: string): Promise<SectionSchema> {
@@ -351,25 +366,9 @@ export async function loadProject(name: string): Promise<{
   return request(`/projects/${encodeURIComponent(name)}`);
 }
 
-export async function saveConfigsToLocal(
-  files: Record<string, string>,
-  deleted: string[] = [],
-): Promise<{ saved: string[]; removed: string[]; file_count: number; errors?: string[] }> {
-  return request('/configs/save', {
-    method: 'POST',
-    body: JSON.stringify({ files, deleted }),
-  });
-}
-
-
-export async function loadSavedConfigs(): Promise<ProjectImportResult> {
-  return request('/project/load-saved');
-}
-
 /* ── Native (host) API ───────────────────────────────── */
 
 export interface NativeStatus {
-  native: boolean;
   config_path: string;
 }
 
@@ -854,10 +853,20 @@ export async function loadNativeLayout(): Promise<{ layout: unknown | null }> {
   return request('/native/layout');
 }
 
-export async function saveNativeLayout(layout: unknown): Promise<{ status: string }> {
+export async function saveNativeLayout(
+  layout: unknown,
+  opts?: { keepalive?: boolean },
+): Promise<{ status: string }> {
+  const body = JSON.stringify({ layout });
+  // Browsers cap keepalive bodies at 64 KiB ENCODED and throw above it —
+  // count bytes, not UTF-16 code units (body.length lies for multibyte
+  // text). A large graph can exceed that, so fall back to a normal fetch —
+  // which the unload path may abort, i.e. no worse than having no flush at all.
+  const keepalive = opts?.keepalive === true && new TextEncoder().encode(body).byteLength < 60_000;
   return request('/native/layout', {
     method: 'POST',
-    body: JSON.stringify({ layout }),
+    body,
+    ...(keepalive ? { keepalive: true } : {}),
   });
 }
 

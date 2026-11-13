@@ -1,10 +1,8 @@
 import { create } from 'zustand';
 import * as api from '../services/api';
-import type { DeviceList, NativeStatus, CanbusQueryResult } from '../services/api';
+import type { DeviceList, CanbusQueryResult } from '../services/api';
 
 interface NativeStore {
-  /** Whether running natively on the printer host (null = not yet checked) */
-  isNative: boolean | null;
   /** Config directory path on the printer host */
   configPath: string;
   /** Detected devices */
@@ -16,8 +14,8 @@ interface NativeStore {
   /** Whether CAN bus UUID query is loading */
   canbusQueryLoading: boolean;
 
-  /** Check native status on startup */
-  checkNativeStatus: () => Promise<void>;
+  /** Load the active config path from the backend on startup */
+  loadConfigPath: () => Promise<void>;
   /** Refresh the device list */
   refreshDevices: () => Promise<void>;
   /** Update the config path */
@@ -26,26 +24,29 @@ interface NativeStore {
   queryCanbusUuids: (iface?: string) => Promise<void>;
 }
 
-export const useNativeStore = create<NativeStore>((set, get) => ({
-  isNative: null,
+/**
+ * Printer-host state. There is no "am I native?" flag any more: the backend
+ * boots on every OS (main._warn_off_host warns once off a Linux printer
+ * host), so every action here is unconditionally available and simply finds
+ * nothing off-host or with no printer attached.
+ */
+export const useNativeStore = create<NativeStore>((set) => ({
   configPath: '/home/pi/printer_data/config',
   devices: null,
   devicesLoading: false,
   canbusQuery: null,
   canbusQueryLoading: false,
 
-  checkNativeStatus: async () => {
+  loadConfigPath: async () => {
     try {
-      const status: NativeStatus = await api.getNativeStatus();
-      set({ isNative: status.native, configPath: status.config_path });
+      const status = await api.getNativeStatus();
+      set({ configPath: status.config_path });
     } catch {
-      // Backend unavailable or no native endpoint — not native
-      set({ isNative: false });
+      // Backend unreachable — keep the default; the startup read surfaces it.
     }
   },
 
   refreshDevices: async () => {
-    if (!get().isNative) return;
     set({ devicesLoading: true });
     try {
       const devices = await api.listNativeDevices();
@@ -57,15 +58,12 @@ export const useNativeStore = create<NativeStore>((set, get) => ({
 
   setConfigPath: async (path: string) => {
     set({ configPath: path });
-    if (get().isNative) {
-      try {
-        await api.updateNativeSettings(path);
-      } catch { /* ignore */ }
-    }
+    try {
+      await api.updateNativeSettings(path);
+    } catch { /* ignore */ }
   },
 
   queryCanbusUuids: async (iface = 'can0') => {
-    if (!get().isNative) return;
     set({ canbusQueryLoading: true });
     try {
       const result = await api.queryCanbusUuids(iface);

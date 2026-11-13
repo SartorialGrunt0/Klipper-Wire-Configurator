@@ -79,6 +79,8 @@ pip install -r requirements.txt
 python main.py
 ```
 
+The backend boots on every OS. Off a Linux printer host it prints one startup warning and reports nothing for devices, Klipper status, and firmware — everything else (editing, validation, AI chat) works normally. Use `./start-dev.ps1` to bring up the full stack.
+
 ## Manual build and deploy
 
 Build the frontend bundle:

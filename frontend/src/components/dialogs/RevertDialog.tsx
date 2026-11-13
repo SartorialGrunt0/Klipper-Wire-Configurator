@@ -5,7 +5,7 @@ import { useMacroDesignerStore } from '../../stores/macroDesignerStore';
 import { useNativeStore } from '../../stores/nativeStore';
 import * as api from '../../services/api';
 import { buildProjectGraph } from '../../utils/graphBuilder';
-import { restoreLayoutAfterRebuild } from '../../utils/layoutPersistence';
+import { buildLayoutPayload, restoreLayoutAfterRebuild } from '../../utils/layoutPersistence';
 import { discardReview } from '../../services/changeSetReview';
 import type { ConfigFile, ValidationResult } from '../../types/config';
 import Modal from '../Modal';
@@ -15,7 +15,6 @@ interface RevertDialogProps {
 }
 
 export default function RevertDialog({ onClose }: RevertDialogProps) {
-  const isNative = useNativeStore((s) => s.isNative);
   const configPath = useNativeStore((s) => s.configPath);
   const [status, setStatus] = useState<'idle' | 'reverting' | 'success' | 'error'>('idle');
   const [message, setMessage] = useState('');
@@ -24,15 +23,12 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
   const persistClearedMacroDesignerState = useCallback(async () => {
     const macroDesignerStore = useMacroDesignerStore.getState();
     macroDesignerStore.clearPersistedState();
-    if (!isNative) return;
 
     const graphState = useGraphStore.getState();
-    await api.saveNativeLayout({
-      graphNodes: graphState.nodes,
-      graphEdges: graphState.edges,
-      macroDesigner: macroDesignerStore.exportPersistedState(),
-    }).catch(() => {});
-  }, [isNative]);
+    await api.saveNativeLayout(
+      buildLayoutPayload(graphState.nodes, graphState.edges, macroDesignerStore.exportPersistedState()),
+    ).catch(() => {});
+  }, []);
 
   const handleRevert = useCallback(async () => {
     setStatus('reverting');
@@ -42,91 +38,51 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
       const configStore = useConfigStore.getState();
       const schemas = configStore.schemas;
 
-      if (isNative) {
-        // Native mode: re-read both the current working set and original files so deleted files return.
-        const filenames = Array.from(new Set([
-          ...Object.keys(configStore.originalTexts),
-          ...Object.keys(configStore.configFiles),
-        ]));
-        if (filenames.length === 0) {
-          setStatus('error');
-          setMessage('No files to revert.');
-          return;
-        }
-
-        // The buffer is thrown away wholesale, so the review goes with it:
-        // `discardReview` clears the change set and the pane's pending view.
-        // Without it the next keep/undo replays this request's staged edits
-        // onto a file that no longer contains them (live report 2026-10-04).
-        discardReview();
-        configStore.clearAll();
-        useGraphStore.getState().clearGraph();
-
-        const result = await api.readNativeConfigFiles(filenames, configPath);
-
-        const allConfigs: Record<string, ConfigFile> = {};
-        const allValidations: Record<string, ValidationResult> = {};
-
-        for (const [filename, fileResult] of Object.entries(result.files)) {
-          configStore.setConfigFile(filename, fileResult.config);
-          configStore.setValidation(filename, fileResult.validation);
-          allConfigs[filename] = fileResult.config;
-          allValidations[filename] = fileResult.validation;
-
-          if (fileResult.raw_text) {
-            configStore.setOriginalText(filename, fileResult.raw_text);
-          }
-        }
-
-        // Rebuild graph
-        const graphStore = useGraphStore.getState();
-        buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
-        // Re-apply the saved layout — the rebuild renumbers node ids, and
-        // the macro-state persist below must save the restored arrangement,
-        // not the auto-arranged one. Pass the state GETTER (not the
-        // pre-build snapshot, which is empty right after clearGraph()) so
-        // the layout lands on the freshly built graph.
-        await restoreLayoutAfterRebuild(useGraphStore.getState, isNative);
-      } else {
-        // Non-native mode: re-parse from originalTexts
-        const { originalTexts } = configStore;
-        if (Object.keys(originalTexts).length === 0) {
-          setStatus('error');
-          setMessage('No original versions to revert to.');
-          return;
-        }
-
-        // Same reason as the native branch above: the buffer is replaced, so
-        // the post-hoc review of the old one is void.
-        discardReview();
-        configStore.clearAll();
-        useGraphStore.getState().clearGraph();
-
-        const allConfigs: Record<string, ConfigFile> = {};
-        const allValidations: Record<string, ValidationResult> = {};
-
-        for (const [filename, text] of Object.entries(originalTexts)) {
-          const result = await api.parseConfigText(text, filename);
-          configStore.setConfigFile(filename, result.config);
-          configStore.setValidation(filename, result.validation);
-          configStore.setOriginalText(filename, text);
-          allConfigs[filename] = result.config;
-          allValidations[filename] = result.validation;
-        }
-
-        // Per-file parse validation is single-file scope: it flags macros
-        // defined in OTHER files as unknown_gcode_command (2026-09-20 class).
-        // Refresh findings as a PROJECT before the graph reads them.
-        await configStore.revalidateAll();
-        Object.assign(allValidations, useConfigStore.getState().validation);
-
-        // Rebuild graph
-        const graphStore = useGraphStore.getState();
-        buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
-        // Re-apply the saved layout (same reason as the native branch above);
-        // getter, not pre-build snapshot — see restoreLayoutAfterRebuild.
-        await restoreLayoutAfterRebuild(useGraphStore.getState, isNative);
+      // Re-read both the current working set and the original files so
+      // deleted files come back.
+      const filenames = Array.from(new Set([
+        ...Object.keys(configStore.originalTexts),
+        ...Object.keys(configStore.configFiles),
+      ]));
+      if (filenames.length === 0) {
+        setStatus('error');
+        setMessage('No files to revert.');
+        return;
       }
+
+      // The buffer is thrown away wholesale, so the review goes with it:
+      // `discardReview` clears the change set and the pane's pending view.
+      // Without it the next keep/undo replays this request's staged edits
+      // onto a file that no longer contains them (live report 2026-10-04).
+      discardReview();
+      configStore.clearAll();
+      useGraphStore.getState().clearGraph();
+
+      const result = await api.readNativeConfigFiles(filenames, configPath);
+
+      const allConfigs: Record<string, ConfigFile> = {};
+      const allValidations: Record<string, ValidationResult> = {};
+
+      for (const [filename, fileResult] of Object.entries(result.files)) {
+        configStore.setConfigFile(filename, fileResult.config);
+        configStore.setValidation(filename, fileResult.validation);
+        allConfigs[filename] = fileResult.config;
+        allValidations[filename] = fileResult.validation;
+
+        if (fileResult.raw_text) {
+          configStore.setOriginalText(filename, fileResult.raw_text);
+        }
+      }
+
+      // Rebuild graph
+      const graphStore = useGraphStore.getState();
+      buildProjectGraph(allConfigs, graphStore, schemas, allValidations);
+      // Re-apply the saved layout — the rebuild renumbers node ids, and the
+      // macro-state persist below must save the restored arrangement, not
+      // the auto-arranged one. Pass the state GETTER (not the pre-build
+      // snapshot, which is empty right after clearGraph()) so the layout
+      // lands on the freshly built graph.
+      await restoreLayoutAfterRebuild(useGraphStore.getState);
 
       if (clearMacroDesignerState) {
         await persistClearedMacroDesignerState();
@@ -140,7 +96,7 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
       setStatus('error');
       setMessage(err instanceof Error ? err.message : 'Revert failed');
     }
-  }, [clearMacroDesignerState, configPath, isNative, onClose, persistClearedMacroDesignerState]);
+  }, [clearMacroDesignerState, configPath, onClose, persistClearedMacroDesignerState]);
 
   return (
     <Modal
@@ -165,7 +121,7 @@ export default function RevertDialog({ onClose }: RevertDialogProps) {
             <div className="space-y-3">
               <div className="px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30">
                 <p className="text-xs text-amber-400">
-                  This will discard all unsaved changes and reload the config from {isNative ? 'the host' : 'the original file'}.
+                  This will discard all unsaved changes and reload the config from the host.
                 </p>
               </div>
               <p className="text-xs text-[var(--color-text-secondary)]">

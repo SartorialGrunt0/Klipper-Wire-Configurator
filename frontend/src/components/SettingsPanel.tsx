@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect } from 'react';
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import { useConfigStore } from '../stores/configStore';
 import { useGraphStore } from '../stores/graphStore';
 import { useNativeStore } from '../stores/nativeStore';
@@ -1420,7 +1420,7 @@ export default function SettingsPanel() {
 
 /* ── Device Picker for MCU params ────────────────────── */
 
-/** Param names that should show a device picker when in native mode */
+/** Param names that should show a device picker */
 const DEVICE_PARAM_MAP: Record<string, 'usb_serial' | 'can' | 'uart'> = {
   serial: 'usb_serial',
   canbus_uuid: 'can',
@@ -1438,18 +1438,44 @@ function DevicePicker({
   onSelect: (value: string) => void;
   commType?: string;
 }) {
-  const { isNative, devices, devicesLoading, refreshDevices, canbusQuery, canbusQueryLoading, queryCanbusUuids } = useNativeStore();
+  const { devices, devicesLoading, refreshDevices, canbusQuery, canbusQueryLoading, queryCanbusUuids } = useNativeStore();
 
+  // One automatic attempt per mount. Do NOT remove the latch: a failed
+  // refreshDevices (backend down, device scan error) sets devicesLoading back
+  // to false while leaving devices null — exactly the state this effect
+  // watches — so React would re-run it forever. The old `isNative` gate used
+  // to make that unreachable; nothing gates it any more.
+  const autoRefreshDone = useRef(false);
   useEffect(() => {
-    if (isNative && !devices && !devicesLoading) {
+    if (autoRefreshDone.current) return;
+    if (!devices && !devicesLoading) {
+      autoRefreshDone.current = true;
       refreshDevices();
     }
-  }, [isNative, devices, devicesLoading, refreshDevices]);
-
-  if (!isNative || !devices) return null;
+  }, [devices, devicesLoading, refreshDevices]);
 
   const deviceType = DEVICE_PARAM_MAP[paramKey];
   if (!deviceType) return null;
+
+  if (!devices) {
+    // A failed scan leaves devices null forever (the latch above means nothing
+    // retries on its own), and hiding the row reads as "this field has no
+    // picker". Offer the manual path — refreshDevices() is not latch-gated.
+    if (autoRefreshDone.current) {
+      return (
+        <div className="mt-1">
+          <button
+            onClick={() => refreshDevices()}
+            disabled={devicesLoading}
+            className="w-full px-2 py-1 rounded text-[10px] bg-[var(--color-bg-tertiary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] focus:outline-none focus:ring-1 focus:ring-[var(--color-accent)] transition-colors"
+          >
+            {devicesLoading ? 'Scanning devices…' : 'Device scan failed — Retry'}
+          </button>
+        </div>
+      );
+    }
+    return null;
+  }
 
   // For serial param: show USB or UART devices depending on comm type
   if (paramKey === 'serial') {

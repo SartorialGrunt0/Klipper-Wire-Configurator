@@ -21,7 +21,6 @@
  */
 import { useConfigStore } from '../stores/configStore';
 import { useGraphStore } from '../stores/graphStore';
-import { useNativeStore } from '../stores/nativeStore';
 import { buildProjectGraph } from '../utils/graphBuilder';
 import { restoreLayoutAfterRebuild } from '../utils/layoutPersistence';
 
@@ -42,7 +41,7 @@ export function rebuildProjectGraph(): Promise<void> {
   buildProjectGraph(configStore.configFiles, graphStore, configStore.schemas, configStore.validation);
   // Pass the STATE GETTER, not a snapshot: the nodes must be the rebuilt ones
   // (see restoreLayoutAfterRebuild's contract in utils/layoutPersistence).
-  return restoreLayoutAfterRebuild(useGraphStore.getState, useNativeStore.getState().isNative);
+  return restoreLayoutAfterRebuild(useGraphStore.getState);
 }
 
 /** True when some hardware node represents `file` (exact or basename —

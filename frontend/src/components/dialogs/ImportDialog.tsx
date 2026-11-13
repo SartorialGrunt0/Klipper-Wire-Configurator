@@ -2,7 +2,6 @@ import { useState, useRef, useCallback } from 'react';
 import JSZip from 'jszip';
 import { useConfigStore } from '../../stores/configStore';
 import { useGraphStore } from '../../stores/graphStore';
-import { useNativeStore } from '../../stores/nativeStore';
 import { useValidationSettingsStore } from '../../stores/validationSettingsStore';
 import * as api from '../../services/api';
 import { buildProjectGraph } from '../../utils/graphBuilder';
@@ -161,7 +160,7 @@ export default function ImportDialog({ onClose }: ImportDialogProps) {
       // The rebuild renumbers node ids — re-apply the saved layout so an
       // import doesn't auto-arrange over the user's arrangement (and the
       // autosave can't persist that reset).
-      await restoreLayoutAfterRebuild(useGraphStore.getState, useNativeStore.getState().isNative);
+      await restoreLayoutAfterRebuild(useGraphStore.getState);
 
       // Sort results: main file first, then alphabetical
       importResults.sort((a, b) => {

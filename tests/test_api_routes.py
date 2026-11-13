@@ -1,7 +1,7 @@
 """Tests for the main config editor API routes (api/routes.py).
 
 Covers import/parse, validate, export, generate, examples, reference docs,
-schema lookup, project persistence, config saving, and warning
+schema lookup, project persistence, and warning
 acknowledgements — the core workflow endpoints the frontend uses.
 """
 import re
@@ -88,9 +88,7 @@ def _config_update(filename="printer.cfg", sections=None, includes=None, raw_tex
 # ── Import / Parse ──────────────────────────────────────────────────────
 
 
-def test_import_single_cfg(monkeypatch, tmp_path):
-    monkeypatch.setattr(routes, 'CONFIG_STORAGE_DIR', tmp_path)
-
+def test_import_single_cfg(tmp_path):
     response = client.post(
         '/api/import',
         files={'file': ('printer.cfg', SIMPLE_CFG.encode(), 'text/plain')},
@@ -104,37 +102,9 @@ def test_import_single_cfg(monkeypatch, tmp_path):
     assert 'mcu' in section_types
     assert 'validation' in body
     assert 'board_info' in body
-    # Imports are staged in the session only — nothing may be written to disk.
-    assert not (tmp_path / 'printer.cfg').exists()
 
 
-def test_import_single_cfg_writes_nothing_to_disk(monkeypatch, tmp_path):
-    monkeypatch.setattr(routes, 'CONFIG_STORAGE_DIR', tmp_path)
-
-    response = client.post(
-        '/api/import',
-        files={'file': ('printer.cfg', SIMPLE_CFG.encode(), 'text/plain')},
-    )
-
-    assert response.status_code == 200
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_import_project_writes_nothing_to_disk(monkeypatch, tmp_path):
-    monkeypatch.setattr(routes, 'CONFIG_STORAGE_DIR', tmp_path)
-
-    response = client.post(
-        '/api/import-project',
-        files=[('files', ('printer.cfg', PROJECT_CFG.encode(), 'text/plain'))],
-    )
-
-    assert response.status_code == 200
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_import_project_multi_file(monkeypatch, tmp_path):
-    monkeypatch.setattr(routes, 'CONFIG_STORAGE_DIR', tmp_path)
-
+def test_import_project_multi_file():
     response = client.post(
         '/api/import-project',
         files=[
@@ -159,9 +129,7 @@ def test_import_project_multi_file(monkeypatch, tmp_path):
     assert mcu_names == ['']
 
 
-def test_import_project_ignores_non_cfg(monkeypatch, tmp_path):
-    monkeypatch.setattr(routes, 'CONFIG_STORAGE_DIR', tmp_path)
-
+def test_import_project_ignores_non_cfg():
     response = client.post(
         '/api/import-project',
         files=[
@@ -174,9 +142,52 @@ def test_import_project_ignores_non_cfg(monkeypatch, tmp_path):
     assert set(response.json()['files'].keys()) == {'printer.cfg'}
 
 
-def test_import_project_no_cfg_files(monkeypatch, tmp_path):
-    monkeypatch.setattr(routes, 'CONFIG_STORAGE_DIR', tmp_path)
+def _legacy_store_snapshot() -> set[str]:
+    """Files under the retired user-config store and the projects directory.
 
+    Both used to be written by the deleted local-save endpoints. Import parses,
+    it never persists (REQ-CONF-01) — so neither may grow.
+    """
+    backend = Path(__file__).resolve().parents[1] / 'backend'
+    files: set[str] = set()
+    for sub in ('user_configs', 'projects'):
+        base = backend / sub
+        if not base.exists():
+            continue
+        files |= {
+            f'{sub}/{p.relative_to(base)}' for p in base.rglob('*') if p.is_file()
+        }
+    return files
+
+
+def test_import_single_cfg_writes_nothing_to_disk():
+    before = _legacy_store_snapshot()
+
+    response = client.post(
+        '/api/import',
+        files={'file': ('printer.cfg', SIMPLE_CFG.encode(), 'text/plain')},
+    )
+
+    assert response.status_code == 200
+    assert _legacy_store_snapshot() == before
+
+
+def test_import_project_writes_nothing_to_disk():
+    before = _legacy_store_snapshot()
+
+    response = client.post(
+        '/api/import-project',
+        files=[
+            ('files', ('printer.cfg', PROJECT_CFG.encode(), 'text/plain')),
+            ('files', ('other.cfg', OTHER_CFG.encode(), 'text/plain')),
+        ],
+    )
+
+    assert response.status_code == 200
+    assert _legacy_store_snapshot() == before
+
+
+def test_import_project_no_cfg_files():
     response = client.post(
         '/api/import-project',
         files=[('files', ('notes.txt', b'not a config', 'text/plain'))],
@@ -474,115 +485,6 @@ def test_load_project_not_found(monkeypatch, tmp_path):
 # ── Config saving / loading ─────────────────────────────────────────────
 
 
-def test_save_configs(monkeypatch, tmp_path):
-    monkeypatch.setattr(routes, 'CONFIG_STORAGE_DIR', tmp_path)
-
-    response = client.post('/api/configs/save', json={
-        'files': {
-            'printer.cfg': SIMPLE_CFG,
-            'other.cfg': OTHER_CFG,
-        },
-    })
-
-    assert response.status_code == 200
-    assert response.json() == {'saved': ['printer.cfg', 'other.cfg'], 'removed': [], 'file_count': 2}
-    assert (tmp_path / 'printer.cfg').exists()
-    assert (tmp_path / 'other.cfg').exists()
-
-
-def test_save_configs_deletes_removed_files(monkeypatch, tmp_path):
-    monkeypatch.setattr(routes, 'CONFIG_STORAGE_DIR', tmp_path)
-    (tmp_path / 'printer.cfg').write_text(SIMPLE_CFG, encoding='utf-8')
-    (tmp_path / 'toolhead_board.cfg').write_text(OTHER_CFG, encoding='utf-8')
-
-    response = client.post('/api/configs/save', json={
-        'files': {
-            'printer.cfg': SIMPLE_CFG,
-        },
-        'deleted': ['toolhead_board.cfg'],
-    })
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body['saved'] == ['printer.cfg']
-    assert body['removed'] == ['toolhead_board.cfg']
-    assert (tmp_path / 'printer.cfg').exists()
-    assert not (tmp_path / 'toolhead_board.cfg').exists()
-
-
-def test_save_configs_deletes_only_files_that_exist(monkeypatch, tmp_path):
-    monkeypatch.setattr(routes, 'CONFIG_STORAGE_DIR', tmp_path)
-
-    response = client.post('/api/configs/save', json={
-        'files': {'printer.cfg': SIMPLE_CFG},
-        'deleted': ['ghost.cfg'],
-    })
-
-    assert response.status_code == 200
-    assert response.json()['removed'] == []
-    assert not (tmp_path / 'ghost.cfg').exists()
-
-
-def test_save_configs_rejects_path_traversal(monkeypatch, tmp_path):
-    monkeypatch.setattr(routes, 'CONFIG_STORAGE_DIR', tmp_path)
-
-    response = client.post('/api/configs/save', json={
-        'files': {
-            '../../evil.cfg': SIMPLE_CFG,
-            'good.cfg': SIMPLE_CFG,
-        },
-    })
-
-    assert response.status_code == 200
-    assert response.json()['saved'] == ['good.cfg']
-    assert 'Invalid filename: ../../evil.cfg' in response.json()['errors']
-
-
-def test_save_configs_rejects_traversal_in_deleted(monkeypatch, tmp_path):
-    monkeypatch.setattr(routes, 'CONFIG_STORAGE_DIR', tmp_path)
-
-    response = client.post('/api/configs/save', json={
-        'files': {'printer.cfg': SIMPLE_CFG},
-        'deleted': ['../evil.cfg'],
-    })
-
-    assert response.status_code == 200
-    assert 'Invalid filename: ../evil.cfg' in response.json()['errors']
-    assert not (tmp_path.parent / 'evil.cfg').exists()
-
-
-def test_save_configs_no_files():
-    response = client.post('/api/configs/save', json={'files': {}})
-
-    assert response.status_code == 400
-    assert response.json()['detail'] == 'No files provided'
-
-
-def test_load_saved_configs_empty(monkeypatch, tmp_path):
-    monkeypatch.setattr(routes, 'CONFIG_STORAGE_DIR', tmp_path)
-
-    response = client.get('/api/project/load-saved')
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body['files'] == {}
-    assert body['file_count'] == 0
-
-
-def test_load_saved_configs_with_files(monkeypatch, tmp_path):
-    monkeypatch.setattr(routes, 'CONFIG_STORAGE_DIR', tmp_path)
-    (tmp_path / 'printer.cfg').write_text(PROJECT_CFG, encoding='utf-8')
-    (tmp_path / 'other.cfg').write_text(OTHER_CFG, encoding='utf-8')
-
-    response = client.get('/api/project/load-saved')
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body['main_file'] == 'printer.cfg'
-    assert body['file_count'] == 2
-    assert set(body['files'].keys()) == {'printer.cfg', 'other.cfg'}
-
-
 # ── Warning acknowledgements ────────────────────────────────────────────
 
 
@@ -678,3 +580,24 @@ def test_tool_context_snippets_cover_schema_params():
         "text snippets missing schema params (add them or skip explicitly): "
         f"{missing}"
     )
+
+
+# ── Retired local-storage endpoints (non-native mode removal) ────────────
+# Import stages in the session and Apply writes the host config dir. Nothing
+# may repopulate the retired user_configs store, so both routes are gone
+# rather than merely unused.
+
+
+def test_local_storage_endpoints_are_gone():
+    # Assert on the OpenAPI path map. app.routes is NOT usable here: FastAPI
+    # keeps included routers as opaque `_IncludedRouter` objects with path='',
+    # so a route-table scan sees no /api/* route at all — that is how the first
+    # version of this test passed with POST /api/configs/save re-registered and
+    # serving 200.
+    paths = app.openapi().get('paths', {})
+
+    # Anti-vacuity guard: only meaningful if the map is actually populated.
+    assert '/api/native/status' in paths
+
+    assert '/api/configs/save' not in paths
+    assert '/api/project/load-saved' not in paths

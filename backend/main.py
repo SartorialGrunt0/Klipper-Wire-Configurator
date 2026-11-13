@@ -14,7 +14,28 @@ from api.printer_memory_routes import router as printer_memory_router
 from api.macro_log_routes import router as macro_log_router
 from mcp_server import McpServer, get_index
 from services.mainsail_sidebar import self_heal_sidebar
+from services.native_services import is_native_platform, OFF_HOST_WARNING
 from fastapi.responses import JSONResponse
+
+
+def _warn_off_host() -> None:
+    """Boot-anywhere contract: warn once, never refuse.
+
+    KWC's product surface is the Linux printer host, but every native
+    service degrades defensively off-host — empty device lists from the
+    missing /sys/class/net and dev globs, 503 from the missing Klipper
+    socket, no firmware checkouts — so a non-Linux boot is a legitimate
+    dev run. What was retired is the old dual browser/native MODE, and
+    with it any need for an override variable: this one warning is the
+    ONLY platform decision in the process, and no router is gated on it
+    (locked by tests/test_no_platform_guards.py). Runs before any router
+    is mounted.
+    """
+    if not is_native_platform():
+        print(f"[startup] Warning: {OFF_HOST_WARNING}")
+
+
+_warn_off_host()
 
 
 @asynccontextmanager
