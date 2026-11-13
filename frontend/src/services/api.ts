@@ -910,7 +910,16 @@ export interface AiChatRequest {
    * ordinary turn's prompt is byte-identical to before this feature).
    */
   context_references?: ChatReference[];
+  /**
+   * True once load_skill(config-editing) actually ran in this conversation
+   * (derived client-side from the stored tool trace — utils/chatSkillTrace).
+   * Conversation-scoped sticky armament: while set, the backend starts the
+   * skill gate open and re-injects the skill body in the same prompt as the
+   * write tools. Harness `editSkill` (backend-only field) still wins.
+   */
+  editSkillLoaded?: boolean;
 }
+
 
 export interface AiToolCallDetail {
   name: string;

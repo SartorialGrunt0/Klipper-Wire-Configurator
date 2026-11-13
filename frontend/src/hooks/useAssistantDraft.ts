@@ -40,6 +40,11 @@ interface ChatRequestBase {
    * ordinary turn's prompt is byte-identical to before this feature).
    */
   context_references?: ChatReference[];
+  /**
+   * Sticky skill armament (W0): derived from the conversation's stored tool
+   * trace via utils/chatSkillTrace. Passed through to api.aiChat verbatim.
+   */
+  editSkillLoaded?: boolean;
 }
 
 interface AssistantReplyAttempt {

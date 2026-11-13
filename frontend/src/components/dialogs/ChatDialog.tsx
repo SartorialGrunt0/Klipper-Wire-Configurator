@@ -24,6 +24,7 @@ import {
   type ApprovalCountdownAnchor,
 } from '../../utils/approvalDiff';
 import { buildChatRequestCredentials } from '../../utils/chatRequestBase';
+import { hasEditSkillLoad } from '../../utils/chatSkillTrace';
 import { selectUnsavedDrafts } from '../../utils/chatContext';
 import { buildReferenceContext, mentionMatches, nodeToReference, referenceLabel, type ChatReference, type MentionSource } from '../../utils/chatReferences';
 import { isNearBottom, nextStickToBottom } from '../../utils/chatScroll';
@@ -504,10 +505,20 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         // ("AI settings not configured" on a configured provider, live
         // report 2026-09-27). Typed-but-unsaved panel edits were never
         // meant to drive a send anyway.
-        const chatRequestBase = buildChatRequestCredentials(
-          useAiStore.getState().settings,
-          stopRequestId,
-        );
+        const chatRequestBase = {
+          ...buildChatRequestCredentials(
+            useAiStore.getState().settings,
+            stopRequestId,
+          ),
+          // Sticky skill armament (W0): once load_skill(config-editing) ran
+          // anywhere in this conversation's stored tool trace, every further
+          // request re-arms the gate — the backend starts with the skill
+          // active and re-supplies body + write tools together (atomic
+          // armament). Derived at send time, conversation-scoped, never a
+          // global setting. Both this call and the retry-pipeline calls
+          // spread this object, so one derivation covers all.
+          editSkillLoaded: hasEditSkillLoad(newMessages),
+        };
 
         // No context-file picker (2026-10-03): a request carries the editor's
         // UNSAVED DRAFTS and nothing else. Files the user has not touched are
