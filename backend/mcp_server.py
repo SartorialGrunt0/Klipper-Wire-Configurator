@@ -1142,14 +1142,17 @@ class McpServer:
             {
                 "name": "validate_macro",
                 "description": (
-                    "Validate a gcode_macro against Klipper's Jinja rules. "
-                    "Checks Jinja syntax (balanced {% if %}/{% endif %} and "
-                    "{% for %}/{% endfor %} blocks), save/restore state pairing, "
-                    "temperature commands, macro structure, and potential problems. "
+                    "Validate a gcode_macro with the real Klipper Jinja "
+                    "engine (the same compiler that gates config saves): full "
+                    "template syntax checking with error line numbers, plus "
+                    "registry-driven required-parameter presence (e.g. SET_LED "
+                    "without LED= fails at runtime). Also checks save/restore "
+                    "state pairing, temperature commands, macro structure, "
+                    "and potential problems. "
                     "When bed dimensions are supplied (bed_x/bed_y/max_z), also "
                     "checks moves for out-of-bounds targets and no-go zone hits "
                     "(including path crossings between consecutive moves). "
-                    "Does NOT simulate full machine state."
+                    "Does NOT simulate runtime machine state."
                 ),
                 "inputSchema": {
                     "type": "object",
