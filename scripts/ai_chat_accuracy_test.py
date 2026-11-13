@@ -811,18 +811,28 @@ def build_macro_questions() -> list[TestQuestion]:
         TestQuestion(
             qid="MACRO-13",
             title="Macros: spot the empty-render defect (review)",
+            # Fixture corrected 2026-11-13 (r5 trace): the original pasted
+            # `params_RED:` config lines. Verified against the bundled
+            # Klipper source (reference/klipper klippy/extras/gcode_macro.py,
+            # Aug-2026): gcode_macro reads ONLY gcode/rename_existing/
+            # description/variable_* — params come from the command line,
+            # defaults from |default(). `params_X:` is a config-load error
+            # ("Unknown parameter"), so that fixture was not a runtime-only
+            # defect at all and a model reporting the load error (r5) was
+            # MORE correct than the criteria. `|default("")` is the legal
+            # shape that genuinely compiles AND renders RED= empty at
+            # default invocation — the class the simulator exists for.
             text=("Will this macro work when I run TOGGLE_LEDS with no "
                   "arguments? Check it and tell me exactly what will "
                   "happen:\n\n"
                   "```cfg\n"
                   "[gcode_macro TOGGLE_LEDS]\n"
                   "description: toggle chamber leds\n"
-                  "params_RED:\n"
-                  "params_GREEN:\n"
-                  "params_BLUE:\n"
                   "gcode:\n"
-                  "    SET_LED LED=Chamber_LEDs RED={params.RED} "
-                  "GREEN={params.GREEN} BLUE={params.BLUE}\n"
+                  "    SET_LED LED=Chamber_LEDs "
+                  "RED={params.RED|default(\"\")} "
+                  "GREEN={params.GREEN|default(\"\")} "
+                  "BLUE={params.BLUE|default(\"\")}\n"
                   "```"),
             expected_tools=("validate_macro",),
             require_tool=False,
