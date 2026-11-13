@@ -1146,13 +1146,20 @@ class McpServer:
                     "engine (the same compiler that gates config saves): full "
                     "template syntax checking with error line numbers, plus "
                     "registry-driven required-parameter presence (e.g. SET_LED "
-                    "without LED= fails at runtime). Also checks save/restore "
+                    "without LED= fails at runtime), plus a render "
+                    "simulation of the DEFAULT invocation: the body is "
+                    "rendered with printer state UNKNOWN and the section's "
+                    "params_* defaults, and the RENDERED commands are "
+                    "validated — catches Jinja that compiles fine but "
+                    "expands to an empty or unparseable value (Klipper: "
+                    "'unable to parse'). Also checks save/restore "
                     "state pairing, temperature commands, macro structure, "
                     "and potential problems. "
                     "When bed dimensions are supplied (bed_x/bed_y/max_z), also "
                     "checks moves for out-of-bounds targets and no-go zone hits "
                     "(including path crossings between consecutive moves). "
-                    "Does NOT simulate runtime machine state."
+                    "Never claims to know runtime values: unknown-state "
+                    "dependencies are reported as info, not errors."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -3175,6 +3182,29 @@ class McpServer:
                     f"'{pname}=' — Klipper raises an error when this line runs."
                 ),
             })
+
+        # ── 2c. Render simulation (the W2 engine, same one the save-gate
+        # validation pass runs): render the body the way Klipper would on a
+        # DEFAULT invocation — printer state UNKNOWN, params from the
+        # section's params_* defaults, unknown conditions both arms — and
+        # validate the RENDERED commands. Catches Jinja that compiles fine
+        # but expands to an empty/unparseable value ('SET_LED ... RED=',
+        # Klipper: 'unable to parse'), which no compile-time check can see.
+        if gcode_body is not None and gcode_body.strip():
+            from parser.macro_render import simulate_macro
+            sim_params = {}
+            for raw in lines:
+                stripped_raw = raw.strip()
+                if stripped_raw.startswith("params_"):
+                    key, _, value = stripped_raw.partition(":")
+                    sim_params[key.strip()[len("params_"):].lower()] = value.strip()
+            simulation = simulate_macro(gcode_body, sim_params)
+            for finding in simulation.findings:
+                where = f"Line {finding.source_line}: " if finding.source_line else ""
+                issues.append({
+                    "severity": finding.severity,
+                    "message": f"{where}rendered default invocation — {finding.message}",
+                })
 
         # ── 3. Save/restore state pairing ──
         save_count = len(re.findall(r"SAVE_GCODE_STATE", code_text))

@@ -327,3 +327,87 @@ def test_200_macro_synthetic_config_under_budget():
         simulate_macro(b)
     cached = time.perf_counter() - start
     assert cached < 0.1, f"cached replay took {cached:.3f}s"
+
+
+# ── validator harness-pass wiring (task 2.3) ───────────────────────────────
+
+from parser.config_parser import parse_config  # noqa: E402
+from parser.validator import validate_config  # noqa: E402
+
+LED_REPRO_CFG = """[gcode_macro TOGGLE_LEDS]
+params_red:
+params_green:
+params_blue:
+gcode:
+    SET_LED LED=stealthburner RED={params.red} GREEN={params.green} BLUE={params.blue}
+"""
+
+
+def _sim_findings(result):
+    return [e for e in result.errors if e.code.startswith("macro_")]
+
+
+def test_validator_pass_flags_repro_at_absolute_line():
+    res = validate_config(parse_config(LED_REPRO_CFG))
+    errs = [e for e in res.errors if e.code == "macro_param_renders_empty"]
+    assert len(errs) == 3, [e.message for e in res.errors]
+    assert all(e.severity == "error" for e in errs)
+    # 'gcode:' is line 5, the command renders from body line 1 -> line 6,
+    # exactly where the editor must put the marker.
+    assert all(e.line_number == 6 for e in errs), [e.line_number for e in errs]
+    assert all(e.section == "gcode_macro TOGGLE_LEDS" for e in errs)
+
+
+def test_validator_pass_vacuity_lever_is_registry_flag():
+    # gcode_registry=False must silence the whole simulation pass — the
+    # documented vacuity lock (disable the pass -> the test above goes
+    # red, this one proves the lever position).
+    res = validate_config(parse_config(LED_REPRO_CFG), gcode_registry=False)
+    assert _sim_findings(res) == []
+
+
+def test_validator_pass_clean_macro_silent():
+    cfg = """[gcode_macro PARK]
+gcode:
+    {% set z = 10 %}
+    G1 Z{z + 5} F600
+"""
+    res = validate_config(parse_config(cfg))
+    assert _sim_findings(res) == [], [e.message for e in res.errors]
+
+
+def test_validator_pass_both_arms_via_project_api():
+    cfg = """[gcode_macro TOGGLE_FAN]
+gcode:
+    {% if printer.fan.speed > 0 %}
+    M107
+    {% else %}
+    M106 S{params.level}
+    {% endif %}
+"""
+    res = validate_config(parse_config(cfg))
+    # params.level unset: the false-arm render aborts on Klipper's
+    # Undefined — surfaced as the warning, at the referencing line.
+    warns = [e for e in res.errors if e.code == "macro_param_undefined"]
+    assert len(warns) == 1
+    assert warns[0].severity == "warning"
+    assert warns[0].line_number == 6
+
+
+# ── MCP validate_macro façade (same engine, model-callable text) ───────────
+
+def test_validate_macro_facade_reports_rendered_empty():
+    import json as _json
+    from mcp_server import McpServer
+    macro = (
+        "[gcode_macro TOGGLE_LEDS]\n"
+        "params_red:\n"
+        "params_green:\n"
+        "params_blue:\n"
+        "gcode:\n"
+        "    SET_LED LED=stealthburner RED={params.red} "
+        "GREEN={params.green} BLUE={params.blue}\n"
+    )
+    out = McpServer()._handle_validate_macro({"macro_text": macro})
+    assert "renders EMPTY" in out
+    assert "RED" in out

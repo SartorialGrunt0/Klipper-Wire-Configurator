@@ -892,6 +892,48 @@ def _validate_macro_jinja(section: ConfigSection, result: ValidationResult) -> N
     ))
 
 
+def _simulate_macro_render(section: ConfigSection, result: ValidationResult) -> None:
+    """W2 render-simulation pass (parser/macro_render.py): render the body
+    the way Klipper would on a DEFAULT invocation and validate the
+    RENDERED commands.
+
+    Catches what both compile-time layers provably cannot: Jinja that
+    compiles fine but EXPANDS to garbage — the field repro
+    ``SET_LED ... RED={params.red}`` rendering ``RED=`` (Klipper:
+    'unable to parse') is a deterministic error here, while unknown
+    printer-state values stay info (the simulation never claims to know
+    runtime values). Findings rebase body-relative lines onto the gcode
+    param line, same convention as _validate_macro_jinja. Runs only with
+    the registry gate on (gcode_registry=True): the command verdicts are
+    registry-driven, and the flag doubles as the documented vacuity lever.
+    """
+    from parser.macro_render import simulate_macro
+
+    body_param = _TEMPLATE_SECTION_BODIES[section.section_type]
+    gcode_param = section.get_param(body_param)
+    if gcode_param is None or not gcode_param.value.strip():
+        return
+    params = {
+        param.key[len("params_"):].lower(): param.value
+        for param in section.params
+        if param.key.startswith("params_") and not param.is_commented_out
+    }
+    simulation = simulate_macro(gcode_param.value, params)
+    for finding in simulation.findings:
+        # The body value carries a leading newline (everything after
+        # 'gcode:'), so value line 1 is the remainder of the key line:
+        # file line = key line + value line - 1.
+        result.errors.append(ValidationError(
+            severity=finding.severity,
+            section=section.full_header,
+            param=body_param,
+            message=finding.message,
+            line_number=(gcode_param.line_number + finding.source_line - 1
+                         if finding.source_line else gcode_param.line_number),
+            code=finding.code,
+        ))
+
+
 def _validate_neopixel_color_order(section: ConfigSection, result: ValidationResult) -> None:
     """Validate neopixel.color_order entries are permutations of RGB or RGBW.
 
@@ -1096,6 +1138,12 @@ def validate_config(config: ConfigFile, *, gcode_registry: bool = True) -> Valid
         # graph/text editors and the AI draft retry loop.
         if sec_type in _MACRO_TEMPLATE_SECTIONS or sec_type in _DISPLAY_TEMPLATE_SECTIONS:
             _validate_macro_jinja(section, result)
+
+        # W2 render simulation for the gcode family only: display
+        # templates render UI text, not commands, so rendered-command
+        # verdicts do not apply to them.
+        if gcode_registry and sec_type in _MACRO_TEMPLATE_SECTIONS:
+            _simulate_macro_render(section, result)
 
         # neopixel.color_order: each entry must be a permutation of RGB or
         # RGBW (extras/neopixel.py:33-37). It is a per-chain list, not a plain

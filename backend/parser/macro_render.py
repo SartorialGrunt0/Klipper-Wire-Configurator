@@ -322,6 +322,11 @@ def _render_one(env: jinja2.Environment, src: str, params: dict[str, str],
     try:
         out = env.from_string(src, globals=_macro_globals()).render(
             _render_context(params))
+    except jinja2.TemplateSyntaxError:
+        # Broken template: _validate_macro_jinja already reports it with
+        # the engine's own message and the right code. The simulation
+        # adds nothing here and must not crash the validation pass.
+        return [], None
     except UndefinedError as exc:
         lineno = getattr(exc, "lineno", None) or _undefined_line(
             getattr(exc, "message", ""), src)
