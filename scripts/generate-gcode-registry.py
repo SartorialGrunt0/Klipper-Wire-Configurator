@@ -27,7 +27,16 @@ REPO = Path(__file__).resolve().parent.parent
 DEFAULT_KLIPPER = REPO / "reference" / "klipper"
 DEFAULT_OUTPUT = REPO / "backend" / "data" / "gcode_commands.json"
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2  # 2026-11 W1: params gained "type"/"default"/"required"
+
+# gcmd parameter getters (reference/klipper/klippy/gcode.py GCodeCommand):
+# the default is the SECOND positional arg; a call with only the option
+# name raises at runtime, i.e. the param is REQUIRED. This rev has no
+# get_choice; add it here if the reference tree gains one.
+_PARAM_GETTER_TYPES = {
+    "get": "str", "gets": "str", "get_str": "str",
+    "get_int": "int", "get_float": "float", "getboolean": "bool",
+}
 
 # ---------------------------------------------------------------------------
 # Gate table: extras module -> config section types whose presence enables the
@@ -237,8 +246,40 @@ def _literal_str_list(node: ast.AST) -> list[str]:
     return []
 
 
+def _extract_handler_params(func_node: ast.FunctionDef) -> dict[str, dict]:
+    """Parse gcmd.get/get_int/get_float/getboolean('NAME', default…) calls
+    out of a command handler into {PARAM: {type, required[, default]}}.
+
+    required = no default argument at all (Klipper raises without one).
+    A non-literal default (rare, e.g. another variable) records the param
+    as optional without a default value.
+    """
+    params: dict[str, dict] = {}
+    for sub in ast.walk(func_node):
+        if not isinstance(sub, ast.Call) or not isinstance(sub.func, ast.Attribute):
+            continue
+        ptype = _PARAM_GETTER_TYPES.get(sub.func.attr)
+        if ptype is None or not sub.args:
+            continue
+        pname = _literal_str(sub.args[0])
+        if not pname:
+            continue
+        has_default = len(sub.args) > 1 or any(
+            kw.arg == "default" for kw in sub.keywords)
+        entry: dict = {"type": ptype, "required": not has_default}
+        if has_default:
+            dnode = sub.args[1] if len(sub.args) > 1 else next(
+                kw.value for kw in sub.keywords if kw.arg == "default")
+            if isinstance(dnode, ast.Constant) and isinstance(
+                    dnode.value, (str, int, float, bool)) or (
+                    isinstance(dnode, ast.Constant) and dnode.value is None):
+                entry["default"] = dnode.value
+        params[pname.upper()] = entry
+    return params
+
+
 class _FileVisitor(ast.NodeVisitor):
-    """Collects (name, mux_key, line) registration events per file.
+    """Collects (name, mux_key, line, handler) registration events per file.
 
     Handles three shapes:
       1. gcode.register_command('NAME', func, ...) / register_mux_command(
@@ -246,11 +287,21 @@ class _FileVisitor(ast.NodeVisitor):
       2. handlers = ['G1', 'G20', ...] ; for cmd in handlers:
              gcode.register_command(cmd, ...)
       3. for cmd in ['M20', ...]: register_command(cmd, ...)
+
+    A scalar registration's handler reference (bare name or self.method) is
+    recorded so param types can be parsed from the handler body; loop
+    registrations share one handler across commands (dispatch switch), so
+    they carry no handler.
     """
 
     def __init__(self) -> None:
-        self.registrations: list[tuple[str, str | None, int]] = []
+        self.registrations: list[tuple[str, str | None, int, str | None]] = []
         self.list_bindings: dict[str, list[str]] = {}
+        self.functions: dict[str, ast.FunctionDef] = {}
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.functions.setdefault(node.name, node)
+        self.generic_visit(node)
 
     # handlers = [...] / omega_handlers = [...]
     def visit_Assign(self, node: ast.Assign) -> None:
@@ -279,7 +330,7 @@ class _FileVisitor(ast.NodeVisitor):
                                 mux_key = _literal_str(sub.args[1])
                             for name in loop_names:
                                 self.registrations.append(
-                                    (name.upper(), mux_key, sub.lineno))
+                                    (name.upper(), mux_key, sub.lineno, None))
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -300,9 +351,15 @@ class _FileVisitor(ast.NodeVisitor):
                              and not (isinstance(node.args[func_idx],
                                                  ast.Constant)
                                       and node.args[func_idx].value is None))
+                handler: str | None = None
                 if real_func:
+                    ref = node.args[func_idx]
+                    if isinstance(ref, ast.Name):
+                        handler = ref.id
+                    elif isinstance(ref, ast.Attribute):
+                        handler = ref.attr
                     self.registrations.append(
-                        (name.upper(), mux_key, node.lineno))
+                        (name.upper(), mux_key, node.lineno, handler))
         self.generic_visit(node)
 
 
@@ -346,14 +403,16 @@ def extract_registry(klipper_root: Path) -> dict:
 
     commands: dict[str, dict] = {}
 
-    def record(name: str, module: str, mux_key: str | None, line: int) -> None:
+    def record(name: str, module: str, mux_key: str | None, line: int,
+               functions: dict[str, ast.FunctionDef],
+               handler: str | None) -> None:
         if not _is_command_name(name):
             return
         name = name.upper()
         sections, mode = _module_gate(name, module)
         entry = commands.get(name)
         if entry is None:
-            commands[name] = {
+            commands[name] = entry = {
                 "extra": module,
                 "requires_sections": sections,
                 "requires_mode": mode,
@@ -375,6 +434,18 @@ def extract_registry(klipper_root: Path) -> dict:
                     entry["requires_sections"] = []
             if mux_key and not entry.get("mux_key"):
                 entry["mux_key"] = mux_key
+        # Handler-derived typed params. A mux key is already required=True
+        # from the gate key; parsing must never downgrade it (mux commands
+        # never read the key via gcmd.get).
+        func_node = functions.get(handler) if handler else None
+        if func_node is not None:
+            params = entry.setdefault("params", {})
+            for pname, pdef in _extract_handler_params(func_node).items():
+                existing = params.setdefault(pname, {})
+                for field, value in pdef.items():
+                    if field == "required" and existing.get("required") is True:
+                        continue
+                    existing[field] = value
 
     for module, path in files:
         try:
@@ -384,8 +455,8 @@ def extract_registry(klipper_root: Path) -> dict:
             continue
         v = _FileVisitor()
         v.visit(tree)
-        for name, mux_key, line in v.registrations:
-            record(name, module, mux_key, line)
+        for name, mux_key, line, handler in v.registrations:
+            record(name, module, mux_key, line, v.functions, handler)
 
     # Manual extras are applied by main(), NOT inside extract_registry:
     # fixture trees must extract exactly what their source says.

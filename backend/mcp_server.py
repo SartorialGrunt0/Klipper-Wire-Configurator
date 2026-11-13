@@ -3044,6 +3044,56 @@ class McpServer:
                 break
         return "\n".join(body_lines)
 
+    @staticmethod
+    def _gcode_command_registry() -> dict[str, dict]:
+        """Command map of the generated registry, loaded once per process."""
+        cache = getattr(McpServer, "_gcode_registry_cache", None)
+        if cache is None:
+            try:
+                from services.gcode_registry import load_registry
+                cache = load_registry().get("commands", {})
+            except Exception:
+                cache = {}  # absent/corrupt artifact: presence checks off
+        McpServer._gcode_registry_cache = cache
+        return cache
+
+    @classmethod
+    def _missing_required_params(cls, gcode_body: str | None):
+        """Yield (param_name, body_line_no, command_token) for registry
+        commands missing a required parameter."""
+        if not gcode_body:
+            return
+        commands = cls._gcode_command_registry()
+        if not commands:
+            return
+        import re as _re
+        from services.gcode_registry import (
+            _CMD_TOKEN_RE, _COMMENT_RE, NON_COMMAND_TOKENS,
+            _logical_lines, _strip_jinja_inline,
+        )
+        for line_no, raw in _logical_lines(gcode_body):
+            # Klipper strips '#' at config-read and ';' at run time; both
+            # happen before the line is parsed into command + params.
+            line = _COMMENT_RE.sub("", raw.split("#", 1)[0]).strip()
+            if not line or line.startswith("{%"):
+                continue
+            line = _strip_jinja_inline(line)
+            if not line.strip():
+                continue
+            token = line.split()[0].upper()
+            if not _CMD_TOKEN_RE.match(token) or token in NON_COMMAND_TOKENS:
+                continue
+            entry = commands.get(token)
+            if not entry:
+                continue
+            for pname, pdef in sorted(entry.get("params", {}).items()):
+                if not pdef.get("required"):
+                    continue
+                # Klipper param tokens are 'NAME=value' delimited by space.
+                if not _re.search(rf"(?:^|\s){_re.escape(pname)}=", line,
+                                  _re.IGNORECASE):
+                    yield pname, line_no, token
+
     def _handle_validate_macro(self, args: dict[str, Any]) -> str:
         """Validate a Klipper gcode_macro for common structural issues."""
         macro_text = args.get("macro_text", "")
@@ -3105,6 +3155,23 @@ class McpServer:
                     "severity": "error",
                     "message": f"Jinja syntax error at gcode body line {body_lineno}: {message}",
                 })
+
+        # ── 2b. Registry required-parameter presence ──
+        # Schema v2 registry params: commands whose params Klipper reads
+        # without a default (gcmd.get('NAME')) are required at runtime.
+        # Lines are scanned exactly like the gcode_registry command scanner
+        # (logical-line joining, comment + Jinja span stripping), so
+        # 'LED={led}' keeps its literal 'LED=' and is never flagged.
+        # Known false-positive class, accepted at warning severity: a command
+        # whose ENTIRE param set is Jinja-built ('SET_LED {led_args}').
+        for pname, line_no, token in self._missing_required_params(gcode_body):
+            issues.append({
+                "severity": "warning",
+                "message": (
+                    f"Line {line_no}: '{token}' is missing required parameter "
+                    f"'{pname}=' — Klipper raises an error when this line runs."
+                ),
+            })
 
         # ── 3. Save/restore state pairing ──
         save_count = len(re.findall(r"SAVE_GCODE_STATE", code_text))

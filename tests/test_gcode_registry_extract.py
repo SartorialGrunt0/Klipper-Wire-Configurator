@@ -78,6 +78,30 @@ def test_fixture_mux_records_gate_key():
     assert set_led["requires_sections"] == ["dotstar", "led", "neopixel", "pca9533"]
 
 
+def test_fixture_extracts_param_types_and_required():
+    """W1 task 1.2: handler gcmd.get_* calls become typed params.
+
+    The mux key LED stays required; the handler's own calls add type +
+    default. Bare get('LABEL') (no default) is required; get_int with a
+    None default is optional.
+    """
+    mod = _load_extractor()
+    registry = mod.extract_registry(FAKE_TREE)
+    params = registry["commands"]["SET_LED"]["params"]
+    assert params["LED"] == {"required": True}
+    assert params["RED"] == {"type": "float", "required": False, "default": 0.0}
+    assert params["INDEX"] == {"type": "int", "required": False, "default": None}
+    assert params["SYNC"] == {"type": "bool", "required": False, "default": True}
+    assert params["LABEL"] == {"type": "str", "required": True}
+
+
+def test_fixture_schema_version_bumped():
+    mod = _load_extractor()
+    assert mod.SCHEMA_VERSION == 2
+    registry = mod.extract_registry(FAKE_TREE)
+    assert registry["schema_version"] == 2
+
+
 def test_fixture_gcode_builtin_has_no_gate():
     mod = _load_extractor()
     registry = mod.extract_registry(FAKE_TREE)
@@ -173,7 +197,7 @@ def test_artifact_schema_shape():
     if not ARTIFACT.is_file():
         pytest.skip("artifact not generated yet")
     data = json.loads(ARTIFACT.read_text())
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == 2
     assert isinstance(data["commands"], dict) and data["commands"]
     entry = data["commands"]["SET_LED"]
     assert set(entry) >= {"extra", "requires_sections", "requires_mode",

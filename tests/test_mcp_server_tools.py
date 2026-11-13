@@ -1288,6 +1288,65 @@ def test_validate_macro_parity_with_project_validator(tmp_path, body, expect_err
     assert proj_bad is expect_error
 
 
+# ── validate_macro: registry required-param presence ──
+
+
+def test_validate_macro_flags_missing_required_param(tmp_path):
+    """SET_LED without LED= is a runtime error in Klipper; the registry
+    (schema v2) knows LED is required, so the tool must flag it with line."""
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro TEST]\n"
+        "description: led ramp\n"
+        "gcode:\n"
+        "    G28\n"
+        "    SET_LED RED=1 GREEN=1 BLUE=1\n"
+    )})
+    assert "missing required parameter" in out
+    assert "LED" in out
+    assert "Line 2" in out
+
+
+def test_validate_macro_required_param_from_jinja_ok(tmp_path):
+    """LED={led_name} keeps the literal 'LED=' after span stripping — the
+    Jinja-supplied value must not be flagged."""
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro TEST]\n"
+        "description: led\n"
+        "gcode:\n"
+        "    SET_LED LED={led_name} RED=1\n"
+    )})
+    assert "missing required parameter" not in out
+
+
+def test_validate_macro_presence_check_optional_and_unknown(tmp_path):
+    """Fully-specified registry commands, optional params omitted, and
+    unknown/custom commands must all stay silent."""
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro TEST]\n"
+        "description: fine\n"
+        "gcode:\n"
+        "    SET_GCODE_VARIABLE MACRO=OTHER VARIABLE=v VALUE=1\n"
+        "    MY_CUSTOM_MACRO_NOARGS\n"
+        "    M104 S200\n"
+    )})
+    assert "missing required parameter" not in out
+
+
+def test_validate_macro_presence_check_gcode_variables(tmp_path):
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro TEST]\n"
+        "description: var\n"
+        "gcode:\n"
+        "    SET_GCODE_VARIABLE MACRO=OTHER VALUE=1\n"
+    )})
+    assert "missing required parameter" in out
+    assert "VARIABLE" in out
+
+
 def test_validate_macro_save_restore_state(tmp_path):
     server, _ = _server(tmp_path)
     out = _call_tool(server, "validate_macro", {"macro_text": (

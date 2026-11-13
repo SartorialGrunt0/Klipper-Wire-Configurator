@@ -1,7 +1,7 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "source_rev": "2d7717e3b62ea2fe3401b27f54f8681f80451c69",
-  "generated_at": "2026-09-30T05:37:43+00:00",
+  "generated_at": "2026-11-13T12:47:48+00:00",
   "commands": {
     "ABORT": {
       "extra": "bed_screws",
@@ -24,6 +24,10 @@
       "params": {
         "CHIP": {
           "required": true
+        },
+        "REG": {
+          "type": "str",
+          "required": true
         }
       },
       "mux_key": "CHIP",
@@ -38,6 +42,14 @@
       "requires_mode": "any",
       "params": {
         "CHIP": {
+          "required": true
+        },
+        "REG": {
+          "type": "str",
+          "required": true
+        },
+        "VAL": {
+          "type": "str",
           "required": true
         }
       },
@@ -54,6 +66,10 @@
       "params": {
         "CHIP": {
           "required": true
+        },
+        "NAME": {
+          "type": "str",
+          "required": false
         }
       },
       "mux_key": "CHIP",
@@ -149,6 +165,10 @@
       "params": {
         "CHIP": {
           "required": true
+        },
+        "REG": {
+          "type": "str",
+          "required": true
         }
       },
       "mux_key": "CHIP",
@@ -164,6 +184,14 @@
       "params": {
         "CHIP": {
           "required": true
+        },
+        "REG": {
+          "type": "str",
+          "required": true
+        },
+        "VAL": {
+          "type": "str",
+          "required": true
         }
       },
       "mux_key": "CHIP",
@@ -176,6 +204,17 @@
         "axis_twist_compensation"
       ],
       "requires_mode": "any",
+      "params": {
+        "SAMPLE_COUNT": {
+          "type": "int",
+          "required": false
+        },
+        "AXIS": {
+          "type": "str",
+          "required": false,
+          "default": "X"
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 147
@@ -186,6 +225,13 @@
         "bed_mesh"
       ],
       "requires_mode": "any",
+      "params": {
+        "PROFILE": {
+          "type": "str",
+          "required": false,
+          "default": "default"
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 347
@@ -216,6 +262,13 @@
         "bed_mesh"
       ],
       "requires_mode": "any",
+      "params": {
+        "ZFADE": {
+          "type": "float",
+          "required": false,
+          "default": null
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 121
@@ -226,6 +279,13 @@
         "bed_mesh"
       ],
       "requires_mode": "any",
+      "params": {
+        "PGP": {
+          "type": "int",
+          "required": false,
+          "default": 0
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 112
@@ -266,6 +326,13 @@
         "bltouch"
       ],
       "requires_mode": "any",
+      "params": {
+        "COMMAND": {
+          "type": "str",
+          "required": false,
+          "default": null
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 68
@@ -276,6 +343,13 @@
         "bltouch"
       ],
       "requires_mode": "any",
+      "params": {
+        "MODE": {
+          "type": "str",
+          "required": false,
+          "default": null
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 70
@@ -286,6 +360,20 @@
         "skew_correction"
       ],
       "requires_mode": "any",
+      "params": {
+        "AC": {
+          "type": "float",
+          "required": true
+        },
+        "BD": {
+          "type": "float",
+          "required": true
+        },
+        "AD": {
+          "type": "float",
+          "required": true
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 36
@@ -296,6 +384,12 @@
         "load_cell"
       ],
       "requires_mode": "any",
+      "params": {
+        "GRAMS": {
+          "type": "float",
+          "required": true
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 178
@@ -326,6 +420,18 @@
         "delta_calibrate"
       ],
       "requires_mode": "any",
+      "params": {
+        "MANUAL_HEIGHT": {
+          "type": "float",
+          "required": false,
+          "default": null
+        },
+        "CALIBRATE": {
+          "type": "str",
+          "required": false,
+          "default": null
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 125
@@ -378,6 +484,11 @@
       "params": {
         "STEPPER": {
           "required": true
+        },
+        "REGISTER": {
+          "type": "str",
+          "required": false,
+          "default": null
         }
       },
       "mux_key": "STEPPER",
@@ -409,6 +520,13 @@
         "tsl1401cl_filament_width_sensor"
       ],
       "requires_mode": "any",
+      "params": {
+        "FLOW_COMPENSATION": {
+          "type": "int",
+          "required": false,
+          "default": null
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 87
@@ -419,6 +537,13 @@
         "stepper_endstop"
       ],
       "requires_mode": "any",
+      "params": {
+        "STEPPER": {
+          "type": "str",
+          "required": false,
+          "default": null
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 138
@@ -427,6 +552,23 @@
       "extra": "exclude_object",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "RESET": {
+          "type": "str",
+          "required": false,
+          "default": null
+        },
+        "CURRENT": {
+          "type": "str",
+          "required": false,
+          "default": null
+        },
+        "NAME": {
+          "type": "str",
+          "required": false,
+          "default": ""
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 31
@@ -435,6 +577,18 @@
       "extra": "exclude_object",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "RESET": {
+          "type": "str",
+          "required": false,
+          "default": null
+        },
+        "NAME": {
+          "type": "str",
+          "required": false,
+          "default": ""
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 34
@@ -443,6 +597,13 @@
       "extra": "exclude_object",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "NAME": {
+          "type": "str",
+          "required": false,
+          "default": null
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 28
@@ -451,6 +612,12 @@
       "extra": "exclude_object",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "NAME": {
+          "type": "str",
+          "required": true
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 25
@@ -471,7 +638,21 @@
       "requires_mode": "any",
       "params": {
         "STEPPER": {
+          "required": true,
+          "type": "str"
+        },
+        "DISTANCE": {
+          "type": "float",
           "required": true
+        },
+        "VELOCITY": {
+          "type": "float",
+          "required": true
+        },
+        "ACCEL": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
         }
       },
       "mux_key": "STEPPER",
@@ -595,6 +776,13 @@
       "extra": "toolhead",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "P": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 559
@@ -763,6 +951,18 @@
         "load_cell_probe"
       ],
       "requires_mode": "any",
+      "params": {
+        "TAPS": {
+          "type": "int",
+          "required": false,
+          "default": 3
+        },
+        "TIMEOUT": {
+          "type": "float",
+          "required": false,
+          "default": 30.0
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 631
@@ -771,6 +971,18 @@
       "extra": "extruder",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "S": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        },
+        "T": {
+          "type": "int",
+          "required": false,
+          "default": null
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 187
@@ -787,6 +999,13 @@
       "extra": "fan",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "S": {
+          "type": "float",
+          "required": false,
+          "default": 255.0
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 109
@@ -867,6 +1086,13 @@
       "extra": "heater_bed",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "S": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 16
@@ -901,6 +1127,23 @@
       "extra": "toolhead",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "S": {
+          "type": "float",
+          "required": false,
+          "default": null
+        },
+        "P": {
+          "type": "float",
+          "required": false,
+          "default": null
+        },
+        "T": {
+          "type": "float",
+          "required": false,
+          "default": null
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 564
@@ -1023,6 +1266,13 @@
       "extra": "display_status",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "P": {
+          "type": "float",
+          "required": false,
+          "default": null
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 17
@@ -1068,6 +1318,43 @@
       "params": {
         "STEPPER": {
           "required": true
+        },
+        "ENABLE": {
+          "type": "int",
+          "required": false,
+          "default": null
+        },
+        "SET_POSITION": {
+          "type": "float",
+          "required": false,
+          "default": null
+        },
+        "SPEED": {
+          "type": "float",
+          "required": false
+        },
+        "ACCEL": {
+          "type": "float",
+          "required": false
+        },
+        "STOP_ON_ENDSTOP": {
+          "type": "str",
+          "required": false,
+          "default": null
+        },
+        "GCODE_AXIS": {
+          "type": "str",
+          "required": false,
+          "default": null
+        },
+        "MOVE": {
+          "type": "float",
+          "required": true
+        },
+        "SYNC": {
+          "type": "int",
+          "required": false,
+          "default": 0
         }
       },
       "mux_key": "STEPPER",
@@ -1080,6 +1367,13 @@
         "resonance_tester"
       ],
       "requires_mode": "any",
+      "params": {
+        "MEAS_TIME": {
+          "type": "float",
+          "required": false,
+          "default": 2.0
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 289
@@ -1156,6 +1450,21 @@
       "extra": "pid_calibrate",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "HEATER": {
+          "type": "str",
+          "required": true
+        },
+        "TARGET": {
+          "type": "float",
+          "required": true
+        },
+        "WRITE_FILE": {
+          "type": "int",
+          "required": false,
+          "default": 0
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 13
@@ -1176,6 +1485,13 @@
         "probe"
       ],
       "requires_mode": "any",
+      "params": {
+        "SAMPLES": {
+          "type": "int",
+          "required": false,
+          "default": 10
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 62
@@ -1199,6 +1515,11 @@
       "params": {
         "CHIP": {
           "required": true
+        },
+        "PROBE_SPEED": {
+          "type": "float",
+          "required": false,
+          "default": 5.0
         }
       },
       "mux_key": "CHIP",
@@ -1211,6 +1532,13 @@
         "probe_eddy_current"
       ],
       "requires_mode": "any",
+      "params": {
+        "TAP": {
+          "type": "str",
+          "required": false,
+          "default": null
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 340
@@ -1231,6 +1559,18 @@
         "adc_temperature"
       ],
       "requires_mode": "any",
+      "params": {
+        "NAME": {
+          "type": "str",
+          "required": false,
+          "default": null
+        },
+        "PULLUP": {
+          "type": "float",
+          "required": false,
+          "default": null
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 12
@@ -1330,6 +1670,22 @@
       "extra": "respond",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "TYPE": {
+          "type": "str",
+          "required": false,
+          "default": null
+        },
+        "PREFIX": {
+          "type": "str",
+          "required": false
+        },
+        "MSG": {
+          "type": "str",
+          "required": false,
+          "default": ""
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 26
@@ -1346,6 +1702,23 @@
       "extra": "idex_modes",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "NAME": {
+          "type": "str",
+          "required": false,
+          "default": "default"
+        },
+        "MOVE_SPEED": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        },
+        "MOVE": {
+          "type": "int",
+          "required": false,
+          "default": 1
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 56
@@ -1364,6 +1737,12 @@
         "pause_resume"
       ],
       "requires_mode": "any",
+      "params": {
+        "VELOCITY": {
+          "type": "float",
+          "required": false
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 20
@@ -1380,6 +1759,13 @@
       "extra": "idex_modes",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "NAME": {
+          "type": "str",
+          "required": false,
+          "default": "default"
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 52
@@ -1398,6 +1784,16 @@
         "save_variables"
       ],
       "requires_mode": "any",
+      "params": {
+        "VARIABLE": {
+          "type": "str",
+          "required": true
+        },
+        "VALUE": {
+          "type": "str",
+          "required": true
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 23
@@ -1408,6 +1804,18 @@
         "screws_tilt_adjust"
       ],
       "requires_mode": "any",
+      "params": {
+        "MAX_DEVIATION": {
+          "type": "float",
+          "required": false,
+          "default": null
+        },
+        "DIRECTION": {
+          "type": "str",
+          "required": false,
+          "default": null
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 41
@@ -1418,6 +1826,12 @@
         "sdcard_loop"
       ],
       "requires_mode": "any",
+      "params": {
+        "COUNT": {
+          "type": "int",
+          "required": true
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 14
@@ -1448,6 +1862,12 @@
         "virtual_sdcard"
       ],
       "requires_mode": "any",
+      "params": {
+        "FILENAME": {
+          "type": "str",
+          "required": true
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 46
@@ -1471,6 +1891,10 @@
       "params": {
         "DIGIPOT": {
           "required": true
+        },
+        "WIPER": {
+          "type": "float",
+          "required": true
         }
       },
       "mux_key": "DIGIPOT",
@@ -1481,6 +1905,13 @@
       "extra": "display_status",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "MSG": {
+          "type": "str",
+          "required": false,
+          "default": null
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 19
@@ -1489,6 +1920,17 @@
       "extra": "idex_modes",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "CARRIAGE": {
+          "type": "str",
+          "required": false,
+          "default": null
+        },
+        "MODE": {
+          "type": "str",
+          "required": false
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 49
@@ -1500,6 +1942,11 @@
       "params": {
         "EXTRUDER": {
           "required": true
+        },
+        "DISTANCE": {
+          "type": "float",
+          "required": false,
+          "default": null
         }
       },
       "mux_key": "EXTRUDER",
@@ -1515,6 +1962,16 @@
       "params": {
         "FAN": {
           "required": true
+        },
+        "SPEED": {
+          "type": "float",
+          "required": false,
+          "default": null
+        },
+        "TEMPLATE": {
+          "type": "str",
+          "required": false,
+          "default": null
         }
       },
       "mux_key": "FAN",
@@ -1531,6 +1988,11 @@
       "params": {
         "SENSOR": {
           "required": true
+        },
+        "ENABLE": {
+          "type": "int",
+          "required": false,
+          "default": 1
         }
       },
       "mux_key": "SENSOR",
@@ -1552,6 +2014,14 @@
       "params": {
         "MACRO": {
           "required": true
+        },
+        "VARIABLE": {
+          "type": "str",
+          "required": true
+        },
+        "VALUE": {
+          "type": "str",
+          "required": true
         }
       },
       "mux_key": "MACRO",
@@ -1565,6 +2035,11 @@
       "params": {
         "HEATER": {
           "required": true
+        },
+        "TARGET": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
         }
       },
       "mux_key": "HEATER",
@@ -1577,6 +2052,12 @@
         "idle_timeout"
       ],
       "requires_mode": "any",
+      "params": {
+        "TIMEOUT": {
+          "type": "float",
+          "required": false
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 29
@@ -1597,6 +2078,35 @@
         "force_move"
       ],
       "requires_mode": "any",
+      "params": {
+        "X": {
+          "type": "float",
+          "required": false
+        },
+        "Y": {
+          "type": "float",
+          "required": false
+        },
+        "Z": {
+          "type": "float",
+          "required": false
+        },
+        "CLEAR_HOMED": {
+          "type": "str",
+          "required": false,
+          "default": ""
+        },
+        "SET_HOMED": {
+          "type": "str",
+          "required": false,
+          "default": "xyz"
+        },
+        "CLEAR": {
+          "type": "str",
+          "required": false,
+          "default": ""
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 45,
@@ -1616,6 +2126,41 @@
       "params": {
         "LED": {
           "required": true
+        },
+        "RED": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        },
+        "GREEN": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        },
+        "BLUE": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        },
+        "WHITE": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        },
+        "INDEX": {
+          "type": "int",
+          "required": false,
+          "default": null
+        },
+        "TRANSMIT": {
+          "type": "int",
+          "required": false,
+          "default": 1
+        },
+        "SYNC": {
+          "type": "int",
+          "required": false,
+          "default": 1
         }
       },
       "mux_key": "LED",
@@ -1634,6 +2179,11 @@
       "params": {
         "LED": {
           "required": true
+        },
+        "INDEX": {
+          "type": "int",
+          "required": false,
+          "default": null
         }
       },
       "mux_key": "LED",
@@ -1651,6 +2201,20 @@
       "params": {
         "PIN": {
           "required": true
+        },
+        "VALUE": {
+          "type": "float",
+          "required": true,
+          "default": null
+        },
+        "TEMPLATE": {
+          "type": "str",
+          "required": false,
+          "default": null
+        },
+        "CYCLE_TIME": {
+          "type": "float",
+          "required": false
         }
       },
       "mux_key": "PIN",
@@ -1664,6 +2228,14 @@
       "params": {
         "EXTRUDER": {
           "required": true
+        },
+        "ADVANCE": {
+          "type": "float",
+          "required": false
+        },
+        "SMOOTH_TIME": {
+          "type": "float",
+          "required": false
         }
       },
       "mux_key": "EXTRUDER",
@@ -1674,6 +2246,16 @@
       "extra": "print_stats",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "TOTAL_LAYER": {
+          "type": "int",
+          "required": false
+        },
+        "CURRENT_LAYER": {
+          "type": "int",
+          "required": false
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 15
@@ -1684,6 +2266,24 @@
         "firmware_retraction"
       ],
       "requires_mode": "any",
+      "params": {
+        "RETRACT_LENGTH": {
+          "type": "float",
+          "required": false
+        },
+        "RETRACT_SPEED": {
+          "type": "float",
+          "required": false
+        },
+        "UNRETRACT_EXTRA_LENGTH": {
+          "type": "float",
+          "required": false
+        },
+        "UNRETRACT_SPEED": {
+          "type": "float",
+          "required": false
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 19
@@ -1697,6 +2297,15 @@
       "params": {
         "SERVO": {
           "required": true
+        },
+        "WIDTH": {
+          "type": "float",
+          "required": false,
+          "default": null
+        },
+        "ANGLE": {
+          "type": "float",
+          "required": true
         }
       },
       "mux_key": "SERVO",
@@ -1709,6 +2318,13 @@
         "skew_correction"
       ],
       "requires_mode": "any",
+      "params": {
+        "CLEAR": {
+          "type": "int",
+          "required": false,
+          "default": 0
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 39
@@ -1719,6 +2335,21 @@
         "smart_effector"
       ],
       "requires_mode": "any",
+      "params": {
+        "SENSITIVITY": {
+          "type": "int",
+          "required": false,
+          "default": null
+        },
+        "ACCEL": {
+          "type": "float",
+          "required": false
+        },
+        "RECOVERY_TIME": {
+          "type": "float",
+          "required": false
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 72
@@ -1727,6 +2358,21 @@
       "extra": "generic_cartesian",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "STEPPER": {
+          "type": "str",
+          "required": true
+        },
+        "DISABLE_CHECKS": {
+          "type": "int",
+          "required": false,
+          "default": 0
+        },
+        "CARRIAGES": {
+          "type": "str",
+          "required": true
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 170
@@ -1737,7 +2383,13 @@
       "requires_mode": "any",
       "params": {
         "STEPPER": {
-          "required": true
+          "required": true,
+          "type": "str"
+        },
+        "ENABLE": {
+          "type": "int",
+          "required": false,
+          "default": 1
         }
       },
       "mux_key": "STEPPER",
@@ -1753,6 +2405,18 @@
       "params": {
         "TEMPERATURE_FAN": {
           "required": true
+        },
+        "TARGET": {
+          "type": "float",
+          "required": false
+        },
+        "MIN_SPEED": {
+          "type": "float",
+          "required": false
+        },
+        "MAX_SPEED": {
+          "type": "float",
+          "required": false
         }
       },
       "mux_key": "TEMPERATURE_FAN",
@@ -1776,6 +2440,16 @@
       "params": {
         "STEPPER": {
           "required": true
+        },
+        "CURRENT": {
+          "type": "float",
+          "required": false,
+          "default": null
+        },
+        "HOLDCURRENT": {
+          "type": "float",
+          "required": false,
+          "default": null
         }
       },
       "mux_key": "STEPPER",
@@ -1799,6 +2473,20 @@
       "params": {
         "STEPPER": {
           "required": true
+        },
+        "VALUE": {
+          "type": "int",
+          "required": false,
+          "default": null
+        },
+        "VELOCITY": {
+          "type": "float",
+          "required": false,
+          "default": null
+        },
+        "FIELD": {
+          "type": "str",
+          "required": true
         }
       },
       "mux_key": "STEPPER",
@@ -1809,6 +2497,28 @@
       "extra": "toolhead",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "VELOCITY": {
+          "type": "float",
+          "required": false,
+          "default": null
+        },
+        "ACCEL": {
+          "type": "float",
+          "required": false,
+          "default": null
+        },
+        "SQUARE_CORNER_VELOCITY": {
+          "type": "float",
+          "required": false,
+          "default": null
+        },
+        "MINIMUM_CRUISE_RATIO": {
+          "type": "float",
+          "required": false,
+          "default": null
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 561
@@ -1819,6 +2529,23 @@
         "z_thermal_adjust"
       ],
       "requires_mode": "any",
+      "params": {
+        "ENABLE": {
+          "type": "int",
+          "required": false,
+          "default": null
+        },
+        "TEMP_COEFF": {
+          "type": "float",
+          "required": false,
+          "default": null
+        },
+        "REF_TEMP": {
+          "type": "float",
+          "required": false,
+          "default": null
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 58
@@ -1829,6 +2556,26 @@
         "resonance_tester"
       ],
       "requires_mode": "any",
+      "params": {
+        "AXIS": {
+          "type": "str",
+          "required": false,
+          "default": null
+        },
+        "CHIPS": {
+          "type": "str",
+          "required": false,
+          "default": null
+        },
+        "MAX_SMOOTHING": {
+          "type": "float",
+          "required": false
+        },
+        "NAME": {
+          "type": "str",
+          "required": false
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 295
@@ -1839,6 +2586,20 @@
         "skew_correction"
       ],
       "requires_mode": "any",
+      "params": {
+        "LOAD": {
+          "type": "str",
+          "required": true
+        },
+        "SAVE": {
+          "type": "str",
+          "required": true
+        },
+        "REMOVE": {
+          "type": "str",
+          "required": true
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 41
@@ -1857,7 +2618,8 @@
       "requires_mode": "any",
       "params": {
         "STEPPER": {
-          "required": true
+          "required": true,
+          "type": "str"
         }
       },
       "mux_key": "STEPPER",
@@ -1870,6 +2632,10 @@
       "requires_mode": "any",
       "params": {
         "EXTRUDER": {
+          "required": true
+        },
+        "MOTION_QUEUE": {
+          "type": "str",
           "required": true
         }
       },
@@ -1896,6 +2662,20 @@
       "params": {
         "PROBE": {
           "required": true
+        },
+        "TARGET": {
+          "type": "float",
+          "required": true
+        },
+        "STEP": {
+          "type": "float",
+          "required": false,
+          "default": 2.0
+        },
+        "METHOD": {
+          "type": "str",
+          "required": false,
+          "default": "manual"
         }
       },
       "mux_key": "PROBE",
@@ -1943,6 +2723,19 @@
       "requires_mode": "any",
       "params": {
         "SENSOR": {
+          "required": true,
+          "type": "str"
+        },
+        "MINIMUM": {
+          "type": "float",
+          "required": false
+        },
+        "MAXIMUM": {
+          "type": "float",
+          "required": false
+        },
+        "DEBUGOUTPUT": {
+          "type": "str",
           "required": true
         }
       },
@@ -1954,6 +2747,12 @@
       "extra": "manual_probe",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "Z": {
+          "type": "float",
+          "required": true
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 181
@@ -1964,6 +2763,31 @@
         "resonance_tester"
       ],
       "requires_mode": "any",
+      "params": {
+        "CHIPS": {
+          "type": "str",
+          "required": false,
+          "default": null
+        },
+        "POINT": {
+          "type": "str",
+          "required": false,
+          "default": null
+        },
+        "NAME": {
+          "type": "str",
+          "required": false
+        },
+        "AXIS": {
+          "type": "str",
+          "required": true
+        },
+        "OUTPUT": {
+          "type": "str",
+          "required": false,
+          "default": "resonances"
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 292
@@ -1974,6 +2798,46 @@
         "tuning_tower"
       ],
       "requires_mode": "any",
+      "params": {
+        "COMMAND": {
+          "type": "str",
+          "required": true
+        },
+        "PARAMETER": {
+          "type": "str",
+          "required": true
+        },
+        "START": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        },
+        "FACTOR": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        },
+        "BAND": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        },
+        "STEP_DELTA": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        },
+        "STEP_HEIGHT": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        },
+        "SKIP": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 21
@@ -1994,6 +2858,10 @@
       "requires_mode": "any",
       "params": {
         "ID": {
+          "required": true
+        },
+        "DURATION": {
+          "type": "float",
           "required": true
         }
       },
@@ -2024,6 +2892,13 @@
         "probe_eddy_current"
       ],
       "requires_mode": "any",
+      "params": {
+        "METHOD": {
+          "type": "str",
+          "required": false,
+          "default": ""
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 65
