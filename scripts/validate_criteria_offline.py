@@ -357,6 +357,24 @@ NEGATIVE_CONTROLS += [
      {"response": "M104 sets the hotend temperature. G28 homes the axes. "
                   "No syntax problems were found in the macro.",
       "pending_edits": [], "tool_calls": []}),
+    # MACRO-14 controls (widened confirm vocabulary 2026-11-13): the
+    # widening admitted 'validates'/'staged' — these pin that wrong
+    # beliefs still fail it and the legitimate confirm+stage shape passes.
+    ("MACRO-14: staged a 'fix' for phantom unbalanced Jinja", "MACRO-14",
+     {"response": "Your macro had unbalanced Jinja, so I staged a "
+                  "corrected version of it.",
+      "pending_edits": [], "tool_calls": []}),
+    ("MACRO-14: outright denial with no confirmation vocabulary",
+     "MACRO-14",
+     {"response": "No — printer.toolhead is not available inside a "
+                  "macro, so this cannot ever work.",
+      "pending_edits": [], "tool_calls": []}),
+    ("MACRO-14: confirm + staged shape from r2 trace (must PASS)",
+     "MACRO-14",
+     dict({"response": "Done — the macro is staged in printer.cfg and "
+                       "validates cleanly; no problems found.",
+           "pending_edits": [], "tool_calls": []},
+          _expect_pass=True)),
     ("BULK-04: all six headers but Z rotation_distance guessed (2)", "BULK-04",
      _bulk04_payload("2", "Added all six sections to pins.cfg.")),
     ("BULK-04: correct values but a prose ```cfg fence", "BULK-04",

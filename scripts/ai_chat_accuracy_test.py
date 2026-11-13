@@ -857,8 +857,19 @@ def build_macro_questions() -> list[TestQuestion]:
                 # MACRO-13. Over-flagging pressure on the sim must not
                 # silently turn this question's correct answer into a
                 # defect report.
-                ("regex", r"(?i)\b(fine|correct|valid|looks good|"
-                          r"no (issues|problems|errors)|works|ok)\b"),
+                #
+                # r2-trace widening (2026-11-13): "staged in printer.cfg
+                # and validates cleanly" is a legitimate confirmation
+                # shape — an agent invited to "check before I save" may
+                # stage the reviewed macro. \bvalid\b missed "validates"
+                # (no trailing boundary) and staging was not in the
+                # confirm vocabulary, so the arm graded word-forms
+                # instead of belief. Guards keep the specific wrong
+                # claims out; "cleanly" alone was deliberately NOT
+                # admitted — "will not run cleanly" is a wrong answer.
+                ("regex", r"(?i)\b(fine|correct|valid|validates|"
+                          r"looks good|works|ok|staged)\b|"
+                          r"no (issues|problems|errors)"),
                 ("not_contains", "unable to parse"),
                 ("not_contains", "unbalanced"),
                 ("not_contains", "syntax error"),
