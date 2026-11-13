@@ -3524,6 +3524,60 @@ def criterion_ok(kind: str, value: str, content: str,
                 return not re.search(pattern, e.get("newText") or "",
                                      re.IGNORECASE | re.DOTALL)
         return False
+    if kind == "staged_renders_clean":
+        # W2 RUNTIME CLASS: the staged macros on the target file must not
+        # merely COMPILE — each must render to a parseable command at its
+        # default invocation (empty `params_` default + brace ref is
+        # cross-line: no single staged-text regex decides it without
+        # false-failing the correct fix). Graded by the SHARED render
+        # simulator — the same engine as the save gate and validate_macro,
+        # so the grader can never drift weaker than what ships.
+        # value = escaped target filename regex (e.g. "printer\\.cfg").
+        # An artifact is REQUIRED (staged_* family convention): nothing
+        # staged on the target file is a FAIL, not a pass.
+        if not pending_edits:
+            return False
+        pat = re.compile(value, re.IGNORECASE)
+        targets = [e for e in pending_edits
+                   if isinstance(e, dict) and pat.search(str(e.get("file", "")))
+                   and str(e.get("newText") or "").strip()]
+        if not targets:
+            return False
+        import sys as _sys
+        from pathlib import Path as _Path
+        _backend = str(_Path(__file__).resolve().parents[1] / "backend")
+        if _backend not in _sys.path:
+            _sys.path.insert(0, _backend)
+        from parser.config_parser import parse_config
+        from parser.validator import _TEMPLATE_SECTION_BODIES
+        from parser.macro_render import simulate_macro
+        for e in targets:
+            try:
+                cfg = parse_config(str(e.get("newText")))
+            except Exception:
+                return False
+            for sec in cfg.sections:
+                if sec.section_type not in _TEMPLATE_SECTION_BODIES:
+                    continue
+                bp = _TEMPLATE_SECTION_BODIES[sec.section_type]
+                sp = sec.get_param(bp)
+                if sp is None or not str(sp.value).strip():
+                    continue
+                sim_params = {
+                    q.key[len("params_"):].lower(): q.value
+                    for q in sec.params
+                    if q.key.startswith("params_") and not q.is_commented_out
+                }
+                try:
+                    sim = simulate_macro(str(sp.value), sim_params)
+                except Exception:
+                    return False
+                # Compile failures surface HERE as error findings — the
+                # simulator folds Jinja syntax/runtime errors into the
+                # same findings list (no separate compile_error field).
+                if any(f.severity == "error" for f in sim.findings):
+                    return False
+        return True
     if kind == "staged_section_regex":
         # "file::section::regex" — regex searched WITHIN the named
         # section body of the staged newText (section-aware so a stray
