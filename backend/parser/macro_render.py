@@ -78,12 +78,16 @@ shows whether the invocation is legal.
 from __future__ import annotations
 
 import ast
+import logging
 import re
+import shlex
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
 
 import jinja2
 from jinja2 import UndefinedError
+
+logger = logging.getLogger(__name__)
 
 # Cap on total branch renderings per macro (plan 2.1). Exotic branch
 # counts degrade to macro_render_unexplored info instead of blowing up.
@@ -595,7 +599,15 @@ def _render_one(env: jinja2.Environment, src: str, params: dict[str, str],
             "was not validated by the render simulator.",
             variant=variant,
         )
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, ArithmeticError, RecursionError,
+            MemoryError) as exc:
+        # Review L1/S2: ZeroDivisionError (`{100 / total}` with
+        # variable_total: 0 — a VALID macro), overflow, runaway
+        # allocation/recursion must never escape into validate_config —
+        # one pathological macro cannot break validation of every other
+        # section. Swallowed best-effort BUT logged (diagnosable).
+        logger.warning("macro render simulation blocked (%s): %s",
+                       type(exc).__name__, exc, exc_info=True)
         return [], RenderFinding(
             "info", "macro_render_blocked",
             f"Rendering raised {type(exc).__name__}: {exc}; this path was "
@@ -647,9 +659,27 @@ def _looks_unknown(value: str) -> bool:
     return any(m in v for m in _UNKNOWN_MARKERS)
 
 
+def _is_traditional_gcode(token: str) -> bool:
+    """Mirror gcode.py is_traditional_gcode (125-131): a letter (or
+    letters) followed by digits — 'M106', 'G1', 'G04'. Traditional
+    commands parse args by letter-split (no quotes); everything else
+    gets shlex extended-params parsing at run time."""
+    return (len(token) > 1 and token[0].isalpha() and token[0].isupper()
+            and token[1:].isdigit())
+
+
 def _check_rendered_line(text: str, registry: dict, variant: int,
                          source_line: int | None = None) -> list[RenderFinding]:
     from services.gcode_registry import NON_COMMAND_TOKENS, _CMD_TOKEN_RE
+
+    # Klipper executes every line comment-stripped (gcode.py:204-208:
+    # strip, then cut at the FIRST ';' — whitespace or not, quotes or
+    # not). Review L2: skipping this false-flagged Klipper's own shipped
+    # 'M140 S{...}; keep temperature' as unparseable.
+    text = text.strip()
+    cpos = text.find(';')
+    if cpos >= 0:
+        text = text[:cpos]
 
     parts = text.split()
     if not parts:
@@ -680,21 +710,45 @@ def _check_rendered_line(text: str, registry: dict, variant: int,
         return []
 
     findings: list[RenderFinding] = []
-    # Klipper's own tokenizing (gcode.py): every token after the command
-    # is a parameter — 'NAME=value' takes everything before '=' as the
-    # key; traditional single-char args ('S100', and the EMPTY-valued
-    # 'S' a bare template substitution renders) take the first char as
-    # key and the rest as value. Last occurrence wins, like the params
-    # dict. The old NAME=value-only regex silently skipped every
-    # traditional-rendered param (M106 S100, M104 S...).
+    # Klipper tokenizes parameters in TWO flavors (review L7):
+    # traditional letter+digits commands parse letter+value chunks with
+    # NO quote handling (gcode.py args_r split), while every other
+    # command goes through _get_extended_params (gcode.py:266-276):
+    # shlex posix, whitespace_split, commenters '#;', 'NAME=value' split
+    # at the first '=', keys uppercased, unbalanced quotes -> 'Malformed
+    # command' refusal at run time. Last occurrence wins, like the
+    # params dict.
     present: dict[str, str] = {}
-    for tok in text.split()[1:]:
-        if "=" in tok:
-            key, _, value = tok.partition("=")
-            if key:
+    malformed = False
+    if _is_traditional_gcode(token):
+        for tok in text.split()[1:]:
+            if "=" in tok:
+                key, _, value = tok.partition("=")
+                if key:
+                    present[key.upper()] = value
+            else:
+                present[tok[0].upper()] = tok[1:]
+    else:
+        lexer = shlex.shlex(text[len(token):], posix=True)
+        lexer.whitespace_split = True
+        lexer.commenters = "#;"
+        try:
+            for earg in lexer:
+                key, sep, value = earg.partition("=")
+                if not sep:
+                    # klippy's earg.split('=', 1) unpack raises ValueError
+                    # -> 'Malformed command': a bare arg is a refusal.
+                    malformed = True
+                    break
                 present[key.upper()] = value
-        else:
-            present[tok[0].upper()] = tok[1:]
+        except ValueError:
+            malformed = True
+    if malformed:
+        return [RenderFinding(
+            "error", "macro_param_unparseable",
+            f"Malformed command '{text[:80]}' — Klipper refuses to parse "
+            "it at run time (unbalanced quotes or a bare argument).",
+            variant=variant, source_line=source_line)]
     seen_unknown = False
     for pname, pdef in sorted((entry.get("params") or {}).items()):
         pdef = pdef or {}
@@ -754,6 +808,15 @@ def _scan_set_variables(rendered_texts: list[tuple[str, int]]) -> list[tuple[str
 
 
 # ── engine entry ───────────────────────────────────────────────────────────
+
+def _coerce_str_map(mapping: dict | None) -> dict[str, str]:
+    """str->str coercion with lowercase keys (Klipper invocation params
+    are always text; lookups are case-insensitive)."""
+    if not mapping:
+        return {}
+    return {str(k).lower(): (v if isinstance(v, str) else str(v))
+            for k, v in mapping.items()}
+
 
 def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
                             known_macros: frozenset[str] = frozenset(),
@@ -890,9 +953,15 @@ def simulate_macro(body: str, params: dict[str, str] | None = None,
     key (cross-context isolation pinned by test). ``known_macros`` only
     documents that macro tokens are recognized (never flagged) — v1 does
     not use it to change behavior."""
-    key_items = tuple(sorted((k.lower(), v) for k, v in (params or {}).items()))
-    var_items = tuple(sorted((k.lower(), v) for k, v in
-                             (variables or {}).items()))
+    # Boundary coercion (review L8): callers range from config strings to
+    # tool JSON. Coerce invocation maps to str->str (Klipper params are
+    # always text) so int keys / None / nested containers can never raise
+    # out of the public entry; a str(None)='None' value then produces an
+    # honest unparseable finding instead of a crash.
+    params = _coerce_str_map(params)
+    variables = _coerce_str_map(variables)
+    key_items = tuple(sorted(params.items()))
+    var_items = tuple(sorted(variables.items()))
     import json as _json
     state_serial = []
     for k, v in sorted((printer_state or {}).items(),
