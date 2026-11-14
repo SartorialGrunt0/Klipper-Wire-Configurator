@@ -1332,6 +1332,18 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
         "runtime_error='...' with a pasted Klipper error to trace its command back to the "
         "macro body line it rendered from"
     ),
+    "simulate_macro": (
+        "SIMULATE a macro on invocations YOU declare and read the exact "
+        "commands Klipper would run (macro='NAME' from the current "
+        "project — staged edits included — or macro_text='[gcode_macro "
+        "...]' for a draft; scenarios=[{name?, params?, printer_state?, "
+        "variables?}], e.g. scenarios=[{'name':'bare','params':{}},"
+        "{'name':'with S','params':{'S':'215'}}]). USE IT FOR ANY "
+        "runtime-behavior question — 'will it fail when called like X?', "
+        "'what does it actually send?', 'what happens on a bare call?' — "
+        "before answering from source text; simulation warnings exist "
+        "ONLY in its result, no other surface shows them"
+    ),
     "validate_config_project": (
         "Validate the user's CURRENT config project on this host (all files, "
         "includes expanded) against the full schema — errors/warnings/infos "

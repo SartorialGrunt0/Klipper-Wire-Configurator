@@ -1215,6 +1215,59 @@ class McpServer:
                 },
             },
             {
+                "name": "simulate_macro",
+                "description": (
+                    "Simulate a gcode_macro on DECLARED invocations and "
+                    "return what Klipper would actually send to the "
+                    "command parser: the RENDERED command lines (body-line "
+                    "numbered), every finding, and which values stayed "
+                    "<unknown>. USE IT FOR RUNTIME-BEHAVIOR QUESTIONS: "
+                    "'will this macro fail when called like X?', 'what "
+                    "does it actually send to the printer?', 'what "
+                    "happens on a bare call with no S= before I answer "
+                    "the user'. Args: macro='NAME' resolves the section "
+                    "from the working state (staged edits win over disk) "
+                    "or this host's config files; macro_text='...' "
+                    "simulates a full [gcode_macro ...] section you wrote "
+                    "or are about to write (works before the edit "
+                    "exists). scenarios=[{name?, params?, "
+                    "printer_state?, variables?}] (max 8) — params are "
+                    "the invocation's command-line parameters (merged "
+                    "OVER the section's params_* defaults: a KWC "
+                    "convention, not a Klipper runtime feature); "
+                    "printer_state declares dotted Klipper status paths "
+                    "as real values ({'toolhead.homed_axes': 'xyz', "
+                    "'extruder.temperature': 205.0}) — everything you "
+                    "do not declare is <unknown>, never guessed; "
+                    "variables override variable_*. With no scenarios "
+                    "the DEFAULT invocation renders (params_* defaults, "
+                    "printer state unknown; branches on undeclared "
+                    "state render BOTH ways). Limits it states on every "
+                    "result: it renders the TEMPLATE only — CALL macros "
+                    "are not recursed; motion, waits, and side effects "
+                    "do not execute."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "macro": {
+                            "type": "string",
+                            "description": "Existing macro name (bare NAME, or [gcode_macro NAME]) — working state first, then this host's config files",
+                        },
+                        "macro_text": {
+                            "type": "string",
+                            "description": "Full [gcode_macro NAME] section text (header + gcode: body) for macros that do not exist yet",
+                        },
+                        "scenarios": {
+                            "type": "array",
+                            "maxItems": 8,
+                            "description": "Invocations to simulate, each rendered independently: {name?: 'hotend-only home', params?: {'S': '215'}, printer_state?: {'toolhead.homed_axes': 'xyz'}, variables?: {'speed': '50'}}. Omit for one default-invocation render.",
+                            "items": {"type": "object"},
+                        },
+                    },
+                },
+            },
+            {
                 "name": "validate_config_project",
                 "description": (
                     "Validate the user's CURRENT Klipper project — every "
@@ -1382,6 +1435,7 @@ class McpServer:
             "calculate_rotation_distance": self._handle_calculate_rotation_distance,
             "generate_macro_template": self._handle_generate_macro_template,
             "validate_macro": self._handle_validate_macro,
+            "simulate_macro": self._handle_simulate_macro,
             "validate_config_project": self._handle_validate_config_project,
             "list_connected_devices": self._handle_list_connected_devices,
             "get_section_schema": self._handle_get_section_schema,
@@ -3490,6 +3544,212 @@ class McpServer:
         parts.append("For a full gcode simulation with machine state tracking, use the Macro Designer in the app.")
 
         return "\n".join(parts)
+
+    # ── W4R.3: on-demand macro simulation (W4R decision D3) ──────────────
+
+    _SIM_SCENARIO_CAP = 8
+
+    def _sim_extract_section(self, text: str, want_name: str | None = None):
+        """(full_header, gcode_body, params_defaults, variables) for the
+        first (or named) gcode_macro section in config TEXT, or None.
+        Same extraction as the validator harness / MacroTraceSource:
+        params_* / variable_* options, commented-out entries excluded,
+        the parser's phantom empty body line 1 dropped so numbering
+        matches the validate_macro facade."""
+        from parser.config_parser import parse_config
+        try:
+            cfg = parse_config(text, "sim.cfg")
+        except Exception:
+            return None
+        for sec in cfg.sections:
+            if sec.is_commented_out or sec.section_type != "gcode_macro":
+                continue
+            if want_name and sec.section_name.lower() != want_name.lower():
+                continue
+            body = (sec.get_value("gcode") or "").lstrip("\n")
+            if not body.strip():
+                continue
+            params = {
+                p.key[len("params_"):].lower(): p.value
+                for p in sec.params
+                if p.key.startswith("params_") and not p.is_commented_out
+            }
+            variables = {
+                p.key[len("variable_"):]: p.value
+                for p in sec.params
+                if p.key.lower().startswith("variable_")
+                and not p.is_commented_out
+            }
+            return sec.full_header, body, params, variables
+        return None
+
+    def _find_macro_owner(self, macro_name: str) -> Path | None:
+        """First config file on this host containing [gcode_macro
+        macro_name] (case-insensitive; same scan scope as
+        read_user_config's resolver). Duplicates are a user-config
+        problem — first hit wins and the output labels the file, so the
+        model can see which one it simulated."""
+        want = macro_name.lower()
+        for scan_dir in (LOCAL_CONFIGS_DIR, _system_config_path()):
+            if not scan_dir.is_dir():
+                continue
+            try:
+                files = sorted(p for p in scan_dir.rglob("*.cfg")
+                               if not is_backup_config_file(p.name))
+            except OSError:
+                continue
+            for path in files:
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                if "[gcode_macro" not in text:
+                    continue
+                if self._sim_extract_section(text, want) is not None:
+                    return path
+        return None
+
+    def _handle_simulate_macro(self, args: dict[str, Any]) -> str:
+        """Render a macro on declared invocations and report what
+        Klipper would execute (W4R pivot: warnings/info live HERE, not
+        in ambient validation — decision D3)."""
+        from parser.macro_render import simulate_macro
+
+        source = None
+        origin = ""
+        macro_text = str(args.get("macro_text") or "").strip()
+        macro_name = str(args.get("macro") or "").strip()
+        if macro_text:
+            fenced = re.findall(
+                r"```(?:cfg|yaml|toml|text)?\s*\n(.*?)```", macro_text,
+                re.DOTALL)
+            if fenced:
+                macro_text = "\n\n".join(b.strip() for b in fenced)
+            source = self._sim_extract_section(macro_text)
+            if source is None:
+                return ("macro_text must contain a complete "
+                        "[gcode_macro NAME] section — header plus its "
+                        "gcode: body — not a bare body fragment.")
+            origin = "provided text"
+        elif macro_name:
+            bare = macro_name.strip().strip("[]")
+            if bare.lower().startswith("gcode_macro"):
+                bare = bare.split(None, 1)[-1] if " " in bare else bare
+            # Working state FIRST: staged/draft content shadows disk
+            # (same precedence every chat read tool uses).
+            for path, content in _working_scan_items():
+                source = self._sim_extract_section(content, bare)
+                if source is not None:
+                    origin = f"working state ({path})"
+                    break
+            if source is None:
+                resolved = self._find_macro_owner(bare)
+                if resolved is not None:
+                    try:
+                        text = resolved.read_text(encoding="utf-8",
+                                                  errors="replace")
+                    except OSError:
+                        text = ""
+                    source = self._sim_extract_section(text, bare)
+                    if source is not None:
+                        origin = f"disk ({resolved.name})"
+            if source is None:
+                return (f"No [gcode_macro {bare}] found in the working "
+                        "state or the config files on this host. Paste the "
+                        "section with macro_text='...' to simulate it "
+                        "anyway.")
+        else:
+            return ("Provide macro='NAME' for an existing macro, or "
+                    "macro_text='[gcode_macro ...] ...' for one that does "
+                    "not exist yet.")
+
+        sec_header, body, default_params, default_vars = source
+
+        scenarios_raw = args.get("scenarios")
+        if isinstance(scenarios_raw, str):
+            # Tool channels stringify arrays; recover before refusing.
+            try:
+                scenarios_raw = json.loads(scenarios_raw)
+            except (json.JSONDecodeError, TypeError):
+                return ("scenarios must be a JSON array of "
+                        "{name?, params?, printer_state?, variables?}.")
+        truncated = False
+        if scenarios_raw is None:
+            scenarios_raw = [{}]
+        if not isinstance(scenarios_raw, list) or not scenarios_raw:
+            return "scenarios must be a non-empty list (or omitted)."
+        if len(scenarios_raw) > self._SIM_SCENARIO_CAP:
+            scenarios_raw = scenarios_raw[:self._SIM_SCENARIO_CAP]
+            truncated = True
+
+        out: list[str] = [
+            f"# simulate_macro {sec_header}",
+            f"Source: {origin}. Body renders per scenario; line numbers "
+            "are gcode-body lines.",
+        ]
+        if truncated:
+            out.append(f"(scenario list truncated to the cap of "
+                       f"{self._SIM_SCENARIO_CAP})")
+        for idx, sc in enumerate(scenarios_raw, 1):
+            if not isinstance(sc, dict):
+                sc = {}
+            name = str(sc.get("name") or f"scenario-{idx}")
+            params = dict(default_params)
+            for k, v in (sc.get("params") or {}).items():
+                params[str(k).lower()] = str(v)
+            variables = dict(default_vars)
+            for k, v in (sc.get("variables") or {}).items():
+                variables[str(k)] = str(v)
+            state = {str(k): v for k, v in (sc.get("printer_state") or {}).items()}
+
+            result = simulate_macro(body, params, variables=variables,
+                                    printer_state=state)
+
+            out.append("")
+            out.append(f"## {name}")
+            declared = [f"params: {params or '{}'}"]
+            if state:
+                declared.append(f"printer_state: {state}")
+            if variables:
+                declared.append(f"variables: {variables}")
+            out.append("Declared: " + "; ".join(declared))
+
+            out.append(f"Rendered ({result.variants_rendered} path(s)):")
+            if result.rendered:
+                for line in result.rendered:
+                    ln = f"  L{line.source_line}" if line.source_line \
+                        else "  L?"
+                    tag = f" [path {line.variant}]" \
+                        if result.variants_rendered > 1 else ""
+                    out.append(f"{ln}: {line.text}{tag}")
+            else:
+                out.append("  (nothing rendered — the body aborted or was "
+                           "empty on this invocation)")
+
+            if result.findings:
+                out.append("Findings:")
+                for f in sorted(result.findings,
+                                key=lambda x: (x.severity != "error",
+                                               x.severity != "warning")):
+                    loc = f" (L{f.source_line})" if f.source_line else ""
+                    out.append(f"  - {f.severity.upper()}: {f.message}{loc}")
+            else:
+                out.append("Findings: none — every rendered command "
+                           "matched the registry shape on this "
+                           "invocation.")
+            if result.unknown_accesses:
+                out.append("Still <unknown> (NOT simulated, never "
+                           "guessed): "
+                           + ", ".join(sorted(set(result.unknown_accesses))))
+
+        out.append("")
+        out.append("---")
+        out.append(
+            "Limits: this renders the TEMPLATE only — CALL macros are not "
+            "recursed, and motion, waits, and side effects do not "
+            "execute. Anything not declared in a scenario stayed "
+            "<unknown>: never present a rendered value as a printer fact.")
+        return "\n".join(out)
 
     # ── Printer Memory ────────────────────────────────────────────
 

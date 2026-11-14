@@ -1448,9 +1448,11 @@ def test_tools_list(tmp_path):
     assert "list_user_configs" in names
     assert "list_config_reference_sections" in names
     assert "list_user_config_sections" in names
-    assert len(names) == 20  # +4 live-context tools (2026-09): validate_config_project,
+    assert "simulate_macro" in names  # W4R.3 on-demand simulation
+    assert len(names) == 21  # +4 live-context tools (2026-09): validate_config_project,
     # list_connected_devices, get_section_schema (re-added with typed output —
-    # the old prose-duplicate version was removed), get_klippy_status
+    # the old prose-duplicate version was removed), get_klippy_status;
+    # +1 simulate_macro (2026-11 W4R.3)
 
 
 def test_tools_call_unknown_tool(tmp_path):
