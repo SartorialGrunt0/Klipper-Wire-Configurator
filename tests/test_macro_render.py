@@ -527,3 +527,84 @@ def test_facade_validate_macro_knows_own_variables():
     out = McpServer()._handle_validate_macro({"macro_text": macro})
     low = out.lower()
     assert "undefined" not in low and "renders empty" not in low, out
+
+
+# ── W3: runtime-error traceback (paste → Jinja source line) ────────────────
+
+from parser.macro_render import (  # noqa: E402
+    MacroTraceSource,
+    extract_error_frames,
+    trace_runtime_error,
+)
+
+
+def test_extract_frames_plain_quotes():
+    text = ("Transitioning to shutdown:\n"
+            "Error on 'SET_LED LED=chamber RED= GREEN= BLUE=': unable to parse\n"
+            "Traceback (most recent call last): ...")
+    assert extract_error_frames(text) == [
+        "SET_LED LED=chamber RED= GREEN= BLUE="]
+
+
+def test_extract_frames_strips_line_number_and_checksum():
+    # Klipper quotes self._commandline verbatim (gcode.py get():76) —
+    # serial lines can carry an N-prefix and *checksum.
+    text = "Error on 'N123 G1 X100 F1200*42': unable to parse F"
+    assert extract_error_frames(text) == ["G1 X100 F1200"]
+
+
+def test_extract_frames_multiple_and_none():
+    text = ("Error on 'A X=1': missing B\n"
+            "later Error on 'C Y=2': bad\n")
+    assert extract_error_frames(text) == ["A X=1", "C Y=2"]
+    assert extract_error_frames("no error here") == []
+
+
+def test_trace_matches_unknown_runtime_value_as_wildcard():
+    # Simulation renders the save_variables path as <unknown>; the pasted
+    # error carries the REAL runtime value. Unknown must match anything.
+    src = MacroTraceSource(
+        name="SET_LEDS",
+        body="SET_LED LED=chamber "
+             "RED={printer.save_variables.variables.led_r}\n",
+        file="printer.cfg",
+    )
+    matches = trace_runtime_error(
+        ["SET_LED LED=chamber RED=0.504 GREEN=0 BLUE=0"], [src])
+    assert len(matches) == 1
+    m = matches[0]
+    assert m.macro == "SET_LEDS" and m.file == "printer.cfg"
+    assert m.source_line == 1
+    assert "save_variables" in m.source_text
+
+
+def test_trace_matches_empty_render_exact():
+    src = MacroTraceSource(
+        name="BLINK",
+        body='SET_LED LED=c RED={params.RED|default("")}\n',
+        params={"red": ""},
+        file="macros.cfg",
+    )
+    matches = trace_runtime_error(["SET_LED LED=c RED="], [src])
+    assert len(matches) == 1 and matches[0].macro == "BLINK"
+
+
+def test_trace_negative_different_param_value():
+    src = MacroTraceSource(name="A", body="SET_LED LED=other RED=1\n")
+    assert trace_runtime_error(["SET_LED LED=chamber RED=1"], [src]) == []
+
+
+def test_trace_numeric_format_tolerance_and_verb_case():
+    src = MacroTraceSource(name="MOVE", body="G1 X{10 * 5} F1500\n")
+    matches = trace_runtime_error(["g1 X50.00 F1500"], [src])
+    assert len(matches) == 1 and matches[0].macro == "MOVE"
+
+
+def test_trace_ambiguity_reports_all_candidates_in_caller_order():
+    a = MacroTraceSource(name="FIRST", body="SET_LED LED=c RED=\n",
+                         file="a.cfg")
+    b = MacroTraceSource(name="SECOND", body='SET_LED LED=c '
+                         'RED={params.RED|default("")}\n',
+                         params={"red": ""}, file="b.cfg")
+    matches = trace_runtime_error(["SET_LED LED=c RED="], [a, b])
+    assert [m.macro for m in matches] == ["FIRST", "SECOND"]

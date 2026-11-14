@@ -628,3 +628,151 @@ def simulate_macro(body: str, params: dict[str, str] | None = None,
     var_items = tuple(sorted((k.lower(), v) for k, v in
                              (variables or {}).items()))
     return _simulate_cached(body, key_items, max_variants, var_items)
+
+
+# ── W3: runtime-error traceback (paste → Jinja source line) ────────────────
+#
+# A Klipper runtime error quotes the FULL rendered command line
+# (klippy/gcode.py get(): "Error on '%s': ..." % self._commandline — all
+# variants share the shape). The frame names no macro and no source line,
+# so tracing it means: re-render candidate macros with the engine above
+# and match the frame against rendered lines. The simulation only knows
+# defaults, so any value it rendered UNKNOWN matches ANY runtime value in
+# the frame; values it CAN render must agree (numeric-tolerant). Zero
+# matches is a fine answer — this is a tracer, not an oracle.
+
+_ERROR_ON_RE = re.compile(r"Error on '([^']*)'")
+_FRAME_LINENO_RE = re.compile(r"^[Nn]\d+\s+")
+_FRAME_CHECKSUM_RE = re.compile(r"\*\d+\s*$")
+# Classic G-code letter params (Klipper's letter-parameter dispatch):
+# X50 / F1500 / X-5 — a letter head and a numeric tail, no '='.
+_LETTER_PARAM_RE = re.compile(r"^([A-Za-z]+)([-+.0-9].*)$")
+
+
+def _normalize_frame(text: str) -> str:
+    """Klipper quotes the raw serial line: an ``N123 `` prefix and a
+    trailing ``*42`` checksum can ride along (gcode.py
+    get_raw_command_parameters skips both). Normalize whitespace too —
+    macro continuation lines arrive with arbitrary gaps."""
+    t = text.strip()
+    t = _FRAME_LINENO_RE.sub("", t)
+    t = _FRAME_CHECKSUM_RE.sub("", t)
+    return " ".join(t.split())
+
+
+def extract_error_frames(text: str) -> list[str]:
+    """Every ``Error on '<command line>'`` frame quoted in pasted text
+    (tracebacks, console copies, klippy.log excerpts). Deterministic
+    literal extraction — no prose guessing."""
+    return [f for f in (_normalize_frame(m)
+                        for m in _ERROR_ON_RE.findall(text)) if f]
+
+
+@dataclass(frozen=True)
+class MacroTraceSource:
+    """One candidate macro to trace against. Callers order the list by
+    confidence (staged macro first); matches come back in that order."""
+    name: str
+    body: str
+    params: dict[str, str] | None = None
+    variables: dict[str, str] | None = None
+    file: str | None = None
+
+
+@dataclass(frozen=True)
+class TraceMatch:
+    macro: str
+    file: str | None
+    source_line: int | None  # 1-indexed line within the macro BODY
+    source_text: str         # that body line as written
+    rendered: str            # the rendered line that matched the frame
+
+
+def _frame_tokens(line: str) -> tuple[str, list[tuple[str, str]], list[str]]:
+    """verb, [(KEY, value)], [bare tokens] — keys casefolded like
+    Klipper's gcode dispatcher, values verbatim."""
+    parts = line.split()
+    if not parts:
+        return "", [], []
+    verb, rest = parts[0].casefold(), parts[1:]
+    kvs, bare = [], []
+    for tok in rest:
+        key, sep, value = tok.partition("=")
+        if sep and key:
+            kvs.append((key.casefold(), value))
+            continue
+        m = _LETTER_PARAM_RE.match(tok)
+        if m:
+            kvs.append((m.group(1).casefold(), m.group(2)))
+        else:
+            bare.append(tok.casefold())
+    return verb, kvs, bare
+
+
+def _trace_values_match(rendered: str, runtime: str) -> bool:
+    if _looks_unknown(rendered):
+        return True  # sim can't know it; any runtime value is consistent
+    if rendered.strip() == runtime.strip():
+        return True
+    try:
+        return abs(float(rendered) - float(runtime)) < 1e-9
+    except ValueError:
+        return False
+
+
+def _frame_matches_rendered(rendered_text: str, frame: str) -> bool:
+    """True when ``frame`` is plausibly ``rendered_text`` after runtime
+    values filled in: same verb, and every rendered parameter token has
+    a distinct matching token in the frame. Frame-only extra tokens are
+    fine (rendered variants cover one arm of the real invocation)."""
+    r_verb, r_kvs, r_bare = _frame_tokens(rendered_text)
+    f_verb, f_kvs, f_bare = _frame_tokens(frame)
+    if r_verb != f_verb:
+        return False
+    for tok in r_bare:
+        if tok in f_bare:
+            f_bare.remove(tok)
+        else:
+            return False
+    for key, value in r_kvs:
+        hit = next((i for i, (k, v) in enumerate(f_kvs)
+                    if k == key and _trace_values_match(value, v)), None)
+        if hit is None:
+            return False
+        f_kvs.pop(hit)
+    return True
+
+
+def trace_runtime_error(frames: list[str],
+                        sources: list[MacroTraceSource]) -> list[TraceMatch]:
+    """Match pasted-error frames against every candidate macro's rendered
+    invocations. All matches return, in caller order — several macros can
+    render the same line, and which one was actually run is not knowable
+    from the frame; the caller reports the ambiguity instead of guessing.
+    """
+    matches: list[TraceMatch] = []
+    seen: set[tuple[str, int | None]] = set()
+    if not frames:
+        return matches
+    for src in sources:
+        result = simulate_macro(src.body, src.params,
+                                variables=src.variables)
+        body_lines = src.body.splitlines()
+        for rline in result.rendered:
+            for frame in frames:
+                if not _frame_matches_rendered(rline.text, frame):
+                    continue
+                key = (src.name, rline.source_line)
+                if key in seen:
+                    break
+                seen.add(key)
+                lineno = rline.source_line
+                text = (body_lines[lineno - 1].strip()
+                        if lineno is not None and 0 < lineno <= len(body_lines)
+                        else rline.text)
+                matches.append(TraceMatch(macro=src.name, file=src.file,
+                                          source_line=lineno,
+                                          source_text=text,
+                                          rendered=rline.text))
+                break
+    return matches
