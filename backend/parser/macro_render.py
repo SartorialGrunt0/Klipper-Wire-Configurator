@@ -300,7 +300,7 @@ _PARAMS_REF_RE = re.compile(
 # phantom renders the 2026-11-14 audit flagged on valid configs.
 _PARAM_IS_DEFINED_RE = re.compile(
     r"^params\s*(?:\.\s*([A-Za-z_]\w*)"
-    r"|\[\s*['\"]([A-Za-z_][\w ]*)['\"]\s*)\s+(is not|is)\s+defined$",
+    r"|\[\s*['\"]([A-Za-z_][\w ]*)['\"]\s*\])\s+(is not|is)\s+defined$",
     re.DOTALL)
 _PARAMS_MEMBERSHIP_RE = re.compile(
     r"^['\"]([A-Za-z_][\w ]*)['\"]\s+in\s+params(?:\s*\|\s*upper\s*)?$",
@@ -837,10 +837,12 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
         # class only (rare in macro bodies).
         return MacroRenderResult()
 
-    # 'name' is defined checks see the macro's own variables too
-    # (they are context entries in Klipper), not just params.
-    defined = frozenset(k.lower() for k in params) | frozenset(
-        k.lower() for k in variables)
+    # Param-presence guards consult PARAMS ONLY (review L6): Klipper's
+    # params dict never contains the macro's variables. Bare `x is
+    # defined` (where x IS a variable/template name) is not one of these
+    # grammars — it resolves natively at render time, where variables
+    # are in the context.
+    defined = frozenset(k.lower() for k in params)
     # Scenario-declared dotted state paths: conditions whose printer
     # paths are covered evaluate NATIVELY (the value is known) — no arm
     # expansion for known shape.
