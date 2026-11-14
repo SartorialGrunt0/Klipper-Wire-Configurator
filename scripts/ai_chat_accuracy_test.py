@@ -955,6 +955,156 @@ def _bare_project(with_probe: bool = False) -> tuple[tuple[str, str, str], ...]:
     return (("printer.cfg", "printer.cfg (test project)", body),)
 
 
+def _sim_project(macros: str) -> tuple[tuple[str, str, str], ...]:
+    """Bare project + the SIMTOOL fixture macros (isolated per question —
+    whole-tree configs would grade the tree, not the tool use)."""
+    return (("printer.cfg", "printer.cfg (test project)",
+             _BARE_PRINTER_CFG + macros),)
+
+
+_SIM_COOL_DOWN = """
+[gcode_macro COOL_DOWN]
+description: blow the part-cooling fan while the hotend is still hot
+gcode:
+    {% if printer.extruder.temperature > 150 %}
+    M106 S255
+    {% else %}
+    M106 S0
+    {% endif %}
+"""
+
+_SIM_PRINT_START = """
+[gcode_macro PRINT_START]
+description: home then heat bed and hotend to the given targets
+params_BED: 60
+params_EXTRUDER: 215
+gcode:
+    G28
+    M140 S{params.BED}
+    M104 S{params.EXTRUDER}
+    M190 S{params.BED}
+    M109 S{params.EXTRUDER}
+"""
+
+_SIM_LEVEL_FAN = """
+[gcode_macro LEVEL_FAN]
+description: set fan speed, defaulting to half when LEVEL is omitted
+gcode:
+    {% if params.LEVEL is defined %}
+    M106 S{params.LEVEL}
+    {% else %}
+    M106 S128
+    {% endif %}
+"""
+
+
+def build_simtool_questions() -> list[TestQuestion]:
+    """SIMTOOL — simulate_macro tool-use compliance (W4R.4, 2026-11-14).
+
+    The decision (plan 4R.4): the model must GROUND runtime-behavior
+    claims in a scenario simulation it declares, citing rendered lines —
+    never asserting runtime behavior from source reading alone. Graded
+    on TOOL-TRACE artifacts (tool_args / tool_output_regex /
+    tool_call_count), never reply prose about intent — the bank law the
+    TOOL-05 audit established: grade the artifact the tool produced.
+    staged_renders_clean on the edit job proves the new tool did not
+    disturb the write-path gate.
+    """
+    return [
+        TestQuestion(
+            qid="SIMTOOL-01",
+            title="Sim tool: runtime branch question needs a declared-state run",
+            text="If my hotend is sitting at 180 degrees when I call "
+                 "COOL_DOWN, what does it actually send? Don't guess from "
+                 "the source — run it.",
+            context_files=_sim_project(_SIM_COOL_DOWN),
+            expected_tools=("simulate_macro",),
+            require_tool=True,
+            criteria=(
+                # Binding is key-anchored: the tool_args kind JSON-renders
+                # the scenarios value, so key and value sit `": "` apart —
+                # the gap must cover `": "` plus a possible escape layer
+                # (stringified scenarios arrive with \" quotes).
+                ("tool_args",
+                 r"simulate_macro:scenarios:extruder.{0,30}temperature.{0,8}180"),
+                ("tool_output_regex", "simulate_macro::M106 S255"),
+                ("contains", "255"),
+            ),
+        ),
+        TestQuestion(
+            qid="SIMTOOL-02",
+            title="Sim tool: toggle write job simulates BOTH variable states",
+            text="Add a TOGGLE_FAN macro to printer.cfg that switches the "
+                 "fan on and off, using a variable to remember whether it "
+                 "is on. Before you tell me it works, simulate both toggle "
+                 "states and show me what each one sends.",
+            context_files=_sim_project(""),
+            expected_tools=("simulate_macro",),
+            require_tool=True,
+            edit_criteria=(
+                ("staged_renders_clean", "printer\\\\.cfg"),
+                ("staged_section_regex",
+                 "printer\\.cfg::gcode_macro TOGGLE_FAN::M10[67]"),
+                ("any_of", json.dumps([
+                    [["tool_args",
+                      "simulate_macro:scenarios:variables.{0,400}variables"],
+                     ["tool_args", "simulate_macro:scenarios"]],
+                    [["tool_call_count", "simulate_macro::2"],
+                     ["tool_args", "simulate_macro:scenarios"]],
+                ])),
+            ),
+        ),
+        TestQuestion(
+            qid="SIMTOOL-03",
+            title="Sim tool: explicit scenario params render the real values",
+            text="What exact commands does my PRINT_START send when I call "
+                 "it as PRINT_START BED=60 EXTRUDER=230? Run it with those "
+                 "values rather than reciting the template.",
+            context_files=_sim_project(_SIM_PRINT_START),
+            expected_tools=("simulate_macro",),
+            require_tool=True,
+            criteria=(
+                ("tool_args", "simulate_macro:scenarios:BED.{0,8}60"),
+                ("tool_args", "simulate_macro:scenarios:EXTRUDER.{0,8}230"),
+                ("tool_output_regex", "simulate_macro::M104 S230"),
+                ("tool_output_regex", "simulate_macro::M140 S60"),
+                ("contains", "230"),
+            ),
+        ),
+        TestQuestion(
+            qid="SIMTOOL-04",
+            title="Sim tool: guarded param bare call runs the fallback",
+            text="If I call LEVEL_FAN with no LEVEL argument, will it "
+                 "error out on the missing parameter, or what happens?",
+            context_files=_sim_project(_SIM_LEVEL_FAN),
+            expected_tools=("simulate_macro",),
+            require_tool=True,
+            criteria=(
+                # Regression pin from the 2026-11-14 dev-server audit:
+                # an `is defined` guard is NOT a missing-param failure —
+                # the bare call renders the fallback. The artifact (the
+                # fallback line from the tool) plus citing its value is
+                # the grounding; no prose-shape regex.
+                ("tool_output_regex", "simulate_macro::M106 S128"),
+                ("contains", "128"),
+            ),
+        ),
+        TestQuestion(
+            qid="SIMTOOL-05",
+            title="Sim tool negative control: review-only stages nothing",
+            text="Review my COOL_DOWN macro for correctness. Don't change "
+                 "anything — just tell me what you see.",
+            context_files=_sim_project(_SIM_COOL_DOWN),
+            expected_tools=(),
+            require_tool=False,
+            criteria=(
+                ("not_staged_any", ""),
+                ("regex", r"cool_?down|M106|fan"),
+            ),
+        ),
+    ]
+
+
 def _load_m109_bugged_printer_cfg() -> str:
     """Trident printer.cfg with the M109 {% endif %} removed.
 
@@ -3798,6 +3948,20 @@ def criterion_ok(kind: str, value: str, content: str,
             if re.search(pattern, rendered, re.IGNORECASE):
                 return True
         return False
+    if kind == "tool_call_count":
+        # SIMTOOL family (W4R.4): "name::min" — at least <min> executed
+        # calls of tool_name in the trace. Structural evidence for
+        # "simulate BOTH states" jobs where two one-scenario calls are
+        # exactly as compliant as one two-scenario call (the alternative
+        # — regexing one scenarios JSON for two entries — false-fails
+        # the compliant two-call shape).
+        name, _, want = value.partition("::")
+        try:
+            minimum = int(want)
+        except ValueError:
+            return False
+        return sum(1 for call in tool_calls or []
+                   if call.get("name") == name) >= minimum
     if kind == "coverage":
         # BULK family (large-edit rework 2026-10-17):
         # "<file>::[<section-prefix>::]<min_sections>" — the captured
@@ -4569,7 +4733,7 @@ def main() -> int:
                              "printer memory, blank it, run MEMORY-01..03, then restore it")
     args = parser.parse_args()
 
-    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions() + build_edit_tool_questions() + build_rename_questions() + build_comment_questions() + build_skill_gate_questions() + build_tool_coverage_questions() + build_ack_guard_questions() + build_bulk_questions()
+    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions() + build_edit_tool_questions() + build_rename_questions() + build_comment_questions() + build_skill_gate_questions() + build_tool_coverage_questions() + build_ack_guard_questions() + build_bulk_questions() + build_simtool_questions()
     if args.include_memory:
         questions += build_memory_questions()
     if args.list_questions:
