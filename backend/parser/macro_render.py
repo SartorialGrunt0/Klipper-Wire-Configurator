@@ -44,6 +44,7 @@ param makes it legal.
 """
 from __future__ import annotations
 
+import ast
 import re
 from dataclasses import dataclass, field, replace
 from functools import lru_cache
@@ -267,16 +268,39 @@ def _strict_env() -> jinja2.Environment:
     return _STRICT_ENV
 
 
-def _render_context(params: dict[str, str]) -> dict:
+def _variable_value(raw: str):
+    """Klipper evaluates variable_* option values as Python literals at
+    config load (gcode_macro.py: ast.literal_eval + json round-trip);
+    'variable_x: 0' is INT 0 (falsy), '\"blue\"' is the string blue.
+    An invalid literal is a config error Klipper raises at load; the
+    validator's option checks own that class, so the simulation falls
+    back to the raw string rather than inventing a second error."""
+    try:
+        return ast.literal_eval(raw)
+    except (ValueError, SyntaxError):
+        return raw
+
+
+def _render_context(params: dict[str, str],
+                    variables: dict[str, str] | None = None) -> dict:
+    # Klipper's cmd(): kwparams = dict(self.variables), then
+    # template-context update, then params/rawparams from the command
+    # line (klippy/extras/gcode_macro.py). Variables are top-level
+    # template names, lowercased at config parse (configfile.py
+    # 'option = option.lower()'); the standard context keys win over
+    # same-named variables exactly as that update order implies.
+    ctx: dict = {k.lower(): _variable_value(v)
+                 for k, v in (variables or {}).items()}
     # Klipper's create_render_context: printer, params, caller_data,
     # rawparams, action_respond (klippy/extras/gcode_macro.py).
-    return {
+    ctx.update({
         "printer": UNKNOWN,
         "params": _Params({k.lower(): v for k, v in params.items()}),
         "caller_data": UNKNOWN,
         "rawparams": "",
         "action_respond": _noop_respond,
-    }
+    })
+    return ctx
 
 
 def _macro_globals() -> dict:
@@ -318,10 +342,12 @@ def _undefined_line(message: str, src: str) -> int | None:
 
 
 def _render_one(env: jinja2.Environment, src: str, params: dict[str, str],
-                variant: int) -> tuple[list[str], RenderFinding | None]:
+                variant: int,
+                variables: dict[str, str] | None = None
+                ) -> tuple[list[str], RenderFinding | None]:
     try:
         out = env.from_string(src, globals=_macro_globals()).render(
-            _render_context(params))
+            _render_context(params, variables))
     except jinja2.TemplateSyntaxError:
         # Broken template: _validate_macro_jinja already reports it with
         # the engine's own message and the right code. The simulation
@@ -494,11 +520,13 @@ def _scan_set_variables(rendered_texts: list[tuple[str, int]]) -> list[tuple[str
 
 def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
                             known_macros: frozenset[str] = frozenset(),
-                            max_variants: int = MAX_RENDER_VARIANTS
+                            max_variants: int = MAX_RENDER_VARIANTS,
+                            variables: dict[str, str] | None = None
                             ) -> MacroRenderResult:
     from parser.validator import _MACRO_JINJA_ENV, _strip_inline_comments
 
     params = params or {}
+    variables = variables or {}
     stripped = _strip_inline_comments(body)
     if not stripped.strip():
         return MacroRenderResult()
@@ -507,7 +535,10 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
         # class only (rare in macro bodies).
         return MacroRenderResult()
 
-    defined = frozenset(k.lower() for k in params)
+    # 'name' is defined checks see the macro's own variables too
+    # (they are context entries in Klipper), not just params.
+    defined = frozenset(k.lower() for k in params) | frozenset(
+        k.lower() for k in variables)
     variants, held = _expand_variants(stripped, defined, max_variants)
 
     try:
@@ -520,7 +551,8 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
     findings: list[RenderFinding] = []
     for vi, variant_src in enumerate(variants):
         src_lines = variant_src.split("\n")
-        lines, finding = _render_one(_strict_env(), variant_src, params, vi)
+        lines, finding = _render_one(_strict_env(), variant_src, params, vi,
+                                     variables)
         if finding is not None:
             findings.append(finding)
             continue
@@ -567,22 +599,32 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
 
 @lru_cache(maxsize=1024)
 def _simulate_cached(body: str, params_items: tuple[tuple[str, str], ...],
-                     max_variants: int) -> MacroRenderResult:
+                     max_variants: int,
+                     variables_items: tuple[tuple[str, str], ...]
+                     ) -> MacroRenderResult:
     return simulate_macro_uncached(body, dict(params_items),
-                                   frozenset(), max_variants)
+                                   frozenset(), max_variants,
+                                   dict(variables_items))
 
 
 def simulate_macro(body: str, params: dict[str, str] | None = None,
                    known_macros: frozenset[str] = frozenset(),
-                   max_variants: int = MAX_RENDER_VARIANTS) -> MacroRenderResult:
+                   max_variants: int = MAX_RENDER_VARIANTS,
+                   variables: dict[str, str] | None = None
+                   ) -> MacroRenderResult:
     """Simulate one macro body on default invocation parameters.
 
     ``params`` are the section's ``params_*`` defaults (lowercase keys
-    recommended; lookups are case-insensitive like Klipper). Results are
-    cached by (body, params) — the simulation has no other project
-    input in v1 (macro calls are not recursed), so body+params IS the
-    full cache key. ``known_macros`` only documents that macro tokens
-    are recognized (never flagged) — v1 does not use it to change
-    behavior."""
+    recommended; lookups are case-insensitive like Klipper).
+    ``variables`` are the section's own ``variable_*`` values (raw
+    option strings; literal-evaluated like Klipper's config load) —
+    top-level template names in every invocation, independent of
+    params. Results are cached by (body, params, variables) — the
+    simulation has no other project input in v1 (macro calls are not
+    recursed), so that triple IS the full cache key. ``known_macros``
+    only documents that macro tokens are recognized (never flagged) —
+    v1 does not use it to change behavior."""
     key_items = tuple(sorted((k.lower(), v) for k, v in (params or {}).items()))
-    return _simulate_cached(body, key_items, max_variants)
+    var_items = tuple(sorted((k.lower(), v) for k, v in
+                             (variables or {}).items()))
+    return _simulate_cached(body, key_items, max_variants, var_items)

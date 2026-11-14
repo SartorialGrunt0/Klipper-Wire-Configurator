@@ -411,3 +411,119 @@ def test_validate_macro_facade_reports_rendered_empty():
     out = McpServer()._handle_validate_macro({"macro_text": macro})
     assert "renders EMPTY" in out
     assert "RED" in out
+
+
+# ── The macro's own variable_* entries (dogfood false positive, 2026-11-13) ──
+#
+# Klipper ground truth (klippy/extras/gcode_macro.py):
+#   self.variables[option[len('variable_'):]] = ast.literal_eval(...)   # load
+#   kwparams = dict(self.variables)                                     # cmd()
+#   kwparams.update(self.template.create_template_context())
+#   kwparams['params'] = gcmd.get_command_parameters()
+# So the macro's variables are top-level template names (lowercased at
+# config parse, configfile.py 'option = option.lower()'), values are
+# Python literals, and params stay SEPARATE (command line only).
+# The simulator omitted variables entirely → the canonical
+# variable-based toggle ({% if led_state %}) rendered as Undefined on a
+# perfectly valid macro, and the model had to argue our own warning
+# away. These tests pin the parity.
+
+_TOGGLE_BODY = (
+    "\n"
+    "{% if led_state == 1 %}\n"
+    "    SET_LED LED=chamber RED=0 GREEN=0 BLUE=0\n"
+    "{% else %}\n"
+    "    SET_LED LED=chamber RED=1 GREEN=1 BLUE=1\n"
+    "{% endif %}\n"
+    "SET_GCODE_VARIABLE MACRO=TOGGLE_LEDS VARIABLE=led_state "
+    "VALUE={1 - led_state}\n"
+)
+
+
+def test_own_variables_injected_toggle_renders_clean():
+    from parser.macro_render import simulate_macro
+    res = simulate_macro(_TOGGLE_BODY, {}, variables={"led_state": "0"})
+    assert res.findings == []
+    # literal semantics: '0' evaluates to int 0 → the ELSE arm runs.
+    text = "\n".join(line.text for line in res.rendered)
+    assert "RED=1 GREEN=1 BLUE=1" in text
+    assert "RED=0 GREEN=0 BLUE=0" not in text
+
+
+def test_variables_do_not_leak_into_params():
+    # Klipper keeps params separate: a variable named led_state does
+    # NOT make params.led_state defined.
+    from parser.macro_render import simulate_macro
+    res = simulate_macro("SET_FAN_SPEED FAN=x SPEED={params.led_state}\n",
+                         {}, variables={"led_state": "0"})
+    assert any("led_state" in f.message for f in res.findings)
+
+
+def test_variables_fix_does_not_blind_the_undefined_check():
+    # Cry-wolf guard on the fix: one real variable must not mask a
+    # genuinely undefined name.
+    from parser.macro_render import simulate_macro
+    res = simulate_macro("{% if totally_absent %}\nM106\n{% endif %}\n",
+                         {}, variables={"led_state": "0"})
+    assert any("totally_absent" in f.message for f in res.findings)
+
+
+def test_variable_values_are_literals_with_raw_fallback():
+    from parser.macro_render import simulate_macro
+    res = simulate_macro('RESPOND TYPE=echo MSG="c={color}"\n', {},
+                         variables={"color": '"blue"'})
+    assert res.findings == []
+    assert 'c=blue' in "\n".join(l.text for l in res.rendered)
+    # Not a valid literal → raw string, never an engine crash.
+    res = simulate_macro("M117 {weird}\n", {},
+                         variables={"weird": "bare words: here"})
+    assert res.findings == []
+    assert "bare words: here" in "\n".join(l.text for l in res.rendered)
+
+
+def test_variables_participate_in_the_result_cache_key():
+    # Same body, different variable context → different verdicts; a
+    # shared cache entry would leak one into the other.
+    from parser.macro_render import simulate_macro
+    body = "{% if led_state %}\nM106\n{% endif %}\n"
+    assert simulate_macro(body, {}, variables={"led_state": "0"}).findings == []
+    assert simulate_macro(body, {}).findings != []
+
+
+def test_validator_path_variable_toggle_is_clean():
+    # End-to-end (the dogfood's exact shape): project-parse validation
+    # of a variable-based toggle must be silent, not warn.
+    from parser.config_parser import parse_config
+    from parser.validator import validate_config
+    cfg = (
+        "[gcode_macro TOGGLE_LEDS]\n"          # line 1
+        "variable_led_state: 0\n"
+        "gcode:\n"
+        "    {% if led_state == 1 %}\n"
+        "        SET_LED LED=chamber RED=0 GREEN=0 BLUE=0\n"
+        "    {% else %}\n"
+        "        SET_LED LED=chamber RED=1 GREEN=1 BLUE=1\n"
+        "    {% endif %}\n"
+    )
+    res = validate_config(parse_config(cfg), gcode_registry=True)
+    sim = [e for e in res.errors
+           if e.code.startswith("macro_param_") or "render" in e.message.lower()]
+    assert sim == [], sim
+
+
+def test_facade_validate_macro_knows_own_variables():
+    import json as _json
+    from mcp_server import McpServer
+    macro = (
+        "[gcode_macro TOGGLE_LEDS]\n"
+        "variable_led_state: 0\n"
+        "gcode:\n"
+        "    {% if led_state == 1 %}\n"
+        "        SET_LED LED=chamber RED=0 GREEN=0 BLUE=0\n"
+        "    {% else %}\n"
+        "        SET_LED LED=chamber RED=1 GREEN=1 BLUE=1\n"
+        "    {% endif %}\n"
+    )
+    out = McpServer()._handle_validate_macro({"macro_text": macro})
+    low = out.lower()
+    assert "undefined" not in low and "renders empty" not in low, out

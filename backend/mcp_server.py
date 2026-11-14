@@ -1148,8 +1148,10 @@ class McpServer:
                     "registry-driven required-parameter presence (e.g. SET_LED "
                     "without LED= fails at runtime), plus a render "
                     "simulation of the DEFAULT invocation: the body is "
-                    "rendered with printer state UNKNOWN and the section's "
-                    "params_* defaults, and the RENDERED commands are "
+                    "rendered with printer state UNKNOWN, the section's "
+                    "params_* defaults, and its own variable_* entries as "
+                    "top-level template names (Klipper semantics), and the "
+                    "RENDERED commands are "
                     "validated — catches Jinja that compiles fine but "
                     "expands to an empty or unparseable value (Klipper: "
                     "'unable to parse'). Also checks save/restore "
@@ -3194,19 +3196,26 @@ class McpServer:
         # ── 2c. Render simulation (the W2 engine, same one the save-gate
         # validation pass runs): render the body the way Klipper would on a
         # DEFAULT invocation — printer state UNKNOWN, params from the
-        # section's params_* defaults, unknown conditions both arms — and
+        # section's params_* defaults, the macro's own variable_* entries
+        # as top-level template names (Klipper's cmd(): kwparams starts
+        # from self.variables), unknown conditions both arms — and
         # validate the RENDERED commands. Catches Jinja that compiles fine
         # but expands to an empty/unparseable value ('SET_LED ... RED=',
         # Klipper: 'unable to parse'), which no compile-time check can see.
         if gcode_body is not None and gcode_body.strip():
             from parser.macro_render import simulate_macro
             sim_params = {}
+            sim_variables = {}
             for raw in lines:
                 stripped_raw = raw.strip()
                 if stripped_raw.startswith("params_"):
                     key, _, value = stripped_raw.partition(":")
                     sim_params[key.strip()[len("params_"):].lower()] = value.strip()
-            simulation = simulate_macro(gcode_body, sim_params)
+                elif stripped_raw.lower().startswith("variable_"):
+                    key, _, value = stripped_raw.partition(":")
+                    sim_variables[key.strip()[len("variable_"):]] = value.strip()
+            simulation = simulate_macro(gcode_body, sim_params,
+                                        variables=sim_variables)
             for finding in simulation.findings:
                 where = f"Line {finding.source_line}: " if finding.source_line else ""
                 issues.append({

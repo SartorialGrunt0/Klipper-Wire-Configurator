@@ -918,7 +918,17 @@ def _simulate_macro_render(section: ConfigSection, result: ValidationResult) -> 
         for param in section.params
         if param.key.startswith("params_") and not param.is_commented_out
     }
-    simulation = simulate_macro(gcode_param.value, params)
+    # The macro's own variable_* entries are template context on every
+    # invocation (gcode_macro.py cmd(): kwparams = dict(self.variables))
+    # — omitting them false-flags the canonical variable-based toggle.
+    variables = {
+        param.key[len("variable_"):]: param.value
+        for param in section.params
+        if param.key.lower().startswith("variable_")
+        and not param.is_commented_out
+    }
+    simulation = simulate_macro(gcode_param.value, params,
+                                variables=variables)
     for finding in simulation.findings:
         # The body value carries a leading newline (everything after
         # 'gcode:'), so value line 1 is the remainder of the key line:
