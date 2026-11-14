@@ -89,7 +89,10 @@ def test_required_param_missing_after_render():
 
 
 def test_unparseable_typed_value_is_error():
-    body = "SET_LED LED=strips RED={params.red}"
+    """Uppercase reference = Klipper's real params key shape: the
+    declared non-numeric value flows into the command and the registry
+    type-check catches it at the rendered shape."""
+    body = "SET_LED LED=strips RED={params.RED}"
     result = simulate_macro(body, {"red": "hotpink"})
     bad = _findings(result, "macro_param_unparseable")
     assert len(bad) == 1
@@ -97,14 +100,29 @@ def test_unparseable_typed_value_is_error():
     assert "hotpink" in bad[0].message
 
 
+def test_int_filter_silently_coerces_garbage_klipper_truth():
+    """jinja's |int returns 0 for an unparseable STRING (no abort —
+    only Undefined aborts). Klipper runs the command with 0; the shape
+    is valid, so the simulator stays silent (D4 accepted)."""
+    result = simulate_macro("M106 S{params.S|int}", {"S": "hotpink"})
+    assert [r.text for r in result.rendered] == ["M106 S0"]
+    assert result.findings == []
+
+
 # ── Klipper Undefined parity ───────────────────────────────────────────────
 
 def test_undefined_param_surfaces():
-    result = simulate_macro("M117 {params.FOO}")
-    assert _codes(result) == ["macro_param_undefined"]
-    f = result.findings[0]
-    assert "FOO" in f.message
-    assert f.source_line == 1
+    """Bare interpolation of an unset param renders '' (Klipper's
+    default Undefined); numeric filters abort with Klipper's own
+    message — the abort class must still surface at the right line."""
+    blank = simulate_macro("M117 {params.FOO}")
+    assert [r.text for r in blank.rendered] == ["M117"]
+    assert _findings(blank, "macro_param_undefined") == []
+    aborted = simulate_macro("M117 {params.FOO|int}")
+    undef = _findings(aborted, "macro_param_undefined")
+    assert len(undef) == 1
+    assert "FOO" in undef[0].message
+    assert undef[0].source_line == 1
 
 
 def test_default_filter_is_clean():
@@ -236,14 +254,14 @@ def test_set_gcode_variables_tracked():
 # ── post-render advisories ─────────────────────────────────────────────────
 
 def test_g1_extrude_without_feedrate_post_render():
-    body = "G1 E{params.amt}"
-    result = simulate_macro(body, {"amt": "5"})
-    assert any(f.code == "g1_extrude_no_feedrate" for f in result.findings)
+    result = simulate_macro("G1 E{params.AMT}", {"amt": "5"})
+    assert any(f.code == "macro_rendered_g1_no_feedrate"
+               for f in result.findings)
 
 
 def test_g1_extrude_with_feedrate_clean():
-    body = "G1 E{params.amt} F{params.spd}"
-    result = simulate_macro(body, {"amt": "5", "spd": "1200"})
+    result = simulate_macro("G1 E{params.AMT} F{params.SPD}",
+                            {"amt": "5", "spd": "1200"})
     assert _codes(result) == []
 
 
@@ -274,23 +292,23 @@ def test_plain_body_no_findings():
 
 def test_provenance_survives_nested_blocks():
     body = (
-        "{% if params.a is defined %}\n"
+        "{% if printer.configfile.settings.fan %}\n"
         "  {% if params.b is defined %}\n"
         "    M117 deep\n"
         "  {% else %}\n"
-        "    SET_LED LED=strips BLUE={params.c}\n"
+        "    SET_LED LED=strips BLUE={params.C}\n"
         "  {% endif %}\n"
         "{% endif %}"
     )
-    # a and b undefined → both membership tests are deterministic
-    # (False) only because 'is defined' is special: params.b is defined
-    # is False, so the inner else renders, and params.c is undefined...
-    # c unset → the value renders as a Klipper-Undefined surface, NOT an
-    # empty string; assert we report SOMETHING at line 5.
+    # Outer condition = genuinely unknown (printer state) → both arms
+    # expand; inner 'is defined' = statically decidable (False) → the
+    # else arm runs; unset params.C renders '' → the registry flags the
+    # missing required value — line provenance preserved through two
+    # nesting levels (W4R truth: static guards collapse, unknowns expand).
     result = simulate_macro(body)
     flagged = [f for f in result.findings if f.source_line == 5]
     assert flagged, [f.message for f in result.findings]
-    assert flagged[0].code in ("macro_param_undefined", "macro_param_renders_empty")
+    assert flagged[0].code == "macro_param_renders_empty"
 
 
 # ── performance budget (plan: sim of all macro bodies < ~50 ms) ───────────
@@ -382,16 +400,19 @@ gcode:
     {% if printer.fan.speed > 0 %}
     M107
     {% else %}
-    M106 S{params.level}
+    M106 S{params.LEVEL}
     {% endif %}
 """
     res = validate_config(parse_config(cfg))
-    # params.level unset: the false-arm render aborts on Klipper's
-    # Undefined — surfaced as the warning, at the referencing line.
-    warns = [e for e in res.errors if e.code == "macro_param_undefined"]
-    assert len(warns) == 1
-    assert warns[0].severity == "warning"
-    assert warns[0].line_number == 6
+    # printer state unknown → both arms expand; params.LEVEL unset →
+    # the else arm renders 'M106 S' — the key token with an EMPTY value
+    # that Klipper feeds to float() and dies on at run time. Engine
+    # level surfaces it as an error at the referencing line (the D1
+    # human-facing boundary filter is tested separately).
+    errs = [e for e in res.errors if e.code == "macro_param_renders_empty"]
+    assert len(errs) == 1
+    assert errs[0].severity == "error"
+    assert errs[0].line_number == 6
 
 
 # ── MCP validate_macro façade (same engine, model-callable text) ───────────
@@ -452,18 +473,27 @@ def test_own_variables_injected_toggle_renders_clean():
 
 def test_variables_do_not_leak_into_params():
     # Klipper keeps params separate: a variable named led_state does
-    # NOT make params.led_state defined.
+    # NOT make params.LED_STATE defined (cmd() puts variables at top
+    # level and command parameters in params, reference/gcode_macro.py
+    # cmd()). The unset reference renders '' (Klipper truth) — the
+    # registry catches the missing required value.
     from parser.macro_render import simulate_macro
-    res = simulate_macro("SET_FAN_SPEED FAN=x SPEED={params.led_state}\n",
-                         {}, variables={"led_state": "0"})
-    assert any("led_state" in f.message for f in res.findings)
+    res = simulate_macro("SET_LED LED=strips RED={params.LED_STATE}\n",
+                         {}, variables={"led_state": "100"})
+    empties = [f for f in res.findings
+               if f.code == "macro_param_renders_empty"]
+    assert len(empties) == 1
 
 
 def test_variables_fix_does_not_blind_the_undefined_check():
     # Cry-wolf guard on the fix: one real variable must not mask a
-    # genuinely undefined name.
+    # genuinely undefined name. Numeric use of the unknown name aborts
+    # in REAL Klipper (default Undefined raises on arithmetic/filters),
+    # so it must still flag. (A BARE {% if totally_absent %} is a
+    # silent-false in real Klipper — the pivot pins that silence in
+    # test_macro_render_pivot.)
     from parser.macro_render import simulate_macro
-    res = simulate_macro("{% if totally_absent %}\nM106\n{% endif %}\n",
+    res = simulate_macro("{% if totally_absent|int %}\nM106\n{% endif %}\n",
                          {}, variables={"led_state": "0"})
     assert any("totally_absent" in f.message for f in res.findings)
 
@@ -482,12 +512,16 @@ def test_variable_values_are_literals_with_raw_fallback():
 
 
 def test_variables_participate_in_the_result_cache_key():
-    # Same body, different variable context → different verdicts; a
-    # shared cache entry would leak one into the other.
+    # Same body, different variable context → different renders; a
+    # shared cache entry would leak one into the other. (Under default
+    # Undefined both arms of a bare condition render clean, so the
+    # observable is the interpolated text itself.)
     from parser.macro_render import simulate_macro
-    body = "{% if led_state %}\nM106\n{% endif %}\n"
-    assert simulate_macro(body, {}, variables={"led_state": "0"}).findings == []
-    assert simulate_macro(body, {}).findings != []
+    body = "M117 {led_state}\n"
+    on = simulate_macro(body, {}, variables={"led_state": "'on'"})
+    off = simulate_macro(body, {})
+    assert [r.text for r in on.rendered] == ["M117 on"]
+    assert [r.text for r in off.rendered] == ["M117"]
 
 
 def test_validator_path_variable_toggle_is_clean():

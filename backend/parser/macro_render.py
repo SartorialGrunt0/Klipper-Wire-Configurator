@@ -1,33 +1,66 @@
-"""W2 render simulator: render a macro body the way Klipper would on a
-default invocation, then validate the RENDERED commands (feature
-macro-jinja-reliability).
+"""W2 render simulator: render a macro body the way Klipper would on an
+invocation, then validate the RENDERED commands (feature
+macro-jinja-reliability; W4R pivot 2026-11-14: scenario-driven).
 
-The honest definition of "simulate" (plan 2026-11-12, W2):
+The honest definition of "simulate":
 
   * Jinja that COMPILES can still EXPAND to garbage — the field repro is a
     toggle macro whose ``SET_LED ... RED={params.red}`` renders
     ``RED=`` (empty) and Klipper answers "unable to parse" at runtime.
     Compile-time checks (validator + validate_macro) can never see this.
-  * So we render, deterministically, on KNOWN SHAPE ONLY: ``printer`` and
-    ``caller_data`` are an UNKNOWN sentinel (any access yields UNKNOWN;
-    stringifies as ``<unknown>``, floats as NaN — never a guessed value),
-    ``params`` is the section's ``params_*`` defaults with Klipper's
-    Undefined semantics (unset raises, ``|default(...)`` works).
-  * Unknown-dependent ``{% if %}``/``{% elif %}`` conditions render BOTH
-    arms (a condition referencing printer/caller state, or a params key
-    with no default, is unknown-dependent; deterministic conditions
-    render the real branch). Variant count is capped at
-    ``MAX_RENDER_VARIANTS``; over-cap paths surface as
-    ``macro_render_unexplored`` info — never silently dropped.
+  * So we render, deterministically, on KNOWN SHAPE ONLY: ``printer`` is
+    an UNKNOWN sentinel (any access yields UNKNOWN; stringifies as
+    ``<unknown>``, floats as NaN — never a guessed value); a scenario's
+    ``printer_state`` overlays dotted paths so declared values render as
+    REAL values and everything else keeps widening (4R.3). ``params`` is
+    a PLAIN dict — Klipper's exact shape — layered over the section's
+    ``params_*`` defaults / scenario params.
+  * Klipper-parity UNDEFINED (W4R, measured against the bundled source):
+    gcode_macro.py:83 builds a plain ``jinja2.Environment`` — the DEFAULT
+    Undefined class: bare ``{params.X}`` renders ``''`` (the registry
+    shape check then flags the empty field — Klipper's real failure
+    mode), while ``|float``/``|int``/arithmetic on an unset name ABORT
+    (``macro_param_undefined``) exactly as real Klipper does. The old
+    StrictUndefined overlay was an invented "KlipperUndefined" parity
+    (no such class exists) whose dev-server audit 2026-11-14 false-
+    flagged valid real-world macros. jinja's own message over the plain
+    dict reads ``'dict object' has no attribute 'X'`` — Klipper's string.
+  * Template context mirrors gcode_macro.py: ``cmd()`` seeds
+    ``dict(self.variables)`` (the macro's own ``variable_*``, literal-
+    evaluated at config load), then ``create_template_context()``
+    (:106-112) contributes ``printer`` plus the four action functions
+    (rendered as returning ``''`` — runtime side effects are not
+    simulated), then command-line ``params``/``rawparams``. There is NO
+    ``caller_data`` (display templates only): a template referencing it
+    follows plain-Undefined semantics (false conditions, empty renders).
+  * PARAM-PRESENCE CONDITIONS ARE DETERMINISTIC (4R.1):
+    ``params.X is defined`` (dot/bracket, is/is-not) and
+    ``'X' in params`` (incl. the ``|upper`` idiom) resolve statically
+    against the simulated invocation's declared params — the arms they
+    gate are exactly the arms Klipper runs; no arm expansion, no phantom
+    renders (the audit's FP class). Coverage of a defined-arm is a
+    SCENARIO (caller declares the param), not a forced-true arm.
+  * Unknown-dependent ``{% if %}``/``{% elif %}`` conditions (undeclared
+    printer paths, params keys with no declared value, the bare params
+    object) render BOTH arms, capped at ``MAX_RENDER_VARIANTS``; over-cap
+    paths surface as ``macro_render_unexplored`` info — never dropped.
   * Rendered lines are checked against the gcode registry (schema v2):
     required params present AND non-empty (``macro_param_renders_empty``),
     typed params parseable (``macro_param_unparseable``), UNKNOWN/NaN
     values = ``macro_unknown_value`` info (never an error — we never
     claim to know runtime values), plus the G1-extrusion-without-feedrate
-    advisory applied POST-render so templated values can't hide it.
+    advisory applied POST-render under its OWN code
+    (``macro_rendered_g1_no_feedrate``) so sim origin stays filterable
+    from the static scan's ``g1_extrude_no_feedrate``.
   * Other macros are recognized via the caller-supplied project set and
     never recursed (v1 limit). ``SET_GCODE_VARIABLE`` targets are tracked
     as (MACRO, VARIABLE) string pairs, not simulated state.
+
+Consumption contract (4R.2, plan 2026-11-14): human-facing validation
+never shows ``SIM_FINDING_CODES`` findings; the AI write-path delta gate
+honors them ONLY at error severity; full findings exist only as tool
+output (validate_macro facade / simulate_macro scenarios) with the
+scenario's declared assumptions attached.
 
 The engine shares Klipper's jinja environment with the save gate
 (``validator._MACRO_JINJA_ENV`` — imported lazily inside the entry point
@@ -35,12 +68,12 @@ so validator can import this module top-level for the validation pass
 without a circular import) and the same comment stripping
 (``_strip_inline_comments``).
 
-Finding severities: errors ONLY on every-path deterministic breakage of
-the rendered shape (empty required/typed param, unparseable typed value);
-unknown-state dependencies and simulation blind spots are info; a render
-that dies on Klipper's Undefined (unset param with no default) is a
-warning — it aborts the DEFAULT invocation, but a caller passing the
-param makes it legal.
+Finding severities: errors ONLY on every-simulated-path deterministic
+breakage of the rendered shape (empty required/typed param, unparseable
+typed value); unknown-state dependencies and simulation blind spots are
+info; a render that dies on Klipper's Undefined (unset param used where
+real Klipper aborts) is a warning — a scenario that passes the param
+shows whether the invocation is legal.
 """
 from __future__ import annotations
 
@@ -50,7 +83,7 @@ from dataclasses import dataclass, field, replace
 from functools import lru_cache
 
 import jinja2
-from jinja2 import StrictUndefined, UndefinedError
+from jinja2 import UndefinedError
 
 # Cap on total branch renderings per macro (plan 2.1). Exotic branch
 # counts degrade to macro_render_unexplored info instead of blowing up.
@@ -61,6 +94,21 @@ MAX_RENDER_VARIANTS = 16
 # floats to (which propagate through arithmetic and |round without
 # fabricating a value).
 _UNKNOWN_MARKERS = ("<unknown>", "nan", "inf")
+
+# Every finding code this engine emits (single source for the 4R.2
+# consumption split: human-facing validation strips all of them; the AI
+# write-path delta gate honors them ONLY at error severity). The post-
+# render G1 advisory deliberately does NOT reuse the static scan's
+# g1_extrude_no_feedrate — sim origin must stay filterable.
+SIM_FINDING_CODES = frozenset({
+    "macro_param_undefined",
+    "macro_param_renders_empty",
+    "macro_param_unparseable",
+    "macro_unknown_value",
+    "macro_render_blocked",
+    "macro_render_unexplored",
+    "macro_rendered_g1_no_feedrate",
+})
 
 
 @dataclass(frozen=True)
@@ -146,34 +194,142 @@ class _Unknown:
 UNKNOWN = _Unknown()
 
 
-class _Params(dict):
-    """Klipper-shaped params: keys lowercase (gcode.py lowercases command
-    tokens before building params); an unset key raises through jinja's
-    Undefined machinery, so ``|default(...)`` works and bare
-    ``{params.FOO}`` aborts like Klipper's Undefined."""
+class _StateNode:
+    """Scenario printer-state overlay (4R.3): a declared dotted path
+    answers with the REAL value (full jinja semantics — comparisons and
+    filters evaluate natively); anything not covered by the scenario
+    widens to UNKNOWN, exactly like the default sentinel. A container
+    node is a marker, not a modeled status dict: truthy (Klipper: a
+    present status object is truthy), stringifies as '<unknown>' (the
+    full status repr is not modeled), iteration RAISES (a partial
+    iteration of declared-keys-only would render a lie), arithmetic
+    widens."""
 
-    def __missing__(self, key):
-        lowered = key.lower()
-        if lowered in self:
-            return self[lowered]
-        raise KeyError(key)
+    __slots__ = ("node",)
+
+    def __init__(self, node: dict):
+        self.node = node
+
+    def _child(self, key):
+        try:
+            value = self.node[key]
+        except (KeyError, IndexError, TypeError):
+            return UNKNOWN
+        if isinstance(value, dict):
+            return _StateNode(value)
+        return value
+
+    def __getattr__(self, name): return self._child(name)
+    def __getitem__(self, key): return self._child(key)
+    def __call__(self, *args, **kwargs): return UNKNOWN
+    def __str__(self): return "<unknown>"
+    def __repr__(self): return "<unknown>"
+    def __bool__(self): return True
+    def __iter__(self):
+        raise _RenderBlocked("iteration over a declared state container")
+    def __float__(self): return float("nan")
+    def __int__(self): return 1  # coverage parity with _Unknown
+
+    def _widen(self, *args): return UNKNOWN
+    __add__ = __radd__ = _widen
+    __sub__ = __rsub__ = _widen
+    __mul__ = __rmul__ = _widen
+    __truediv__ = __rtruediv__ = _widen
+    __floordiv__ = __rfloordiv__ = _widen
+    __mod__ = __rmod__ = _widen
+    __pow__ = __rpow__ = _widen
+
+    def __hash__(self): return hash("<unknown>")
+
+
+def _nest_state(printer_state: dict) -> "_StateNode":
+    """Fold dotted-path scenario keys into a lookup tree
+    ({'toolhead.homed_axes': 'xyz'} → toolhead → homed_axes)."""
+    root: dict = {}
+    for path, value in printer_state.items():
+        parts = [_state_path_key(path)] if "." not in str(path) else [
+            p.strip().lower() for p in str(path).split(".") if p.strip()]
+        node = root
+        for part in parts[:-1]:
+            nxt = node.get(part)
+            if not isinstance(nxt, dict):
+                nxt = {}
+                node[part] = nxt
+            node = nxt
+        if parts:
+            node[parts[-1]] = value
+    return _StateNode(root)
+
+
+def _state_path_key(path: object) -> str:
+    return ".".join(p.strip().lower() for p in str(path).split(".")
+                    if p.strip())
 
 
 # ── unknown-dependence classification ──────────────────────────────────────
 
-_STATE_ROOT_RE = re.compile(r"(?<![\w.])(printer|caller_data)\b")
+# 'printer' is the ONLY context root that holds state: Klipper's
+# gcode_macro context (gcode_macro.py create_template_context + cmd) has
+# no caller_data — a template referencing it follows plain-Undefined
+# semantics deterministically, exactly like real Klipper (W4R).
+_PRINTER_REF_RE = re.compile(
+    r"(?<![\w.])printer\b((?:\s*\.\s*[A-Za-z_]\w*)*)(\s*\[)?")
 _PARAMS_REF_RE = re.compile(
     r"(?<![\w.])params(?:\s*\.\s*([A-Za-z_]\w*)|\[\s*['\"]([^'\"]+)['\"]\s*\]"
     r"|(?!\s*[.\[]))"
 )
 
+# Statically decidable param-presence grammars (whole-condition forms).
+# These depend ONLY on which params the simulated invocation declares —
+# forcing their TRUE arm without declaring the param is what produced the
+# phantom renders the 2026-11-14 audit flagged on valid configs.
+_PARAM_IS_DEFINED_RE = re.compile(
+    r"^params\s*(?:\.\s*([A-Za-z_]\w*)"
+    r"|\[\s*['\"]([A-Za-z_][\w ]*)['\"]\s*)\s+(is not|is)\s+defined$",
+    re.DOTALL)
+_PARAMS_MEMBERSHIP_RE = re.compile(
+    r"^['\"]([A-Za-z_][\w ]*)['\"]\s+in\s+params(?:\s*\|\s*upper\s*)?$",
+    re.DOTALL)
 
-def _cond_is_unknown(cond: str, defined_params: frozenset[str]) -> bool:
-    """Whether an if/elif condition depends on state the simulator does
-    not know: printer/caller roots, a params key with no section default,
-    or the bare params object (membership/iteration)."""
-    if _STATE_ROOT_RE.search(cond):
-        return True
+
+def _static_param_presence(cond: str,
+                           defined_params: frozenset[str]) -> bool | None:
+    """Resolve a decidable param-presence condition, or None when the
+    condition is not of that shape. `params.X is defined` (dot/bracket,
+    is/is-not) and `'X' in params` (with the `|upper` membership idiom)
+    answer exactly what Klipper answers for the invocation at hand."""
+    c = cond.strip()
+    m = _PARAM_IS_DEFINED_RE.match(c)
+    if m:
+        name = (m.group(1) or m.group(2)).lower()
+        present = name in defined_params
+        return present if m.group(3) == "is" else not present
+    m = _PARAMS_MEMBERSHIP_RE.match(c)
+    if m:
+        return m.group(1).lower() in defined_params
+    return None
+
+
+def _cond_is_unknown(cond: str, defined_params: frozenset[str],
+                     declared_state: frozenset[str] = frozenset()) -> bool:
+    """Whether an if/elif condition depends on state the simulation does
+    not know: printer paths not covered by the scenario's printer_state,
+    a params key with no declared value, or the bare params object
+    (membership/iteration beyond the decidable grammars, which are
+    already spliced out by _splice_static_param_guards)."""
+    for m in _PRINTER_REF_RE.finditer(cond):
+        if m.group(2):
+            # Bracket access anywhere in the chain: conservative, the
+            # key is not statically known.
+            return True
+        path = re.sub(r"\s*\.\s*", ".", m.group(1) or "").lstrip(".").lower()
+        if path == "":
+            if not declared_state:
+                return True
+            continue
+        if not any(d == path or d.startswith(path + ".")
+                   or path.startswith(d + ".") for d in declared_state):
+            return True
     for m in _PARAMS_REF_RE.finditer(cond):
         dotted, indexed = m.group(1), m.group(2)
         if dotted is not None:
@@ -193,17 +349,85 @@ _STMT_RE = re.compile(r"\{%-?.*?%\}", re.DOTALL)
 _STMT_KW_RE = re.compile(r"\{%-?\s*(\w+)")
 
 
-def _first_unknown_stmt(src: str, defined: frozenset[str]) -> re.Match | None:
+def _iter_stmts(src: str):
+    """Yield (keyword, condition, match) for every control-flow statement.
+    The condition strip removes BOTH the 'if/elif' prefix and the '%}'
+    (with its optional whitespace-control dash) — the old tail pattern
+    never matched '%}', which silently starved the static grammars of
+    every real condition (probe-verified 2026-11-14)."""
     for m in _STMT_RE.finditer(src):
-        inner = m.group(0)
-        kw_m = _STMT_KW_RE.match(inner)
-        if not kw_m or kw_m.group(1) not in ("if", "elif"):
+        kw_m = _STMT_KW_RE.match(m.group(0))
+        if not kw_m:
             continue
-        cond = re.sub(r"^\{%-?\s*(?:if|elif)\s+", "", inner)
-        cond = re.sub(r"-%?\}$", "", cond)
-        if _cond_is_unknown(cond, defined):
-            return m
+        cond = re.sub(r"^\{%-?\s*(?:if|elif)\s+", "", m.group(0))
+        cond = re.sub(r"-?%\}\s*$", "", cond).strip()
+        yield kw_m.group(1), cond, m
+
+
+def _cond_literal(cond: str) -> bool | None:
+    """Whether a condition is a splice-emitted literal (1/0)."""
+    c = cond.strip()
+    if c == "1":
+        return True
+    if c == "0":
+        return False
     return None
+
+
+def _first_unknown_stmt(src: str, defined: frozenset[str],
+                        declared_state: frozenset[str] = frozenset()
+                        ) -> re.Match | None:
+    """First if/elif whose condition is unknown AND whose arm can
+    actually execute — arms excluded by already-literal conditions
+    (`{% if 0 %}` bodies, elif/else arms behind a taken arm) are dead
+    shape Klipper skips: expanding them invented variants (and
+    macro_render_unexplored infos) with zero coverage value."""
+    stack: list[dict] = []
+    for kw, cond, m in _iter_stmts(src):
+        if kw == "if":
+            lit = _cond_literal(cond)
+            dead = any(f["dead"] for f in stack) or lit is False
+            stack.append({"dead": dead, "true_taken": lit is True})
+            if not dead and lit is None and _cond_is_unknown(
+                    cond, defined, declared_state):
+                return m
+            continue
+        if kw == "elif" and stack:
+            f = stack[-1]
+            arm_dead = f["dead"] or f["true_taken"]
+            f["dead"] = arm_dead
+            lit = _cond_literal(cond)
+            if not arm_dead and lit is None and _cond_is_unknown(
+                    cond, defined, declared_state):
+                return m
+            f["true_taken"] = f["true_taken"] or (lit is True)
+            continue
+        if kw == "else" and stack:
+            f = stack[-1]
+            f["dead"] = f["dead"] or f["true_taken"]
+            continue
+        if kw == "endif":
+            if stack:
+                stack.pop()
+            continue
+    return None
+
+
+def _splice_static_param_guards(src: str,
+                                defined_params: frozenset[str]) -> str:
+    """Replace decidable param-presence conditions with literals BEFORE
+    variant expansion (line-count preserving). Once collapsed, only
+    genuinely unknown conditions drive both-arm expansion, and reads the
+    guard excludes can never render on an arm Klipper would not run
+    (the 2026-11-14 audit's FP class)."""
+    out = src
+    for _kw, cond, m in reversed(list(_iter_stmts(src))):
+        if _kw not in ("if", "elif"):
+            continue
+        verdict = _static_param_presence(cond, defined_params)
+        if verdict is not None:
+            out = _splice(out, m, "1" if verdict else "0")
+    return out
 
 
 def _splice(src: str, stmt: re.Match, forced: str) -> str:
@@ -219,7 +443,9 @@ def _splice(src: str, stmt: re.Match, forced: str) -> str:
 
 
 def _expand_variants(src: str, defined: frozenset[str],
-                     cap: int) -> tuple[list[str], int]:
+                     cap: int,
+                     declared_state: frozenset[str] = frozenset()
+                     ) -> tuple[list[str], int]:
     """Deterministic bounded DFS over unknown decisions, TRUE arm first.
     Returns (variants, held) where 'held' counts variants abandoned
     because the cap was reached with decisions still unforced."""
@@ -227,16 +453,17 @@ def _expand_variants(src: str, defined: frozenset[str],
     while True:
         idx = next(
             (i for i, v in enumerate(variants)
-             if _first_unknown_stmt(v, defined) is not None),
+             if _first_unknown_stmt(v, defined, declared_state) is not None),
             None,
         )
         if idx is None:
             return variants, 0
         if len(variants) + 1 > cap:
             held = sum(1 for v in variants
-                       if _first_unknown_stmt(v, defined) is not None)
+                       if _first_unknown_stmt(v, defined,
+                                              declared_state) is not None)
             return variants, held
-        stmt = _first_unknown_stmt(variants[idx], defined)
+        stmt = _first_unknown_stmt(variants[idx], defined, declared_state)
         variants[idx:idx + 1] = [
             _splice(variants[idx], stmt, "1"),
             _splice(variants[idx], stmt, "0"),
@@ -245,27 +472,45 @@ def _expand_variants(src: str, defined: frozenset[str],
 
 # ── per-variant rendering ──────────────────────────────────────────────────
 
-def _noop_respond(msg="", **kwargs): return ""
+def _noop_action(*args, **kwargs):
+    """Template stand-in for Klipper's action_* context functions
+    (gcode_macro.py:106-112): they return '' and their RUNTIME side
+    effects (respond / raise / shutdown / webhook) are never simulated."""
+    return ""
 
 
-_STRICT_ENV: jinja2.Environment | None = None
-
-
-def _strict_env() -> jinja2.Environment:
-    """Klipper-parity STRICT env: derived from the validator's shared
-    _MACRO_JINJA_ENV by overlay — delimiters and every other config are
-    identical, only 'undefined' is overridden. Rationale: Klipper's
-    KlipperUndefined aborts the render when a value is used
-    ('Jinja2 error: ... is undefined'), while jinja's default Undefined
-    renders silently as ''. The per-render render(undefined=...) kwarg
-    does NOT exist (the kwarg would land in the context as a variable
-    named 'undefined' — probe-verified), so the overlay is the only
-    parity-correct way to get the abort."""
-    global _STRICT_ENV
-    if _STRICT_ENV is None:
-        from parser.validator import _MACRO_JINJA_ENV
-        _STRICT_ENV = _MACRO_JINJA_ENV.overlay(undefined=StrictUndefined)
-    return _STRICT_ENV
+def _render_context(params: dict[str, str],
+                    variables: dict[str, str] | None = None,
+                    printer_state: dict | None = None) -> dict:
+    # Klipper's cmd(): kwparams = dict(self.variables), then
+    # create_template_context() update, then params/rawparams from the
+    # command line (klippy/extras/gcode_macro.py). Variables are
+    # top-level template names, lowercased at config parse (configfile.py
+    # 'option = option.lower()'); the standard context keys win over
+    # same-named variables exactly as that update order implies.
+    ctx: dict = {k.lower(): _variable_value(v)
+                 for k, v in (variables or {}).items()}
+    # create_template_context(): printer + the four action functions.
+    # NO caller_data (display templates only — plain Undefined here is
+    # real Klipper semantics). params is a PLAIN dict — Klipper builds
+    # one per invocation — so jinja's own undefined hint reads
+    # 'dict object', Klipper's wording.
+    ctx.update({
+        "printer": (_nest_state(printer_state) if printer_state
+                    else UNKNOWN),
+        "action_emergency_stop": _noop_action,
+        "action_respond_info": _noop_action,
+        "action_raise_error": _noop_action,
+        "action_call_remote_method": _noop_action,
+        # Klipper's params dict keys are UPPERCASE: gcode.py tokenizes the
+        # uppercased command line (gcode.py:210) and normalizes extended
+        # params with {k.upper(): v} (gcode.py:274). Templates write
+        # params.S / params.VELOCITY; a lowercase template reference MISSES
+        # in real Klipper too — exactness, not tolerance.
+        "params": {k.upper(): v for k, v in params.items()},
+        "rawparams": "",
+    })
+    return ctx
 
 
 def _variable_value(raw: str):
@@ -279,39 +524,6 @@ def _variable_value(raw: str):
         return ast.literal_eval(raw)
     except (ValueError, SyntaxError):
         return raw
-
-
-def _render_context(params: dict[str, str],
-                    variables: dict[str, str] | None = None) -> dict:
-    # Klipper's cmd(): kwparams = dict(self.variables), then
-    # template-context update, then params/rawparams from the command
-    # line (klippy/extras/gcode_macro.py). Variables are top-level
-    # template names, lowercased at config parse (configfile.py
-    # 'option = option.lower()'); the standard context keys win over
-    # same-named variables exactly as that update order implies.
-    ctx: dict = {k.lower(): _variable_value(v)
-                 for k, v in (variables or {}).items()}
-    # Klipper's create_render_context: printer, params, caller_data,
-    # rawparams, action_respond (klippy/extras/gcode_macro.py).
-    ctx.update({
-        "printer": UNKNOWN,
-        "params": _Params({k.lower(): v for k, v in params.items()}),
-        "caller_data": UNKNOWN,
-        "rawparams": "",
-        "action_respond": _noop_respond,
-    })
-    return ctx
-
-
-def _macro_globals() -> dict:
-    """Klipper's gcode_macro template globals (assign_template /
-    printer / call). v1: 'call' widens to UNKNOWN rather than
-    re-entering the engine (no recursion — documented limit)."""
-    return {
-        "assign_template": lambda *a, **k: "",
-        "printer": UNKNOWN,
-        "call": lambda *a, **k: UNKNOWN,
-    }
 
 
 _UNDEFINED_ATTR_RES = (
@@ -343,11 +555,12 @@ def _undefined_line(message: str, src: str) -> int | None:
 
 def _render_one(env: jinja2.Environment, src: str, params: dict[str, str],
                 variant: int,
-                variables: dict[str, str] | None = None
+                variables: dict[str, str] | None = None,
+                printer_state: dict | None = None
                 ) -> tuple[list[str], RenderFinding | None]:
     try:
-        out = env.from_string(src, globals=_macro_globals()).render(
-            _render_context(params, variables))
+        out = env.from_string(src).render(
+            _render_context(params, variables, printer_state))
     except jinja2.TemplateSyntaxError:
         # Broken template: _validate_macro_jinja already reports it with
         # the engine's own message and the right code. The simulation
@@ -359,8 +572,8 @@ def _render_one(env: jinja2.Environment, src: str, params: dict[str, str],
         return [], RenderFinding(
             "warning", "macro_param_undefined",
             f"Rendering aborts with Klipper's Undefined error: {exc.message} — "
-            "the DEFAULT invocation (no arguments) fails; callers must pass "
-            "the parameter or the macro needs a |default(...).",
+            "this invocation fails; the caller must pass the value or the "
+            "macro needs a |default(...).",
             source_line=lineno,
             variant=variant,
         )
@@ -441,7 +654,7 @@ def _check_rendered_line(text: str, registry: dict, variant: int,
         # hide it (plan 2.2).
         if _G1_E_RE.search(text) and not _G1_F_RE.search(text):
             return [RenderFinding(
-                "warning", "g1_extrude_no_feedrate",
+                "warning", "macro_rendered_g1_no_feedrate",
                 f"Extrusion move without feedrate: '{text[:80]}'. Add an F "
                 "parameter to control extrusion speed.", variant=variant)]
         return []
@@ -456,8 +669,21 @@ def _check_rendered_line(text: str, registry: dict, variant: int,
         return []
 
     findings: list[RenderFinding] = []
-    present = {m.group(1).upper(): m.group(2)
-               for m in _PARAM_TOKEN_RE.finditer(text)}
+    # Klipper's own tokenizing (gcode.py): every token after the command
+    # is a parameter — 'NAME=value' takes everything before '=' as the
+    # key; traditional single-char args ('S100', and the EMPTY-valued
+    # 'S' a bare template substitution renders) take the first char as
+    # key and the rest as value. Last occurrence wins, like the params
+    # dict. The old NAME=value-only regex silently skipped every
+    # traditional-rendered param (M106 S100, M104 S...).
+    present: dict[str, str] = {}
+    for tok in text.split()[1:]:
+        if "=" in tok:
+            key, _, value = tok.partition("=")
+            if key:
+                present[key.upper()] = value
+        else:
+            present[tok[0].upper()] = tok[1:]
     seen_unknown = False
     for pname, pdef in sorted((entry.get("params") or {}).items()):
         pdef = pdef or {}
@@ -521,12 +747,14 @@ def _scan_set_variables(rendered_texts: list[tuple[str, int]]) -> list[tuple[str
 def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
                             known_macros: frozenset[str] = frozenset(),
                             max_variants: int = MAX_RENDER_VARIANTS,
-                            variables: dict[str, str] | None = None
+                            variables: dict[str, str] | None = None,
+                            printer_state: dict | None = None
                             ) -> MacroRenderResult:
     from parser.validator import _MACRO_JINJA_ENV, _strip_inline_comments
 
     params = params or {}
     variables = variables or {}
+    printer_state = printer_state or {}
     stripped = _strip_inline_comments(body)
     if not stripped.strip():
         return MacroRenderResult()
@@ -539,7 +767,17 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
     # (they are context entries in Klipper), not just params.
     defined = frozenset(k.lower() for k in params) | frozenset(
         k.lower() for k in variables)
-    variants, held = _expand_variants(stripped, defined, max_variants)
+    # Scenario-declared dotted state paths: conditions whose printer
+    # paths are covered evaluate NATIVELY (the value is known) — no arm
+    # expansion for known shape.
+    declared_state = frozenset(
+        _state_path_key(k) for k in printer_state if _state_path_key(k))
+    # Param-presence guards are deterministic for THIS invocation: splice
+    # them to literals first so the guarded arms collapse exactly like
+    # Klipper's branch selection (4R.1).
+    stripped = _splice_static_param_guards(stripped, defined)
+    variants, held = _expand_variants(stripped, defined, max_variants,
+                                      declared_state)
 
     try:
         from services.gcode_registry import load_registry
@@ -551,8 +789,8 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
     findings: list[RenderFinding] = []
     for vi, variant_src in enumerate(variants):
         src_lines = variant_src.split("\n")
-        lines, finding = _render_one(_strict_env(), variant_src, params, vi,
-                                     variables)
+        lines, finding = _render_one(_MACRO_JINJA_ENV, variant_src, params,
+                                     vi, variables, printer_state)
         if finding is not None:
             findings.append(finding)
             continue
@@ -600,34 +838,64 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
 @lru_cache(maxsize=1024)
 def _simulate_cached(body: str, params_items: tuple[tuple[str, str], ...],
                      max_variants: int,
-                     variables_items: tuple[tuple[str, str], ...]
+                     variables_items: tuple[tuple[str, str], ...],
+                     state_items: tuple[tuple[str, str], ...]
                      ) -> MacroRenderResult:
+    # Scenario state values crossed the cache boundary as repr(): the
+    # cache key must stay hashable while keeping value TYPE visible
+    # (1 vs '1' must not share an entry).
+    import json
+    state = {}
+    for path, raw in state_items:
+        try:
+            state[path] = json.loads(raw)
+        except ValueError:
+            state[path] = raw
     return simulate_macro_uncached(body, dict(params_items),
                                    frozenset(), max_variants,
-                                   dict(variables_items))
+                                   dict(variables_items), state)
 
 
 def simulate_macro(body: str, params: dict[str, str] | None = None,
                    known_macros: frozenset[str] = frozenset(),
                    max_variants: int = MAX_RENDER_VARIANTS,
-                   variables: dict[str, str] | None = None
+                   variables: dict[str, str] | None = None,
+                   printer_state: dict | None = None
                    ) -> MacroRenderResult:
-    """Simulate one macro body on default invocation parameters.
+    """Simulate one macro body on an invocation.
 
-    ``params`` are the section's ``params_*`` defaults (lowercase keys
-    recommended; lookups are case-insensitive like Klipper).
-    ``variables`` are the section's own ``variable_*`` values (raw
-    option strings; literal-evaluated like Klipper's config load) —
-    top-level template names in every invocation, independent of
-    params. Results are cached by (body, params, variables) — the
-    simulation has no other project input in v1 (macro calls are not
-    recursed), so that triple IS the full cache key. ``known_macros``
-    only documents that macro tokens are recognized (never flagged) —
-    v1 does not use it to change behavior."""
+    ``params`` are the invocation's parameters (the section's ``params_*``
+    defaults on the harness path, scenario values on the tool path;
+    lowercase keys recommended, lookups are case-insensitive like
+    Klipper). ``variables`` are the section's own ``variable_*`` values
+    (raw option strings; literal-evaluated like Klipper's config load) —
+    top-level template names in every invocation, independent of params.
+    ``printer_state`` (4R.3) overlays declared dotted paths
+    (``{'toolhead.homed_axes': 'xyz'}``) onto the UNKNOWN sentinel: a
+    declared value renders as a real value, everything else keeps
+    widening. Results are cached by (body, params, variables,
+    printer_state) — the simulation has no other project input in v1
+    (macro calls are not recursed), so that quadruple IS the full cache
+    key (cross-context isolation pinned by test). ``known_macros`` only
+    documents that macro tokens are recognized (never flagged) — v1 does
+    not use it to change behavior."""
     key_items = tuple(sorted((k.lower(), v) for k, v in (params or {}).items()))
     var_items = tuple(sorted((k.lower(), v) for k, v in
                              (variables or {}).items()))
-    return _simulate_cached(body, key_items, max_variants, var_items)
+    import json as _json
+    state_serial = []
+    for k, v in sorted((printer_state or {}).items(),
+                       key=lambda kv: _state_path_key(kv[0])):
+        path = _state_path_key(k)
+        if not path:
+            continue
+        try:
+            raw = _json.dumps(v)
+        except (TypeError, ValueError):
+            raw = repr(v)
+        state_serial.append((path, raw))
+    return _simulate_cached(body, key_items, max_variants, var_items,
+                            tuple(state_serial))
 
 
 # ── W3: runtime-error traceback (paste → Jinja source line) ────────────────
