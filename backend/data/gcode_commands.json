@@ -1,7 +1,7 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "source_rev": "2d7717e3b62ea2fe3401b27f54f8681f80451c69",
-  "generated_at": "2026-11-13T12:47:48+00:00",
+  "generated_at": "2026-11-14T23:16:25+00:00",
   "commands": {
     "ABORT": {
       "extra": "bed_screws",
@@ -1319,6 +1319,11 @@
         "STEPPER": {
           "required": true
         },
+        "GCODE_AXIS": {
+          "type": "str",
+          "required": false,
+          "default": null
+        },
         "ENABLE": {
           "type": "int",
           "required": false,
@@ -1342,19 +1347,15 @@
           "required": false,
           "default": null
         },
-        "GCODE_AXIS": {
-          "type": "str",
-          "required": false,
-          "default": null
-        },
         "MOVE": {
           "type": "float",
-          "required": true
+          "required": false,
+          "default": null
         },
         "SYNC": {
           "type": "int",
           "required": false,
-          "default": 0
+          "default": 1
         }
       },
       "mux_key": "STEPPER",
@@ -2091,15 +2092,15 @@
           "type": "float",
           "required": false
         },
-        "CLEAR_HOMED": {
-          "type": "str",
-          "required": false,
-          "default": ""
-        },
         "SET_HOMED": {
           "type": "str",
           "required": false,
           "default": "xyz"
+        },
+        "CLEAR_HOMED": {
+          "type": "str",
+          "required": false,
+          "default": null
         },
         "CLEAR": {
           "type": "str",
@@ -2305,7 +2306,7 @@
         },
         "ANGLE": {
           "type": "float",
-          "required": true
+          "required": false
         }
       },
       "mux_key": "SERVO",
@@ -2363,14 +2364,14 @@
           "type": "str",
           "required": true
         },
+        "CARRIAGES": {
+          "type": "str",
+          "required": true
+        },
         "DISABLE_CHECKS": {
           "type": "int",
           "required": false,
           "default": 0
-        },
-        "CARRIAGES": {
-          "type": "str",
-          "required": true
         }
       },
       "mux_key": null,
@@ -2474,6 +2475,10 @@
         "STEPPER": {
           "required": true
         },
+        "FIELD": {
+          "type": "str",
+          "required": true
+        },
         "VALUE": {
           "type": "int",
           "required": false,
@@ -2483,10 +2488,6 @@
           "type": "float",
           "required": false,
           "default": null
-        },
-        "FIELD": {
-          "type": "str",
-          "required": true
         }
       },
       "mux_key": "STEPPER",
@@ -2589,15 +2590,18 @@
       "params": {
         "LOAD": {
           "type": "str",
-          "required": true
+          "required": false,
+          "default": null
         },
         "SAVE": {
           "type": "str",
-          "required": true
+          "required": false,
+          "default": null
         },
         "REMOVE": {
           "type": "str",
-          "required": true
+          "required": false,
+          "default": null
         }
       },
       "mux_key": null,
@@ -2663,6 +2667,11 @@
         "PROBE": {
           "required": true
         },
+        "METHOD": {
+          "type": "str",
+          "required": false,
+          "default": "manual"
+        },
         "TARGET": {
           "type": "float",
           "required": true
@@ -2671,11 +2680,6 @@
           "type": "float",
           "required": false,
           "default": 2.0
-        },
-        "METHOD": {
-          "type": "str",
-          "required": false,
-          "default": "manual"
         }
       },
       "mux_key": "PROBE",
@@ -2733,10 +2737,6 @@
         "MAXIMUM": {
           "type": "float",
           "required": false
-        },
-        "DEBUGOUTPUT": {
-          "type": "str",
-          "required": true
         }
       },
       "mux_key": "SENSOR",
@@ -2749,7 +2749,7 @@
       "requires_mode": "any",
       "params": {
         "Z": {
-          "type": "float",
+          "type": "str",
           "required": true
         }
       },
@@ -2764,6 +2764,10 @@
       ],
       "requires_mode": "any",
       "params": {
+        "AXIS": {
+          "type": "str",
+          "required": true
+        },
         "CHIPS": {
           "type": "str",
           "required": false,
@@ -2774,18 +2778,14 @@
           "required": false,
           "default": null
         },
-        "NAME": {
-          "type": "str",
-          "required": false
-        },
-        "AXIS": {
-          "type": "str",
-          "required": true
-        },
         "OUTPUT": {
           "type": "str",
           "required": false,
           "default": "resonances"
+        },
+        "NAME": {
+          "type": "str",
+          "required": false
         }
       },
       "mux_key": null,

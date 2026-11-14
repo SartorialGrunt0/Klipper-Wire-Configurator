@@ -46,6 +46,8 @@ def test_fixture_extracts_exact_name_set():
         "FAKE_ONE_SHOT",
         # gcode_move.py handlers list + literal alias
         "G1", "G20", "G21", "M82", "SET_GCODE_OFFSET", "G0",
+        # guards.py review-F1/F2 policy fixtures
+        "GUARDED", "ALIASED",
     }
 
 
@@ -95,11 +97,57 @@ def test_fixture_extracts_param_types_and_required():
     assert params["LABEL"] == {"type": "str", "required": True}
 
 
+# ── review F1/F2: required policy + gcmd-receiver restriction ──────────────
+
+def test_fixture_guarded_reads_are_never_required():
+    """F1 (skew_correction:119-120 / manual_stepper:129 / servo:71 shape):
+    a name read only via test-then-read or inside an if/elif/else action
+    chain is NOT required — the command runs fine without it, and the
+    old last-call-wins policy false-FAILed every valid invocation
+    (18 of the 24 corpus errors)."""
+    mod = _load_extractor()
+    registry = mod.extract_registry(FAKE_TREE)
+    params = registry["commands"]["GUARDED"]["params"]
+    for name in ("LOAD", "SAVE", "FALLBACK"):
+        assert params[name]["required"] is False, name
+
+
+def test_fixture_gcmd_alias_harvested_non_receivers_dropped():
+    """F2 (heaters.py:374 became a REQUIRED TEMPERATURE_WAIT DEBUGOUTPUT):
+    only the gcmd parameter (through assignment aliases) is a param
+    source; self.printer.get_start_args().get(...) is a dict lookup."""
+    mod = _load_extractor()
+    registry = mod.extract_registry(FAKE_TREE)
+    params = registry["commands"]["ALIASED"]["params"]
+    assert params["MUST"] == {"type": "int", "required": True}  # via alias
+    assert "DEBUGOUTPUT" not in params
+    assert params["DELAY"] == {"type": "float", "required": False,
+                               "default": 1.0}
+
+
+@pytest.mark.skipif(not REAL_KLIPPY.is_dir(), reason="reference klipper absent")
+def test_real_tree_guarded_families_not_required():
+    """The four exact F1/F2 false-FAILs from probe p4 must be gone."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(REAL_KLIPPY)["commands"]
+    skew = cmds["SKEW_PROFILE"]["params"]
+    assert not any(skew[n]["required"] for n in ("LOAD", "SAVE", "REMOVE"))
+    assert cmds["SET_SERVO"]["params"]["ANGLE"]["required"] is False
+    ms = cmds["MANUAL_STEPPER"]["params"]
+    assert ms["MOVE"]["required"] is False
+    tw = cmds["TEMPERATURE_WAIT"]["params"]
+    assert "DEBUGOUTPUT" not in tw
+    # preserved-correct entries (the SET_LED assertion of plan 2.2):
+    led = cmds["SET_LED"]["params"]
+    assert led["LED"]["required"] is True
+    assert led["RED"] == {"type": "float", "required": False, "default": 0.0}
+
+
 def test_fixture_schema_version_bumped():
     mod = _load_extractor()
-    assert mod.SCHEMA_VERSION == 2
+    assert mod.SCHEMA_VERSION == 3
     registry = mod.extract_registry(FAKE_TREE)
-    assert registry["schema_version"] == 2
+    assert registry["schema_version"] == 3
 
 
 def test_fixture_gcode_builtin_has_no_gate():
@@ -197,7 +245,7 @@ def test_artifact_schema_shape():
     if not ARTIFACT.is_file():
         pytest.skip("artifact not generated yet")
     data = json.loads(ARTIFACT.read_text())
-    assert data["schema_version"] == 2
+    assert data["schema_version"] == 3
     assert isinstance(data["commands"], dict) and data["commands"]
     entry = data["commands"]["SET_LED"]
     assert set(entry) >= {"extra", "requires_sections", "requires_mode",

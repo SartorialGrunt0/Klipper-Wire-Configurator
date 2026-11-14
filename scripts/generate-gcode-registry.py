@@ -27,7 +27,9 @@ REPO = Path(__file__).resolve().parent.parent
 DEFAULT_KLIPPER = REPO / "reference" / "klipper"
 DEFAULT_OUTPUT = REPO / "backend" / "data" / "gcode_commands.json"
 
-SCHEMA_VERSION = 2  # 2026-11 W1: params gained "type"/"default"/"required"
+SCHEMA_VERSION = 3  # 2026-11 W1: params gained "type"/"default"/"required";
+                    # review round-1: required ⟺ unconditional bare gcmd read,
+                    # gcmd-receiver-only harvesting
 
 # gcmd parameter getters (reference/klipper/klippy/gcode.py GCodeCommand):
 # the default is the SECOND positional arg; a call with only the option
@@ -246,35 +248,94 @@ def _literal_str_list(node: ast.AST) -> list[str]:
     return []
 
 
+def _gcmd_receivers(func_node: ast.FunctionDef) -> set[str]:
+    """Names that hold the GCodeCommand object: the handler's own
+    parameters (Klipper calls handlers as func(gcmd)), followed through
+    plain assignment aliases (``cmd = gcmd; g = cmd``)."""
+    receivers = {a.arg for a in func_node.args.args if a.arg != "self"}
+    for _ in range(3):  # alias-of-alias converges fast
+        added = False
+        for sub in ast.walk(func_node):
+            if (isinstance(sub, ast.Assign)
+                    and isinstance(sub.value, ast.Name)
+                    and sub.value.id in receivers):
+                for tgt in sub.targets:
+                    if isinstance(tgt, ast.Name) and tgt.id not in receivers:
+                        receivers.add(tgt.id)
+                        added = True
+        if not added:
+            break
+    return receivers
+
+
+def _gcmd_getter_calls(func_node: ast.FunctionDef,
+                       receivers: set[str]
+                       ) -> list[tuple[ast.Call, bool]]:
+    """gcmd-getter calls with a literal param name, paired with whether
+    the call sits inside a conditional/loop body (an 'action chain':
+    required only on the paths that reach it). Receiver restriction
+    (review F2): only the gcmd object (or an alias of it) is a param
+    source — ``self.printer.get_start_args().get('debugoutput')`` is a
+    dict lookup, not a command parameter (heaters.py:374 phantom)."""
+    found: list[tuple[ast.Call, bool]] = []
+
+    def walk(node: ast.AST, in_branch: bool) -> None:
+        for child in ast.iter_child_nodes(node):
+            if (isinstance(child, ast.Call)
+                    and isinstance(child.func, ast.Attribute)
+                    and child.func.attr in _PARAM_GETTER_TYPES
+                    and child.args and _literal_str(child.args[0])
+                    and isinstance(child.func.value, ast.Name)
+                    and child.func.value.id in receivers):
+                found.append((child, in_branch))
+            walk(child, in_branch or isinstance(
+                child, (ast.If, ast.For, ast.While, ast.Try, ast.With,
+                        ast.ExceptHandler)))
+
+    walk(func_node, False)
+    return found
+
+
 def _extract_handler_params(func_node: ast.FunctionDef) -> dict[str, dict]:
     """Parse gcmd.get/get_int/get_float/getboolean('NAME', default…) calls
     out of a command handler into {PARAM: {type, required[, default]}}.
 
-    required = no default argument at all (Klipper raises without one).
-    A non-literal default (rare, e.g. another variable) records the param
-    as optional without a default value.
+    required ⟺ at least one call site reads the name WITHOUT a default
+    AND outside any conditional/loop body — i.e. some code path
+    unconditionally raises when the invocation omits it. The guarded
+    idioms (review F1) are optional exactly as in Klipper:
+      - test-then-read:  ``if gcmd.get('X', None) is not None:
+                              v = gcmd.get('X')``
+      - action chains:   bare reads inside if/elif/else bodies
+                         (SKEW_PROFILE LOAD/SAVE/REMOVE, SET_SERVO ANGLE,
+                          MANUAL_STEPPER MOVE).
+    The old per-call last-wins policy marked all of those required and
+    false-FAILED valid invocations (18 of 24 corpus errors). Type and
+    default come from the first site that carries them.
     """
     params: dict[str, dict] = {}
-    for sub in ast.walk(func_node):
-        if not isinstance(sub, ast.Call) or not isinstance(sub.func, ast.Attribute):
+    receivers = _gcmd_receivers(func_node)
+    for call, in_branch in _gcmd_getter_calls(func_node, receivers):
+        name_lit = _literal_str(call.args[0])
+        if not name_lit:
             continue
-        ptype = _PARAM_GETTER_TYPES.get(sub.func.attr)
-        if ptype is None or not sub.args:
-            continue
-        pname = _literal_str(sub.args[0])
-        if not pname:
-            continue
-        has_default = len(sub.args) > 1 or any(
-            kw.arg == "default" for kw in sub.keywords)
-        entry: dict = {"type": ptype, "required": not has_default}
-        if has_default:
-            dnode = sub.args[1] if len(sub.args) > 1 else next(
-                kw.value for kw in sub.keywords if kw.arg == "default")
+        pname = name_lit.upper()
+        assert isinstance(call.func, ast.Attribute)
+        ptype = _PARAM_GETTER_TYPES[call.func.attr]
+        has_default = len(call.args) > 1 or any(
+            kw.arg == "default" for kw in call.keywords)
+        entry = params.setdefault(pname,
+                                  {"type": ptype, "required": False})
+        site_required = not has_default and not in_branch
+        if site_required:
+            entry["required"] = True
+        if has_default and "default" not in entry:
+            dnode = call.args[1] if len(call.args) > 1 else next(
+                kw.value for kw in call.keywords if kw.arg == "default")
             if isinstance(dnode, ast.Constant) and isinstance(
                     dnode.value, (str, int, float, bool)) or (
                     isinstance(dnode, ast.Constant) and dnode.value is None):
                 entry["default"] = dnode.value
-        params[pname.upper()] = entry
     return params
 
 
