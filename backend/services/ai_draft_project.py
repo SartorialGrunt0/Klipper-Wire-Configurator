@@ -32,6 +32,7 @@ from pathlib import Path, PurePosixPath
 
 from parser.config_parser import SAVE_CONFIG_BANNER_RE, parse_config
 from parser.config_schema import get_all_section_types, get_section_def
+from parser.macro_render import is_sim_advisory
 from parser.validator import validate_project_configs
 
 from services.ai_draft_validation import (
@@ -683,6 +684,14 @@ class ProjectState:
         seen_keys: set[tuple] = set()
         for group in issues:
             for error in group['errors']:
+                if is_sim_advisory(error.get('code', ''),
+                                   error.get('severity', '')):
+                    # D2 (W4R pivot): render-simulation warnings/infos
+                    # exist only as simulate_macro/validate_macro tool
+                    # results. The write path sees sim findings ONLY at
+                    # error severity — the advisory channel must never
+                    # fill with hypothetical bare-invocation noise.
+                    continue
                 finding = {
                     'filename': group['filename'],
                     'severity': error.get('severity', ''),

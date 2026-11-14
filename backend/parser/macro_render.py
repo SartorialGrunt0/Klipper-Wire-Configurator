@@ -96,9 +96,8 @@ MAX_RENDER_VARIANTS = 16
 _UNKNOWN_MARKERS = ("<unknown>", "nan", "inf")
 
 # Every finding code this engine emits (single source for the 4R.2
-# consumption split: human-facing validation strips all of them; the AI
-# write-path delta gate honors them ONLY at error severity). The post-
-# render G1 advisory deliberately does NOT reuse the static scan's
+# consumption split via is_sim_advisory below). The post-render G1
+# advisory deliberately does NOT reuse the static scan's
 # g1_extrude_no_feedrate — sim origin must stay filterable.
 SIM_FINDING_CODES = frozenset({
     "macro_param_undefined",
@@ -109,6 +108,18 @@ SIM_FINDING_CODES = frozenset({
     "macro_render_unexplored",
     "macro_rendered_g1_no_feedrate",
 })
+
+
+def is_sim_advisory(code: str, severity: str) -> bool:
+    """Boundary predicate for the 2026-11-14 pivot (decisions D1/D2):
+    simulation-origin findings at warning/info severity exist ONLY as
+    results of an explicit simulation (validate_macro / simulate_macro
+    tool surfaces). They never reach human-facing validation responses
+    (/import, /parse, /validate, /validate-project → save gate UI) and
+    never reach the model as delta-gate advisories. Sim ERRORS pass
+    everywhere — a broken rendered command shape is a true defect of
+    the text at hand, not a hypothetical-invocation story."""
+    return code in SIM_FINDING_CODES and severity != "error"
 
 
 @dataclass(frozen=True)

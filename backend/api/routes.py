@@ -36,6 +36,7 @@ from parser.config_schema import (
 )
 from parser.config_writer import write_config, smart_export
 from parser.validator import validate_config, validate_project_configs
+from parser.macro_render import is_sim_advisory
 from services.board_detector import (
     BOARD_TYPE_DIRS,
     detect_board_from_config,
@@ -58,6 +59,21 @@ from services.warning_acknowledgments import (
 )
 
 router = APIRouter()
+
+
+def _human_validation_dict(validation) -> dict:
+    """D1 boundary (plan 2026-11-12 W4R, Cliff's dev-server audit):
+    render-simulation WARNINGS/INFOS never appear in a human-facing
+    validation response — the engine keeps computing them (shared
+    surface stays simple; the tool path reports them via
+    validate_macro/simulate_macro results). Sim ERRORS pass: a broken
+    rendered command shape is a true defect of the text being saved."""
+    d = validation.to_dict()
+    d["errors"] = [
+        e for e in d.get("errors", [])
+        if not is_sim_advisory(e.get("code", ""), e.get("severity", ""))
+    ]
+    return d
 
 # Projection of the generated G-code registry served to the editor for
 # completion. Built once per process (load_registry is lru_cached, this just
@@ -114,7 +130,7 @@ async def import_config(file: UploadFile = File(...)):
 
     return {
         "config": config.to_dict(),
-        "validation": validation.to_dict(),
+        "validation": _human_validation_dict(validation),
         "board_info": board_info,
     }
 
@@ -151,7 +167,7 @@ async def import_project(files: List[UploadFile] = File(...)):
     results = {
         filename: {
             "config": config.to_dict(),
-            "validation": validations[filename].to_dict(),
+            "validation": _human_validation_dict(validations[filename]),
             "board_info": board_infos[filename],
         }
         for filename, config in configs.items()
@@ -206,7 +222,7 @@ async def parse_config_text(data: dict):
     validation = validate_config(config)
     return {
         "config": config.to_dict(),
-        "validation": validation.to_dict(),
+        "validation": _human_validation_dict(validation),
     }
 
 
@@ -218,7 +234,7 @@ async def validate_config_api(data: ConfigUpdate):
     """Validate a configuration."""
     config = _config_update_to_config_file(data)
     validation = validate_config(config, gcode_registry=data.gcode_registry)
-    return validation.to_dict()
+    return _human_validation_dict(validation)
 
 
 @router.post("/validate-project")
@@ -235,7 +251,7 @@ async def validate_project_api(data: ProjectValidationRequest):
         configs, gcode_registry=data.gcode_registry)
     return {
         "files": {
-            filename: validation.to_dict()
+            filename: _human_validation_dict(validation)
             for filename, validation in validations.items()
         }
     }
@@ -409,7 +425,7 @@ async def generate_config(data: GenerateRequest):
     validation = validate_config(config)
     return {
         "config": config.to_dict(),
-        "validation": validation.to_dict(),
+        "validation": _human_validation_dict(validation),
     }
 
 
