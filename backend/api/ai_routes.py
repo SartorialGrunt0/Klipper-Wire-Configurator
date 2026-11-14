@@ -930,6 +930,118 @@ def render_context_references(references: list | None) -> str | None:
     return "\n\n".join(parts)
 
 
+# ── W3: runtime-error trailing observation ─────────────────────────────────
+#
+# A pasted Klipper runtime error quotes the RENDERED command line
+# (klippy/gcode.py get(): "Error on '%s'" % self._commandline) — never a
+# macro or a source line. When the latest user message carries such a
+# frame, the harness traces it through the project's macros with the W2
+# render engine and attaches ONE trailing system observation naming the
+# provenance. Intent-law clean: literal frame extraction + deterministic
+# render matching; the output can only be a useless note, never a reroute.
+# Silence is the default (no frame / no match / no files / ablation), and
+# a trace failure can never break the chat turn.
+
+
+def _project_trace_sources(context_files: dict | None) -> list:
+    """MacroTraceSource per macro section — staged (client) files FIRST,
+    then the disk mirror; a staged file shadows the same-named mirror
+    entry (same precedence as the edit-session seed, drafts win)."""
+    from parser.config_parser import parse_config
+    from parser.macro_render import MacroTraceSource
+
+    sources = []
+    seen_names: set[str] = set()
+    buckets = [list((context_files or {}).items())]
+    try:
+        buckets.append(list(_mirror_user_config_files().items()))
+    except Exception:
+        pass  # mirror unreadable → staged files alone still trace
+    for entries in buckets:
+        for fname, entry in entries:
+            if fname in seen_names:
+                continue
+            seen_names.add(fname)
+            text = str((entry or {}).get("content", ""))
+            if "gcode_macro" not in text and "delayed_gcode" not in text:
+                continue
+            try:
+                parsed = parse_config(text, filename=fname)
+            except Exception:
+                continue
+            for section in parsed.sections:
+                if section.is_commented_out:
+                    continue
+                if section.section_type not in ("gcode_macro",
+                                                "delayed_gcode"):
+                    continue
+                body = section.get_value("gcode")
+                # The parser's value keeps the newline right after
+                # 'gcode:' as a phantom empty line 1; drop it so body
+                # line 1 is the first command — the same convention the
+                # validate_macro facade uses, so both channels number
+                # identically.
+                body = body.lstrip("\n")
+                if not body.strip():
+                    continue
+                params = {
+                    p.key[len("params_"):].lower(): p.value
+                    for p in section.params
+                    if p.key.startswith("params_") and not p.is_commented_out
+                }
+                variables = {
+                    p.key[len("variable_"):]: p.value
+                    for p in section.params
+                    if p.key.lower().startswith("variable_")
+                    and not p.is_commented_out
+                }
+                sources.append(MacroTraceSource(
+                    name=section.full_header, body=body,
+                    params=params, variables=variables, file=fname))
+    return sources
+
+
+def _runtime_error_observation(messages: list[dict],
+                               context_files: dict | None) -> str | None:
+    """Trailing-observation text when the latest user message quotes a
+    Klipper runtime error whose frame a project macro renders — None in
+    every other case (fast literal pre-check first: most turns pay
+    nothing)."""
+    from parser.macro_render import extract_error_frames, trace_runtime_error
+
+    last_user = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            c = m.get("content")
+            last_user = (c if isinstance(c, str)
+                         else " ".join(str(p) for p in (c or [])))
+            break
+    if "Error on " not in last_user:
+        return None
+    frames = extract_error_frames(last_user)
+    if not frames:
+        return None
+    sources = _project_trace_sources(context_files)
+    if not sources:
+        return None
+    matches = trace_runtime_error(frames, sources)
+    if not matches:
+        return None
+    lines = [
+        f"- `{m.file}` [{m.macro}] body line {m.source_line}: "
+        f"`{m.source_text}`  (renders: `{m.rendered}`)"
+        for m in matches
+    ]
+    out = ("[Runtime error trace — deterministic] The Klipper error quoted "
+           "in the latest message matches how these project macros render "
+           "with default params (the error itself carries only the RENDERED "
+           "command):\n" + "\n".join(lines))
+    if len({m.macro for m in matches}) > 1:
+        out += ("\nThe failing line is among these candidates — present them "
+                "instead of asserting one.")
+    return out
+
+
 def _prepare_messages(messages: list[dict],
                       edit_capable: bool = False, *,
                       skill_active: bool = False,
@@ -1109,6 +1221,19 @@ def _prepare_messages(messages: list[dict],
     if inject_edit_skill_body and not _edit_skill_body_in_trail(messages):
         skill_body_messages = [{"role": "system", "content": _edit_skill_body()}]
 
+    # W3 runtime-error traceback (deterministic observation): rides LAST at
+    # the same trailing seam. Guarded by the same ablation gates as the
+    # references/body — minimal/no_system are prompt instruments and are
+    # never run with harness observations attached.
+    trace_messages: list[dict] = []
+    if not (minimal or no_system):
+        try:
+            observation = _runtime_error_observation(messages, context_files)
+        except Exception:
+            observation = None
+        if observation:
+            trace_messages = [{"role": "system", "content": observation}]
+
     if prepared:
         return [
             *([] if no_system else [{"role": "system", "content": system_text}]),
@@ -1116,6 +1241,7 @@ def _prepare_messages(messages: list[dict],
             *([] if (minimal or no_system) else [{"role": "system", "content": task_anchor}]),
             *([] if (minimal or no_system) else reference_messages),
             *([] if (minimal or no_system) else skill_body_messages),
+            *([] if (minimal or no_system) else trace_messages),
         ]
     return ([] if no_system else [{"role": "system", "content": system_text}]) + prepared
 
