@@ -1042,9 +1042,18 @@ def build_simtool_questions() -> list[TestQuestion]:
             expected_tools=("simulate_macro",),
             require_tool=True,
             edit_criteria=(
-                ("staged_renders_clean", "printer\\\\.cfg"),
+                # DOUBLE-escaped dot ("printer\\.cfg" -> regex
+                # printer\.cfg): the quad form compiles to a literal-
+                # backslash pattern that can never match a filename —
+                # it false-failed the r2 artifact (a CLEAN named-fan
+                # toggle), caught by offline replay 2026-11-14.
+                ("staged_renders_clean", "printer\\.cfg"),
+                # A named-fan toggle (SET_FAN_SPEED FAN=x SPEED=y) is
+                # as correct as M106/M107 — the r2 model chose it after
+                # list_hardware found the project fan. Grade the
+                # behavior, not one spelling.
                 ("staged_section_regex",
-                 "printer\\.cfg::gcode_macro TOGGLE_FAN::M10[67]"),
+                 "printer\\.cfg::gcode_macro TOGGLE_FAN::SET_FAN_SPEED|M10[67]"),
                 ("any_of", json.dumps([
                     [["tool_args",
                       "simulate_macro:scenarios:variables.{0,400}variables"],
