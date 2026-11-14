@@ -1161,7 +1161,10 @@ class McpServer:
                     "checks moves for out-of-bounds targets and no-go zone hits "
                     "(including path crossings between consecutive moves). "
                     "Never claims to know runtime values: unknown-state "
-                    "dependencies are reported as info, not errors."
+                    "dependencies are reported as info, not errors. When "
+                    "runtime_error carries a pasted Klipper error, its "
+                    "quoted command is matched against this macro's "
+                    "rendered lines and source provenance is attached."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1169,6 +1172,10 @@ class McpServer:
                         "macro_text": {
                             "type": "string",
                             "description": "The full macro text including the [gcode_macro ...] header through to the end of the gcode section",
+                        },
+                        "runtime_error": {
+                            "type": "string",
+                            "description": "Optional: a Klipper runtime error quoted verbatim (an \"Error on '<command>': ...\" line); its command frame is matched against the macro's rendered lines and the body-line provenance is reported",
                         },
                         "bed_x": {
                             "type": "number",
@@ -3202,10 +3209,10 @@ class McpServer:
         # validate the RENDERED commands. Catches Jinja that compiles fine
         # but expands to an empty/unparseable value ('SET_LED ... RED=',
         # Klipper: 'unable to parse'), which no compile-time check can see.
+        sim_params = {}
+        sim_variables = {}
         if gcode_body is not None and gcode_body.strip():
             from parser.macro_render import simulate_macro
-            sim_params = {}
-            sim_variables = {}
             for raw in lines:
                 stripped_raw = raw.strip()
                 if stripped_raw.startswith("params_"):
@@ -3411,12 +3418,47 @@ class McpServer:
                             break
 
 
+        # ── 2d. Runtime-error traceback (W3): when the caller pastes a
+        # Klipper runtime error alongside the macro, match its quoted
+        # command frame against this macro's rendered default invocation
+        # and attach source provenance. Literal-text extraction only —
+        # an observation channel, never a re-grade of the macro.
+        trace_section = ""
+        runtime_error = str(args.get("runtime_error") or "").strip()
+        if runtime_error and gcode_body is not None and gcode_body.strip():
+            from parser.macro_render import (MacroTraceSource,
+                                             extract_error_frames,
+                                             trace_runtime_error)
+            frames = extract_error_frames(runtime_error)
+            if frames:
+                hn = re.search(r"\[gcode_macro\s+(\S+)\]", macro_text)
+                matches = trace_runtime_error(frames, [MacroTraceSource(
+                    name=hn.group(1) if hn else "macro",
+                    body=gcode_body, params=sim_params,
+                    variables=sim_variables)])
+                if matches:
+                    trace_section = (
+                        "\n### Runtime error traceback\n"
+                        "The quoted error's command matches this macro "
+                        "rendered with default params:")
+                    for m in matches:
+                        trace_section += (
+                            f"\n- rendered from body line {m.source_line}: "
+                            f"`{m.source_text}`")
+                else:
+                    trace_section = (
+                        "\n### Runtime error traceback\n"
+                        "No line of this macro renders to the quoted error "
+                        "command — the failing line may live in another "
+                        "macro or come from a non-default invocation.")
+
         # ── 7. Build result ──
         if not issues:
             return (
                 f"## Macro validation: No issues found\n\n"
                 f"The macro passed all basic checks. For a full gcode simulation with machine state "
                 f"tracking, movement validation, and zone checking, use the Macro Designer in the app."
+                + trace_section
             )
 
         errors = [i for i in issues if i["severity"] == "error"]
@@ -3438,6 +3480,10 @@ class McpServer:
             parts.append(f"### Suggestions ({len(info)})")
             for i_item in info:
                 parts.append(f"- {i_item['message']}")
+            parts.append("")
+
+        if trace_section:
+            parts.append(trace_section)
             parts.append("")
 
         parts.append("---")

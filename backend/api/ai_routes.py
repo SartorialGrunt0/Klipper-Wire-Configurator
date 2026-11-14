@@ -1201,7 +1201,10 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
         "the user's saved files use validate_config_project"
     ),
     "validate_macro": (
-        "Validate a gcode_macro against Klipper's Jinja rules (macro_text='...' required)"
+        "Validate a gcode_macro against Klipper's Jinja rules (macro_text='...' required), "
+        "including a render simulation of the default invocation; pass "
+        "runtime_error='...' with a pasted Klipper error to trace its command back to the "
+        "macro body line it rendered from"
     ),
     "validate_config_project": (
         "Validate the user's CURRENT config project on this host (all files, "

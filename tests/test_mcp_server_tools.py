@@ -1711,3 +1711,38 @@ def test_search_user_configs_descriptions_advertise_checklist_and_keywords():
     from api.ai_routes import _MCP_TOOL_SNIPPETS
     snip = _MCP_TOOL_SNIPPETS["search_user_configs"]
     assert "REFERENCES" in snip and "keywords=" in snip
+
+
+# ── W3: validate_macro runtime_error traceback ─────────────────────────────
+
+_W3_TRACE_MACRO = (
+    "[gcode_macro BLINK]\n"
+    "description: blink\n"
+    "gcode:\n"
+    '    SET_LED LED=c RED={params.RED|default("")}\n'
+)
+
+
+def test_facade_validate_macro_runtime_error_attaches_provenance():
+    out = McpServer()._handle_validate_macro({
+        "macro_text": _W3_TRACE_MACRO,
+        "runtime_error": ("Transitioning to shutdown:\n"
+                          "Error on 'SET_LED LED=c RED=': unable to parse"),
+    })
+    assert "Runtime error traceback" in out
+    assert "body line 1" in out
+    assert "params.RED" in out  # quotes the SOURCE line, not the frame
+
+
+def test_facade_validate_macro_runtime_error_no_match_says_so():
+    out = McpServer()._handle_validate_macro({
+        "macro_text": _W3_TRACE_MACRO,
+        "runtime_error": "Error on 'G0 X999 F600': unable to parse X",
+    })
+    assert "Runtime error traceback" in out
+    assert "No line of this macro renders" in out
+
+
+def test_facade_validate_macro_without_runtime_error_unchanged():
+    with_arg = McpServer()._handle_validate_macro({"macro_text": _W3_TRACE_MACRO})
+    assert "Runtime error traceback" not in with_arg
