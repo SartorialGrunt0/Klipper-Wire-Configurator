@@ -126,11 +126,14 @@ def test_genuinely_undefined_names_still_flag_no_blindness():
 # ── default-Undefined parity: empty renders, not aborts, where Klipper is ──
 
 def test_bare_unset_param_renders_empty_then_registry_flags_shape():
-    """Klipper default Undefined: {params.RED} renders '' — the DEFINITE
-    failure is the registry verdict on the empty typed field (the field-repro
-    class), not a render abort."""
+    """Klipper default Undefined: {params.RED} renders '' when the
+    invocation carries an empty value — the DEFINITE failure is the
+    registry verdict on the empty typed field (the field-repro class),
+    not a render abort. Without a declared value the same read is
+    param-dependent INFO (3.1, pinned in test_macro_render_bare_
+    invocation.py)."""
     result = simulate_macro('SET_LED LED=chamber RED={params.RED} GREEN=0 '
-                            'BLUE=0\n')
+                            'BLUE=0\n', {"red": ""})
     codes = [f.code for f in result.findings]
     assert "macro_param_undefined" not in codes
     assert "macro_param_renders_empty" in codes
@@ -155,9 +158,11 @@ def test_abort_message_uses_klipper_dict_object_wording():
 
 def test_is_defined_guard_default_invocation_is_clean():
     """aux_fan M106 shape: every params.X read is guarded by `is defined`.
-    On the default invocation the guards are decidable (False) — the real
-    engine renders exactly one path, no warnings. (Audit FP #6.)"""
-    result = simulate_macro(M106_BODY)
+    On the real BARE invocation ({} — authoritative) the guards are
+    decidable (False) — the engine renders exactly one path, no warnings.
+    (Audit FP #6; with NO invocation the guards are non-decidable and
+    both arms are explored — pinned in test_macro_render_bare_invocation.)"""
+    result = simulate_macro(M106_BODY, {})
     assert [f for f in result.findings
             if f.severity in ("error", "warning")] == []
     assert result.variants_rendered == 1
@@ -167,15 +172,16 @@ def test_is_defined_guard_default_invocation_is_clean():
 def test_is_not_defined_grammar_is_also_static():
     result = simulate_macro(
         '{% if params.X is not defined %}\nG4 P10\n{% else %}\nG4 P20\n'
-        '{% endif %}\n')
+        '{% endif %}\n', {})
     assert result.variants_rendered == 1
     assert [r.text for r in result.rendered] == ["G4 P10"]
 
 
 def test_in_params_membership_default_invocation_is_clean():
     """Stock Mainsail RESUME guard: `'VELOCITY' in params|upper` is decidable
-    from declared params. No phantom params.VELOCITY render. (Audit FP #7.)"""
-    result = simulate_macro(RESUME_GUARD_BODY)
+    On the bare invocation ({}, authoritative) decidable from declared
+    params. No phantom params.VELOCITY render. (Audit FP #7.)"""
+    result = simulate_macro(RESUME_GUARD_BODY, {})
     assert [f for f in result.findings
             if f.severity in ("error", "warning")] == []
     assert [r.text for r in result.rendered] == ["RESUME_BASE"]

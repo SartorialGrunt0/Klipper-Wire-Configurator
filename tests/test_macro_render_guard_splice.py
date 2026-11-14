@@ -96,10 +96,16 @@ def test_validate_config_no_fabricated_error_from_variable():
         "[gcode_macro TEST]\n"
         "variable_x: 5\n"
         "gcode:\n"
-        "    {% if 'X' in params %}M106 S{params.X}{% endif %}\n"
+        "    {% if 'X' in params %}\n"
+        "    M106 S{params.X}\n"
+        "    {% endif %}\n"
     )
     result = validate_config(parse_config(cfg))
+    # 3.1 truth: the guard over x is NOT resolved from the variable
+    # (both arms explored); the X-arm read is param-dependent INFO —
+    # never an ERROR (the L6 fabrication this pins out).
     assert not [e for e in result.errors
-                if e.code in ("macro_param_renders_empty",
-                              "macro_param_undefined")], \
-        "a variable must not fabricate a params arm through the full pass"
+                if e.severity == "error"
+                and e.code in ("macro_param_renders_empty",
+                               "macro_param_undefined")], \
+        "a variable must not fabricate a params error through the full pass"

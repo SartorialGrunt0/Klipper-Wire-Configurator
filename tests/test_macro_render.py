@@ -114,15 +114,24 @@ def test_int_filter_silently_coerces_garbage_klipper_truth():
 def test_undefined_param_surfaces():
     """Bare interpolation of an unset param renders '' (Klipper's
     default Undefined); numeric filters abort with Klipper's own
-    message — the abort class must still surface at the right line."""
+    message. Without a declared invocation both readings are
+    param-dependent INFO (3.1); with an invocation that omits the
+    value the abort is that invocation's honest WARNING."""
     blank = simulate_macro("M117 {params.FOO}")
     assert [r.text for r in blank.rendered] == ["M117"]
-    assert _findings(blank, "macro_param_undefined") == []
+    pd = _findings(blank, "macro_param_undefined")
+    assert len(pd) == 1 and pd[0].severity == "info"
+    assert not [f for f in blank.findings
+                if f.severity in ("error", "warning")]
     aborted = simulate_macro("M117 {params.FOO|int}")
     undef = _findings(aborted, "macro_param_undefined")
     assert len(undef) == 1
     assert "FOO" in undef[0].message
     assert undef[0].source_line == 1
+    declared = simulate_macro("M117 {params.FOO|int}", {"other": "1"})
+    warns = [f for f in _findings(declared, "macro_param_undefined")
+             if f.severity == "warning"]
+    assert len(warns) == 1
 
 
 def test_default_filter_is_clean():
@@ -302,10 +311,11 @@ def test_provenance_survives_nested_blocks():
     )
     # Outer condition = genuinely unknown (printer state) → both arms
     # expand; inner 'is defined' = statically decidable (False) → the
-    # else arm runs; unset params.C renders '' → the registry flags the
-    # missing required value — line provenance preserved through two
-    # nesting levels (W4R truth: static guards collapse, unknowns expand).
-    result = simulate_macro(body)
+    # else arm runs; an explicit invocation (without C) makes the
+    # registry verdict on params.C authoritative — line provenance
+    # preserved through two nesting levels (W4R truth: static guards
+    # collapse, unknowns expand; 3.1: verdicts need an invocation).
+    result = simulate_macro(body, {"a": "1"})
     flagged = [f for f in result.findings if f.source_line == 5]
     assert flagged, [f.message for f in result.findings]
     assert flagged[0].code == "macro_param_renders_empty"
@@ -404,15 +414,17 @@ gcode:
     {% endif %}
 """
     res = validate_config(parse_config(cfg))
-    # printer state unknown → both arms expand; params.LEVEL unset →
-    # the else arm renders 'M106 S' — the key token with an EMPTY value
-    # that Klipper feeds to float() and dies on at run time. Engine
-    # level surfaces it as an error at the referencing line (the D1
-    # human-facing boundary filter is tested separately).
-    errs = [e for e in res.errors if e.code == "macro_param_renders_empty"]
-    assert len(errs) == 1
-    assert errs[0].severity == "error"
-    assert errs[0].line_number == 6
+    # printer state unknown → both arms expand; the validator declares
+    # NO invocation, so params.LEVEL is param-dependent (3.1): the
+    # empty-S shape is what a bare invocation would render, not a
+    # verdict — INFO naming the missing value at the referencing line.
+    infos = [e for e in res.errors
+             if e.code == "macro_param_undefined"
+             and e.section == "gcode_macro TOGGLE_FAN"]
+    assert len(infos) == 1
+    assert infos[0].severity == "info"
+    assert infos[0].line_number == 6
+    assert "LEVEL" in infos[0].message
 
 
 # ── MCP validate_macro façade (same engine, model-callable text) ───────────

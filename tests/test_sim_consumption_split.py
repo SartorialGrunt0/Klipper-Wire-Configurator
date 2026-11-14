@@ -24,13 +24,16 @@ from services.ai_draft_project import ProjectState  # noqa: E402
 
 client = TestClient(app)
 
-# Bare-invocation numeric filter on an undeclared param: sim WARNING
-# (macro_param_undefined) — Klipper aborts, but only on this
-# (hypothetical) invocation shape.
+# No invocation declared + numeric filter on an undeclared param: sim
+# INFO (macro_param_undefined, param-dependent) — Klipper aborts only on
+# invocations that omit FOO. With an explicit bare invocation ({}) it is
+# that invocation's WARNING.
 WARN_MACRO_TEXT = "M117 {params.FOO|int}"
-# Required registry value rendering EMPTY: sim ERROR — the command is
-# broken on every invocation.
+# Required registry value rendering EMPTY from a DECLARED value (the
+# params_X empty default rides every invocation): sim ERROR — the
+# command is broken on every invocation (Option A: the field repro).
 ERROR_MACRO_TEXT = "SET_LED LED=strips RED={params.RED}"
+ERROR_DECLARED = {"params_red": ""}
 
 _BASE = ("[printer]\nkinematics: cartesian\nmax_velocity: 200\n"
          "max_accel: 1000\nmax_z_velocity: 5\nmax_z_accel: 100\n")
@@ -45,7 +48,7 @@ def _section(full_header, section_type, params, section_name=""):
     }
 
 
-def _validate_payload(macro_text, **kw):
+def _validate_payload(macro_text, extra_params=None, **kw):
     return {
         "filename": "printer.cfg",
         "sections": [
@@ -54,7 +57,7 @@ def _validate_payload(macro_text, **kw):
                 "max_accel": "1000", "max_z_velocity": "5",
                 "max_z_accel": "100"}),
             _section("gcode_macro SIM", "gcode_macro",
-                     {"gcode": macro_text}, "SIM"),
+                     {"gcode": macro_text, **(extra_params or {})}, "SIM"),
         ],
         "includes": [],
         "header_comments": [],
@@ -76,7 +79,9 @@ def test_validate_api_never_shows_sim_warnings():
 
 
 def test_validate_api_still_shows_sim_errors():
-    r = client.post('/api/validate', json=_validate_payload(ERROR_MACRO_TEXT))
+    r = client.post('/api/validate',
+                    json=_validate_payload(ERROR_MACRO_TEXT,
+                                           extra_params=ERROR_DECLARED))
     assert r.status_code == 200
     errs = [e for e in r.json()["errors"]
             if e["code"] == "macro_param_renders_empty"]
@@ -90,6 +95,7 @@ def test_validate_api_boundary_vacuity_lock():
     is a SEVERITY split, not an accident of the sim never firing."""
     r = client.post('/api/validate',
                     json=_validate_payload(ERROR_MACRO_TEXT,
+                                           extra_params=ERROR_DECLARED,
                                            gcode_registry=False))
     assert r.status_code == 200
     assert "macro_param_renders_empty" not in _codes(r.json())
@@ -99,7 +105,9 @@ def test_validate_project_api_never_shows_sim_advisories():
     r = client.post('/api/validate-project', json={
         "config_files": [
             _validate_payload(WARN_MACRO_TEXT),
-            _validate_payload(ERROR_MACRO_TEXT, filename="leds.cfg"),
+            _validate_payload(ERROR_MACRO_TEXT,
+                              extra_params=ERROR_DECLARED,
+                              filename="leds.cfg"),
         ],
     })
     assert r.status_code == 200
@@ -151,7 +159,7 @@ def test_delta_gate_sim_error_still_kicks_back():
     st1, r = st.apply(base, {
         'op': 'add_section', 'file': 'printer.cfg',
         'section': 'gcode_macro SIM_ERR',
-        'text': "gcode:\n    " + ERROR_MACRO_TEXT})
+        'text': "params_red:\ngcode:\n    " + ERROR_MACRO_TEXT})
     assert r['status'] == 'error'
     assert any(f.get('code') == "macro_param_renders_empty"
                for f in r['newErrors'])
@@ -169,7 +177,8 @@ def test_facade_shows_sim_warning():
 def test_engine_result_is_never_filtered():
     """Isolation pin: harness graders and the W3 tracer call the engine
     directly; the pivot moved severity filtering to CONSUMERS, never to
-    simulate_macro itself."""
-    res = simulate_macro(WARN_MACRO_TEXT)
+    simulate_macro itself. (Explicit bare invocation: FOO genuinely
+    absent → the abort is a WARNING, unfiltered.)"""
+    res = simulate_macro(WARN_MACRO_TEXT, {})
     assert any(f.code == "macro_param_undefined" and f.severity == "warning"
                for f in res.findings)

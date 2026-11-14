@@ -305,23 +305,42 @@ _PARAM_IS_DEFINED_RE = re.compile(
 _PARAMS_MEMBERSHIP_RE = re.compile(
     r"^['\"]([A-Za-z_][\w ]*)['\"]\s+in\s+params(?:\s*\|\s*upper\s*)?$",
     re.DOTALL)
+# A read of one named param: params.X / params . X / params['X'] /
+# params["X"] (name captured raw; presence decisions lowercase).
+_PARAM_READ_RE = re.compile(
+    r"params\s*(?:\.\s*([A-Za-z_]\w*)"
+    r"|\[\s*['\"]([A-Za-z_][\w ]*)['\"]\s*\])")
 
 
 def _static_param_presence(cond: str,
-                           defined_params: frozenset[str]) -> bool | None:
+                           defined_params: frozenset[str],
+                           authoritative: bool = True) -> bool | None:
     """Resolve a decidable param-presence condition, or None when the
     condition is not of that shape. `params.X is defined` (dot/bracket,
     is/is-not) and `'X' in params` (with the `|upper` membership idiom)
-    answer exactly what Klipper answers for the invocation at hand."""
+    answer exactly what Klipper answers for the invocation at hand.
+
+    ``authoritative=False`` (no invocation declared): a name OUTSIDE the
+    declared set is not decidable — any caller may pass it — so the
+    guard stays unresolved and both arms get explored; the arm reading
+    the value is then downgraded to param-dependent info by the caller
+    (3.1: absence of an invocation is not evidence of absence).
+    Declared names resolve exactly: ``params_*`` defaults ride EVERY
+    Klipper invocation."""
     c = cond.strip()
     m = _PARAM_IS_DEFINED_RE.match(c)
     if m:
         name = (m.group(1) or m.group(2)).lower()
         present = name in defined_params
+        if not present and not authoritative:
+            return None
         return present if m.group(3) == "is" else not present
     m = _PARAMS_MEMBERSHIP_RE.match(c)
     if m:
-        return m.group(1).lower() in defined_params
+        present = m.group(1).lower() in defined_params
+        if not present and not authoritative:
+            return None
+        return present
     return None
 
 
@@ -332,6 +351,14 @@ def _cond_is_unknown(cond: str, defined_params: frozenset[str],
     a params key with no declared value, or the bare params object
     (membership/iteration beyond the decidable grammars, which are
     already spliced out by _splice_static_param_guards)."""
+    # The membership idiom answered only when the name is declared (or
+    # the invocation is authoritative — splicing runs first, so a
+    # surviving match here over an UNdeclared name means the caller may
+    # still pass it: unknown, both arms. Keeps `'X' in params` and
+    # `'X' in params|upper` behaving identically (3.1).
+    mm = _PARAMS_MEMBERSHIP_RE.match(cond.strip())
+    if mm:
+        return mm.group(1).lower() not in defined_params
     for m in _PRINTER_REF_RE.finditer(cond):
         if m.group(2):
             # Bracket access anywhere in the chain: conservative, the
@@ -429,7 +456,8 @@ def _first_unknown_stmt(src: str, defined: frozenset[str],
 
 
 def _splice_static_param_guards(src: str,
-                                defined_params: frozenset[str]) -> str:
+                                defined_params: frozenset[str],
+                                authoritative: bool = True) -> str:
     """Replace decidable param-presence conditions with literals BEFORE
     variant expansion (line-count preserving). Once collapsed, only
     genuinely unknown conditions drive both-arm expansion, and reads the
@@ -439,7 +467,8 @@ def _splice_static_param_guards(src: str,
     for _kw, cond, m in reversed(list(_iter_stmts(src))):
         if _kw not in ("if", "elif"):
             continue
-        verdict = _static_param_presence(cond, defined_params)
+        verdict = _static_param_presence(cond, defined_params,
+                                         authoritative)
         if verdict is not None:
             out = _splice(out, m, "1" if verdict else "0")
     return out
@@ -568,10 +597,32 @@ def _undefined_line(message: str, src: str) -> int | None:
     return None
 
 
+def _missing_param_reads(src_text: str,
+                         declared_lower: frozenset[str]) -> set[str]:
+    """Raw names of UNGUARDED params reads (no ``|default`` in the
+    filter chain following the read) whose value is not declared.
+    Heuristic chain-scan: text from the read to the next '}'; a
+    multi-line read is not followed (rare). Bare ``params`` object
+    access ('X' in params is spliced earlier; ``params|length``) is not
+    attributed here."""
+    missing: set[str] = set()
+    for m in _PARAM_READ_RE.finditer(src_text):
+        name = m.group(1) or m.group(2)
+        rest = src_text[m.end():]
+        end = rest.find("}")
+        chain = rest if end < 0 else rest[:end]
+        if re.search(r"\|\s*default\b", chain):
+            continue
+        if name.lower() not in declared_lower:
+            missing.add(name)
+    return missing
+
+
 def _render_one(env: jinja2.Environment, src: str, params: dict[str, str],
                 variant: int,
                 variables: dict[str, str] | None = None,
-                printer_state: dict | None = None
+                printer_state: dict | None = None,
+                param_dependent: frozenset[str] = frozenset()
                 ) -> tuple[list[str], RenderFinding | None]:
     try:
         out = env.from_string(src).render(
@@ -584,6 +635,22 @@ def _render_one(env: jinja2.Environment, src: str, params: dict[str, str],
     except UndefinedError as exc:
         lineno = getattr(exc, "lineno", None) or _undefined_line(
             getattr(exc, "message", ""), src)
+        # 3.1: an abort through an undeclared param happens ONLY on
+        # invocations that omit it — with no invocation declared that is
+        # param-dependent, not a verdict. Invented (non-params) names
+        # abort on EVERY invocation and keep full severity.
+        msg = str(getattr(exc, "message", "") or "")
+        if param_dependent and any(
+                re.search(rf"(?<!\w){re.escape(n)}(?!\w)", msg)
+                for n in param_dependent):
+            return [], RenderFinding(
+                "info", "macro_param_undefined",
+                f"Rendering aborts with Klipper's Undefined error: {exc} "
+                "— aborts only on invocations without a declared value; "
+                "pass params to simulate_macro for a full verdict.",
+                source_line=lineno,
+                variant=variant,
+            )
         return [], RenderFinding(
             "warning", "macro_param_undefined",
             f"Rendering aborts with Klipper's Undefined error: {exc.message} — "
@@ -822,13 +889,16 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
                             known_macros: frozenset[str] = frozenset(),
                             max_variants: int = MAX_RENDER_VARIANTS,
                             variables: dict[str, str] | None = None,
-                            printer_state: dict | None = None
+                            printer_state: dict | None = None,
+                            declared_defaults: dict[str, str] | None = None,
+                            invocation_given: bool = True
                             ) -> MacroRenderResult:
     from parser.validator import _MACRO_JINJA_ENV, _strip_inline_comments
 
-    params = params or {}
+    params = _coerce_str_map(params)
     variables = variables or {}
     printer_state = printer_state or {}
+    declared_defaults = _coerce_str_map(declared_defaults)
     stripped = _strip_inline_comments(body)
     if not stripped.strip():
         return MacroRenderResult()
@@ -842,7 +912,17 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
     # defined` (where x IS a variable/template name) is not one of these
     # grammars — it resolves natively at render time, where variables
     # are in the context.
-    defined = frozenset(k.lower() for k in params)
+    #
+    # 3.1 invocation model: declared_defaults (section params_*) ride
+    # EVERY Klipper invocation (the params_X mechanism); an explicit
+    # invocation overrides them per key and makes every guard
+    # authoritative. Without an invocation, only declared names are
+    # decidable — everything else stays param-dependent, never a
+    # fabricated error (the Hotkey.cfg FP class).
+    declared_lower = frozenset(k.lower() for k in declared_defaults)
+    render_params = {**declared_defaults, **params}
+    defined = (frozenset(k.lower() for k in render_params)
+               if invocation_given else declared_lower)
     # Scenario-declared dotted state paths: conditions whose printer
     # paths are covered evaluate NATIVELY (the value is known) — no arm
     # expansion for known shape.
@@ -850,8 +930,17 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
         _state_path_key(k) for k in printer_state if _state_path_key(k))
     # Param-presence guards are deterministic for THIS invocation: splice
     # them to literals first so the guarded arms collapse exactly like
-    # Klipper's branch selection (4R.1).
-    stripped = _splice_static_param_guards(stripped, defined)
+    # Klipper's branch selection (4R.1). Without an invocation only
+    # declared names resolve; the rest expand both arms and the
+    # value-reading arm downgrades to param-dependent info.
+    stripped = _splice_static_param_guards(stripped, defined,
+                                           invocation_given)
+    # Names whose reads are param-dependent (no declared value, no
+    # |default guard) — full-source set drives the UndefinedError
+    # downgrade; per-line re-detection attributes the line findings.
+    param_dependent = (frozenset() if invocation_given else
+                       frozenset(_missing_param_reads(stripped,
+                                                      declared_lower)))
     variants, held = _expand_variants(stripped, defined, max_variants,
                                       declared_state)
 
@@ -863,10 +952,12 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
 
     rendered: list[RenderedLine] = []
     findings: list[RenderFinding] = []
+    pd_reported: set[str] = set()
     for vi, variant_src in enumerate(variants):
         src_lines = variant_src.split("\n")
-        lines, finding = _render_one(_MACRO_JINJA_ENV, variant_src, params,
-                                     vi, variables, printer_state)
+        lines, finding = _render_one(_MACRO_JINJA_ENV, variant_src,
+                                     render_params, vi, variables,
+                                     printer_state, param_dependent)
         if finding is not None:
             findings.append(finding)
             continue
@@ -878,6 +969,28 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
                 cursor = match + 1
             rendered.append(RenderedLine(text=text, source_line=src_line,
                                          variant=vi))
+            # 3.1: a line whose SOURCE reads an undeclared, un-defaulted
+            # param has no verdict without an invocation — report the
+            # param dependency once per name, skip the shape checks that
+            # would only measure the empty-Undefined rendering.
+            # (Residual: an inline single-line if-body defeats line
+            # attribution and falls back to full checks — rare shape.)
+            if not invocation_given and match is not None:
+                missing = _missing_param_reads(src_lines[match],
+                                               declared_lower)
+                if missing:
+                    for nm in sorted(missing):
+                        if nm.lower() in pd_reported:
+                            continue
+                        pd_reported.add(nm.lower())
+                        findings.append(RenderFinding(
+                            "info", "macro_param_undefined",
+                            f"'{nm}' has no declared value and no "
+                            "invocation was given: the verdict for this "
+                            "line is param-dependent — pass params to "
+                            "simulate_macro for a full verdict.",
+                            variant=vi, source_line=src_line))
+                    continue
             for f in _check_rendered_line(text, registry, vi):
                 findings.append(replace(f, source_line=f.source_line or src_line))
 
@@ -915,11 +1028,15 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
 def _simulate_cached(body: str, params_items: tuple[tuple[str, str], ...],
                      max_variants: int,
                      variables_items: tuple[tuple[str, str], ...],
-                     state_items: tuple[tuple[str, str], ...]
+                     state_items: tuple[tuple[str, str], ...],
+                     defaults_items: tuple[tuple[str, str], ...],
+                     invocation_given: bool
                      ) -> MacroRenderResult:
     # Scenario state values crossed the cache boundary as repr(): the
     # cache key must stay hashable while keeping value TYPE visible
-    # (1 vs '1' must not share an entry).
+    # (1 vs '1' must not share an entry). invocation_given is part of
+    # the key: an explicit empty invocation ({}) and NO invocation
+    # (None) are different epistemic states (3.1).
     import json
     state = {}
     for path, raw in state_items:
@@ -929,32 +1046,43 @@ def _simulate_cached(body: str, params_items: tuple[tuple[str, str], ...],
             state[path] = raw
     return simulate_macro_uncached(body, dict(params_items),
                                    frozenset(), max_variants,
-                                   dict(variables_items), state)
+                                   dict(variables_items), state,
+                                   declared_defaults=dict(defaults_items),
+                                   invocation_given=invocation_given)
 
 
 def simulate_macro(body: str, params: dict[str, str] | None = None,
                    known_macros: frozenset[str] = frozenset(),
                    max_variants: int = MAX_RENDER_VARIANTS,
                    variables: dict[str, str] | None = None,
-                   printer_state: dict | None = None
+                   printer_state: dict | None = None,
+                   declared_defaults: dict[str, str] | None = None
                    ) -> MacroRenderResult:
     """Simulate one macro body on an invocation.
 
-    ``params`` are the invocation's parameters (the section's ``params_*``
-    defaults on the harness path, scenario values on the tool path;
-    lowercase keys recommended, lookups are case-insensitive like
-    Klipper). ``variables`` are the section's own ``variable_*`` values
+    ``params`` are the INVOCATION parameters — pass them (even `{}` for
+    a bare invocation) to get a verdict for that exact call. With
+    params=None no invocation is declared: reads without a declared
+    value become param-dependent INFO, never fabricated errors/warnings
+    (3.1 — absence of invocation info is not evidence of absence).
+    ``declared_defaults`` are the section's ``params_*`` values: they
+    ride EVERY Klipper invocation (the params_X default mechanism), are
+    overridden per key by an explicit invocation, and their empty
+    values stay a hard ERROR (the field-repro class).
+    ``variables`` are the section's own ``variable_*`` values
     (raw option strings; literal-evaluated like Klipper's config load) —
     top-level template names in every invocation, independent of params.
     ``printer_state`` (4R.3) overlays declared dotted paths
     (``{'toolhead.homed_axes': 'xyz'}``) onto the UNKNOWN sentinel: a
     declared value renders as a real value, everything else keeps
-    widening. Results are cached by (body, params, variables,
-    printer_state) — the simulation has no other project input in v1
-    (macro calls are not recursed), so that quadruple IS the full cache
-    key (cross-context isolation pinned by test). ``known_macros`` only
-    documents that macro tokens are recognized (never flagged) — v1 does
-    not use it to change behavior."""
+    widening. Results are cached by (body, params, declared_defaults,
+    invocation-given, variables, printer_state) — the simulation has no
+    other project input in v1 (macro calls are not recursed), so that
+    tuple IS the full cache key (cross-context isolation pinned by
+    test). ``known_macros`` only documents that macro tokens are
+    recognized (never flagged) — v1 does not use it to change
+    behavior."""
+    invocation_given = params is not None
     # Boundary coercion (review L8): callers range from config strings to
     # tool JSON. Coerce invocation maps to str->str (Klipper params are
     # always text) so int keys / None / nested containers can never raise
@@ -962,8 +1090,10 @@ def simulate_macro(body: str, params: dict[str, str] | None = None,
     # honest unparseable finding instead of a crash.
     params = _coerce_str_map(params)
     variables = _coerce_str_map(variables)
+    declared_defaults = _coerce_str_map(declared_defaults)
     key_items = tuple(sorted(params.items()))
     var_items = tuple(sorted(variables.items()))
+    defaults_items = tuple(sorted(declared_defaults.items()))
     import json as _json
     state_serial = []
     for k, v in sorted((printer_state or {}).items(),
@@ -977,7 +1107,8 @@ def simulate_macro(body: str, params: dict[str, str] | None = None,
             raw = repr(v)
         state_serial.append((path, raw))
     return _simulate_cached(body, key_items, max_variants, var_items,
-                            tuple(state_serial))
+                            tuple(state_serial), defaults_items,
+                            invocation_given)
 
 
 # ── W3: runtime-error traceback (paste → Jinja source line) ────────────────

@@ -894,13 +894,15 @@ def _validate_macro_jinja(section: ConfigSection, result: ValidationResult) -> N
 
 def _simulate_macro_render(section: ConfigSection, result: ValidationResult) -> None:
     """W2 render-simulation pass (parser/macro_render.py): render the body
-    the way Klipper would on a DEFAULT invocation and validate the
+    with the section's DECLARED state (params_* defaults ride every
+    Klipper invocation; no single invocation is claimed) and validate the
     RENDERED commands.
 
     Catches what both compile-time layers provably cannot: Jinja that
     compiles fine but EXPANDS to garbage — the field repro
     ``SET_LED ... RED={params.red}`` rendering ``RED=`` (Klipper:
-    'unable to parse') is a deterministic error here, while unknown
+    'unable to parse') is a deterministic error here, while reads of
+    UNDECLARED params are param-dependent info (3.1) and unknown
     printer-state values stay info (the simulation never claims to know
     runtime values). Findings rebase body-relative lines onto the gcode
     param line, same convention as _validate_macro_jinja. Runs only with
@@ -927,7 +929,8 @@ def _simulate_macro_render(section: ConfigSection, result: ValidationResult) -> 
         if param.key.lower().startswith("variable_")
         and not param.is_commented_out
     }
-    simulation = simulate_macro(gcode_param.value, params,
+    simulation = simulate_macro(gcode_param.value,
+                                declared_defaults=params,
                                 variables=variables)
     for finding in simulation.findings:
         # The body value carries a leading newline (everything after
