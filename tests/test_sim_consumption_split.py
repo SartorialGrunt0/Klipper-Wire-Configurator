@@ -129,6 +129,54 @@ def test_parse_endpoint_never_shows_sim_warnings():
     assert "macro_param_undefined" not in _codes(r.json()["validation"])
 
 
+def test_human_filter_recomputes_flags():
+    """Review B-L2/C-F5: to_dict() computes has_errors/has_warnings
+    BEFORE filtering — a filtered-out advisory must not leave a stale
+    has_warnings=true (the issues panel header counts from the flags)."""
+    from parser.validator import ValidationResult
+    from api.routes import _human_validation_dict
+
+    v = ValidationResult()
+    v.errors.append(_AdvisorySimFinding())
+    d = _human_validation_dict(v)
+    assert d["errors"] == []
+    assert d["has_warnings"] is False
+    assert d["has_errors"] is False
+
+
+class _AdvisorySimFinding:
+    """Stand-in carrying exactly what to_dict() reads."""
+    severity = "warning"
+    section = "gcode_macro SIM"
+    param = "gcode"
+    message = "advisory"
+    line_number = 3
+    code = "macro_param_undefined"
+    extra = ""
+
+    def to_dict(self):
+        return {"severity": self.severity, "section": self.section,
+                "param": self.param, "message": self.message,
+                "line_number": self.line_number, "code": self.code,
+                "extra": self.extra}
+
+
+def test_native_load_path_never_shows_sim_advisories(tmp_path):
+    """Review L8: /api/native/config-files/read is the boot-load feed
+    for the issues panel — it returned the raw to_dict(), bypassing D1."""
+    cfg = tmp_path / "printer.cfg"
+    cfg.write_text(_BASE + "[gcode_macro SIM]\ngcode:\n    "
+                   + WARN_MACRO_TEXT + "\n")
+    r = client.post('/api/native/config-files/read',
+                    json={"config_path": str(tmp_path),
+                          "filenames": ["printer.cfg"]})
+    assert r.status_code == 200
+    val = r.json()["files"]["printer.cfg"]["validation"]
+    assert "macro_param_undefined" not in _codes(val)
+    assert val["has_warnings"] is False
+    assert val["has_errors"] is False
+
+
 # ── D2: the delta gate keeps sim errors, drops sim advisories ─────────────
 
 def _draft_state():

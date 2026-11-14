@@ -128,6 +128,24 @@ class ValidationResult:
             "errors": [e.to_dict() for e in self.errors],
         }
 
+    def human_to_dict(self) -> dict:
+        """D1 boundary in ONE place: render-simulation advisories
+        (warning/info severity, sim-origin codes) never reach a
+        human-facing validation response, and the has_errors/
+        has_warnings flags are RECOMPUTED from the filtered list
+        (review B-L2/C-F5: to_dict() would ship flags counting the
+        filtered-out advisories — stale dots in the issues panel).
+        Sim ERRORS pass: a broken rendered shape is a true defect."""
+        from parser.macro_render import is_sim_advisory
+        d = self.to_dict()
+        kept = [e for e in d["errors"]
+                if not is_sim_advisory(e.get("code", ""),
+                                       e.get("severity", ""))]
+        d["errors"] = kept
+        d["has_errors"] = any(e["severity"] == "error" for e in kept)
+        d["has_warnings"] = any(e["severity"] == "warning" for e in kept)
+        return d
+
 
 @dataclass(frozen=True)
 class PinUse:

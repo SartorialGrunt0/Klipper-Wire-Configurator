@@ -154,7 +154,7 @@ def read_config_files(data: dict):
     results = {
         filename: {
             "config": config.to_dict(),
-            "validation": validations[filename].to_dict(),
+            "validation": validations[filename].human_to_dict(),
             "board_info": board_infos[filename],
             "raw_text": raw_texts[filename],
         }

@@ -36,7 +36,6 @@ from parser.config_schema import (
 )
 from parser.config_writer import write_config, smart_export
 from parser.validator import validate_config, validate_project_configs
-from parser.macro_render import is_sim_advisory
 from services.board_detector import (
     BOARD_TYPE_DIRS,
     detect_board_from_config,
@@ -67,13 +66,11 @@ def _human_validation_dict(validation) -> dict:
     validation response — the engine keeps computing them (shared
     surface stays simple; the tool path reports them via
     validate_macro/simulate_macro results). Sim ERRORS pass: a broken
-    rendered command shape is a true defect of the text being saved."""
-    d = validation.to_dict()
-    d["errors"] = [
-        e for e in d.get("errors", [])
-        if not is_sim_advisory(e.get("code", ""), e.get("severity", ""))
-    ]
-    return d
+    rendered command shape is a true defect of the text being saved.
+    Implementation lives on ValidationResult.human_to_dict() so every
+    surface (this API and the native boot-load path) filters
+    identically and recomputes the counts post-filter."""
+    return validation.human_to_dict()
 
 # Projection of the generated G-code registry served to the editor for
 # completion. Built once per process (load_registry is lru_cached, this just
