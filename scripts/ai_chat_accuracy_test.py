@@ -4947,7 +4947,8 @@ def main() -> int:
         if usage.get("truncated"):
             tok_s += "*"  # * = hit max_tokens (finish_reason=length), possibly truncated
         log.write(f"{r.qid:<5} {r.status:<15} {str(r.answer_ok):<7} {str(r.tool_ok):<7} "
-                  f"{r.tool_turns:<6} {tok_s:<8} {','.join(r.tool_names) or '-'}")
+                  f"{str(r.tool_turns if r.tool_turns is not None else '-'):<6} "
+                  f"{tok_s:<8} {','.join(r.tool_names) or '-'}")
     if truncated_results:
         log.write("")
         log.write(f"Truncated (hit max_tokens budget, finish_reason=length): {len(truncated_results)}")
