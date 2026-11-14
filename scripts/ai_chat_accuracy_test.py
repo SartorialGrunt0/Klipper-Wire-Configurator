@@ -3520,6 +3520,10 @@ ALL_TOOLS = (
     "calculate_rotation_distance",
     "generate_macro_template",
     "validate_macro",
+    # On-demand scenario simulation (W4R.3, 2026-11-14). The tuple
+    # comment above is law — the r1b run re-proved it by listing real
+    # simulate_macro calls under "Unknown tool attempts".
+    "simulate_macro",
     # Skill-gate loader (Phase 3): loop-routed like the write tools.
     "load_skill",
 )
