@@ -956,7 +956,9 @@ def _project_trace_sources(context_files: dict | None) -> list:
     try:
         buckets.append(list(_mirror_user_config_files().items()))
     except Exception:
-        pass  # mirror unreadable → staged files alone still trace
+        # mirror unreadable → staged files alone still trace; keep the
+        # fail-safe but make it observable (review B-L4, 2026-11-14)
+        logger.warning("trace mirror unreadable", exc_info=True)
     for entries in buckets:
         for fname, entry in entries:
             if fname in seen_names:
@@ -968,6 +970,8 @@ def _project_trace_sources(context_files: dict | None) -> list:
             try:
                 parsed = parse_config(text, filename=fname)
             except Exception:
+                logger.warning("trace source unparsable (%s) — skipped",
+                               fname, exc_info=True)
                 continue
             for section in parsed.sections:
                 if section.is_commented_out:
@@ -1027,11 +1031,18 @@ def _runtime_error_observation(messages: list[dict],
     matches = trace_runtime_error(frames, sources)
     if not matches:
         return None
+    # Observation budget (review B-L5, 2026-11-14): a generic rendered
+    # line can match dozens of macros — 60 matches measured 5 KB and
+    # ~0.9 s injected per turn. Show the first five, name the rest.
+    _CAP = 5
     lines = [
         f"- `{m.file}` [{m.macro}] body line {m.source_line}: "
         f"`{m.source_text}`  (renders: `{m.rendered}`)"
-        for m in matches
+        for m in matches[:_CAP]
     ]
+    if len(matches) > _CAP:
+        lines.append(f"- (… {len(matches) - _CAP} more matches truncated — "
+                     "the candidate set is larger than shown)")
     out = ("[Runtime error trace — deterministic] The Klipper error quoted "
            "in the latest message matches how these project macros render "
            "with default params (the error itself carries only the RENDERED "
@@ -1230,6 +1241,10 @@ def _prepare_messages(messages: list[dict],
         try:
             observation = _runtime_error_observation(messages, context_files)
         except Exception:
+            # fail-safe (chat must not die on an observation) but never
+            # silent — review B-L4, 2026-11-14
+            logger.warning("runtime-error observation failed",
+                           exc_info=True)
             observation = None
         if observation:
             trace_messages = [{"role": "system", "content": observation}]

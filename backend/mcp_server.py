@@ -3284,6 +3284,7 @@ class McpServer:
                     "message": f"{where}rendered default invocation — {finding.message}",
                 })
 
+
         # ── 3. Save/restore state pairing ──
         save_count = len(re.findall(r"SAVE_GCODE_STATE", code_text))
         restore_count = len(re.findall(r"RESTORE_GCODE_STATE", code_text))
@@ -3507,6 +3508,38 @@ class McpServer:
                         "macro or come from a non-default invocation.")
 
         # ── 7. Build result ──
+        # Dedupe the same-line double report (review B-L6, 2026-11-14):
+        # the static 2b required-param pass and the post-render pass
+        # both fire on e.g. `G1 E5` (static: missing 'F='; rendered:
+        # G1 with E and no feedrate). The rendered finding is the
+        # value-aware one — keep it, drop the static twin. Only an
+        # EXACT same-command+param coincidence is dropped; everything
+        # else the static pass saw stays.
+        rendered = [i for i in issues
+                    if "rendered default invocation" in i["message"]]
+
+        def _static_twin(issue: dict) -> bool:
+            msg = issue["message"]
+            # (a) legacy G1 no-feedrate static line check: the
+            # post-render finding covers it with the value-aware
+            # message whenever the rendered line keeps the shape.
+            if (msg.startswith("Extrusion move without feedrate:")
+                    and any("without feedrate" in r["message"]
+                            for r in rendered)):
+                return True
+            # (b) 2b required-param twin on the SAME line+command.
+            m = re.match(r"Line (\d+): '(\S+)' is missing required "
+                         r"parameter '([A-Za-z0-9_]+)='", msg)
+            if not m:
+                return False
+            line, cmd, pname = m.groups()
+            for r in rendered:
+                if (r["message"].startswith(f"Line {line}: ")
+                        and cmd in r["message"]
+                        and pname.lower() in r["message"].lower()):
+                    return True
+            return False
+        issues[:] = [i for i in issues if not _static_twin(i)]
         if not issues:
             return (
                 f"## Macro validation: No issues found\n\n"
@@ -3548,6 +3581,11 @@ class McpServer:
     # ── W4R.3: on-demand macro simulation (W4R decision D3) ──────────────
 
     _SIM_SCENARIO_CAP = 8
+    _SIM_LIMITS = (
+        "Limits: this renders the TEMPLATE only — CALL macros are not "
+        "recursed, and motion, waits, and side effects do not execute. "
+        "Anything not declared in a scenario stayed <unknown>: never "
+        "present a rendered value as a printer fact.")
 
     def _sim_extract_section(self, text: str, want_name: str | None = None):
         """(full_header, gcode_body, params_defaults, variables) for the
@@ -3629,7 +3667,8 @@ class McpServer:
             if source is None:
                 return ("macro_text must contain a complete "
                         "[gcode_macro NAME] section — header plus its "
-                        "gcode: body — not a bare body fragment.")
+                        "gcode: body — not a bare body fragment.\n\n"
+                        + self._SIM_LIMITS)
             origin = "provided text"
         elif macro_name:
             bare = macro_name.strip().strip("[]")
@@ -3657,11 +3696,11 @@ class McpServer:
                 return (f"No [gcode_macro {bare}] found in the working "
                         "state or the config files on this host. Paste the "
                         "section with macro_text='...' to simulate it "
-                        "anyway.")
+                        "anyway.\n\n" + self._SIM_LIMITS)
         else:
             return ("Provide macro='NAME' for an existing macro, or "
                     "macro_text='[gcode_macro ...] ...' for one that does "
-                    "not exist yet.")
+                    "not exist yet.\n\n" + self._SIM_LIMITS)
 
         sec_header, body, default_params, default_vars = source
 
@@ -3672,12 +3711,14 @@ class McpServer:
                 scenarios_raw = json.loads(scenarios_raw)
             except (json.JSONDecodeError, TypeError):
                 return ("scenarios must be a JSON array of "
-                        "{name?, params?, printer_state?, variables?}.")
+                        "{name?, params?, printer_state?, variables?}.\n\n"
+                        + self._SIM_LIMITS)
         truncated = False
         if scenarios_raw is None:
             scenarios_raw = [{}]
         if not isinstance(scenarios_raw, list) or not scenarios_raw:
-            return "scenarios must be a non-empty list (or omitted)."
+            return ("scenarios must be a non-empty list (or omitted).\n\n"
+                    + self._SIM_LIMITS)
         if len(scenarios_raw) > self._SIM_SCENARIO_CAP:
             scenarios_raw = scenarios_raw[:self._SIM_SCENARIO_CAP]
             truncated = True
@@ -3691,9 +3732,18 @@ class McpServer:
             out.append(f"(scenario list truncated to the cap of "
                        f"{self._SIM_SCENARIO_CAP})")
         for idx, sc in enumerate(scenarios_raw, 1):
+            name = f"scenario-{idx}"
             if not isinstance(sc, dict):
-                sc = {}
-            name = str(sc.get("name") or f"scenario-{idx}")
+                # Name the offending field for the model instead of
+                # silently simulating {} (review B-L3, 2026-11-14).
+                out.append("")
+                out.append(f"## {name}")
+                out.append(f"ERROR: scenario #{idx} is {type(sc).__name__}, "
+                           "expected an object with optional keys "
+                           "name / params / printer_state / variables — "
+                           "this scenario was NOT simulated.")
+                continue
+            name = str(sc.get("name") or name)
             params = dict(default_params)
             for k, v in (sc.get("params") or {}).items():
                 params[str(k).lower()] = str(v)
@@ -3744,11 +3794,7 @@ class McpServer:
 
         out.append("")
         out.append("---")
-        out.append(
-            "Limits: this renders the TEMPLATE only — CALL macros are not "
-            "recursed, and motion, waits, and side effects do not "
-            "execute. Anything not declared in a scenario stayed "
-            "<unknown>: never present a rendered value as a printer fact.")
+        out.append(self._SIM_LIMITS)
         return "\n".join(out)
 
     # ── Printer Memory ────────────────────────────────────────────
