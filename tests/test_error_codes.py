@@ -348,3 +348,21 @@ def test_required_param_error_has_no_code():
     required = [e for e in result.errors if 'is missing' in e.message]
     assert required, "expected a required-param error"
     assert all(e.code == '' for e in required)
+
+
+def test_params_star_option_is_error_with_klipper_guidance():
+    # params_<NAME> on [gcode_macro] is NOT a Klipper option: gcode_macro
+    # reads only gcode / description / rename_existing / variable_*, and an
+    # unread option is a load error ("Option ... is not valid in section",
+    # configfile.py:440). The ERROR is correct parity (review round-1 filed
+    # item, closed 2026-11-14 with this test) — and the message must teach
+    # both spellings that actually work.
+    result = _validate(
+        '[gcode_macro P]\nparams_BED: 60\ngcode:\n    M140 S{params.BED}\n')
+    hits = [e for e in result.errors if e.param == 'params_BED']
+    assert len(hits) == 1, [e.message for e in result.errors]
+    e = hits[0]
+    assert e.code == 'unknown_param'
+    assert e.severity == 'error'
+    assert 'params.BED' in e.message and '|default(' in e.message
+    assert 'BED=...' in e.message

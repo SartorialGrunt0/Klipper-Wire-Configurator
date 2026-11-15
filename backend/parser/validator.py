@@ -1351,17 +1351,32 @@ def validate_config(config: ConfigFile, *, gcode_registry: bool = True) -> Valid
                     and param_coverage.has_record(sec_type)
                     and not param_coverage.param_known(sec_type, param.key.lower())
                 )
+                _unknown_msg = (
+                    f"Unknown parameter '{param.key}' for section [{sec_type}] "
+                    "— Klipper reads no such option here and will refuse to "
+                    "start with this config."
+                    if grounded else
+                    f"Unknown parameter '{param.key}' for section [{sec_type}]."
+                )
+                if param.key.lower().startswith("params_"):
+                    # `params_<NAME>` is NOT a Klipper macro option
+                    # (gcode_macro reads only gcode / description /
+                    # rename_existing / variable_*; an unread option is a
+                    # load error at configfile.py:440). The ERROR is
+                    # correct parity — the message must teach the two
+                    # spellings that actually work.
+                    _pname = param.key[len("params_"):].upper()
+                    _unknown_msg += (
+                        f" '{param.key}' is not a Klipper parameter-default "
+                        f"option: read the value as {{params.{_pname}}} and "
+                        "give it a fallback with |default('...') in the "
+                        "gcode body, or have the caller pass it "
+                        f"({_pname}=...).")
                 result.errors.append(ValidationError(
                     severity="error" if grounded else "warning",
                     section=section.full_header,
                     param=param.key,
-                    message=(
-                        f"Unknown parameter '{param.key}' for section [{sec_type}] "
-                        "— Klipper reads no such option here and will refuse to "
-                        "start with this config."
-                        if grounded else
-                        f"Unknown parameter '{param.key}' for section [{sec_type}]."
-                    ),
+                    message=_unknown_msg,
                     line_number=param.line_number,
                     code="unknown_param",
                 ))
