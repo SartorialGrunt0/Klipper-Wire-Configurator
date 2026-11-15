@@ -1,7 +1,7 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "source_rev": "2d7717e3b62ea2fe3401b27f54f8681f80451c69",
-  "generated_at": "2026-11-15T16:03:55+00:00",
+  "generated_at": "2026-11-15T16:13:41+00:00",
   "commands": {
     "ABORT": {
       "extra": "bed_screws",
@@ -27,7 +27,9 @@
         },
         "REG": {
           "type": "str",
-          "required": true
+          "required": true,
+          "minval": 0,
+          "maxval": 127
         }
       },
       "mux_key": "CHIP",
@@ -46,11 +48,15 @@
         },
         "REG": {
           "type": "str",
-          "required": true
+          "required": true,
+          "minval": 0,
+          "maxval": 127
         },
         "VAL": {
           "type": "str",
-          "required": true
+          "required": true,
+          "minval": 0,
+          "maxval": 255
         }
       },
       "mux_key": "CHIP",
@@ -168,7 +174,9 @@
         },
         "REG": {
           "type": "str",
-          "required": true
+          "required": true,
+          "minval": 0,
+          "maxval": 48
         }
       },
       "mux_key": "CHIP",
@@ -187,11 +195,15 @@
         },
         "REG": {
           "type": "str",
-          "required": true
+          "required": true,
+          "minval": 0,
+          "maxval": 48
         },
         "VAL": {
           "type": "str",
-          "required": true
+          "required": true,
+          "minval": 0,
+          "maxval": 65535
         }
       },
       "mux_key": "CHIP",
@@ -371,15 +383,18 @@
       "params": {
         "AC": {
           "type": "float",
-          "required": true
+          "required": true,
+          "above": 0.0
         },
         "BD": {
           "type": "float",
-          "required": true
+          "required": true,
+          "above": 0.0
         },
         "AD": {
           "type": "float",
-          "required": true
+          "required": true,
+          "above": 0.0
         }
       },
       "mux_key": null,
@@ -395,7 +410,9 @@
       "params": {
         "GRAMS": {
           "type": "float",
-          "required": true
+          "required": true,
+          "minval": 50.0,
+          "maxval": 25000.0
         }
       },
       "mux_key": null,
@@ -532,7 +549,9 @@
         "FLOW_COMPENSATION": {
           "type": "int",
           "required": false,
-          "default": null
+          "default": null,
+          "minval": 0,
+          "maxval": 1
         }
       },
       "mux_key": null,
@@ -655,12 +674,14 @@
         },
         "VELOCITY": {
           "type": "float",
-          "required": true
+          "required": true,
+          "above": 0.0
         },
         "ACCEL": {
           "type": "float",
           "required": false,
-          "default": 0.0
+          "default": 0.0,
+          "minval": 0.0
         }
       },
       "mux_key": "STEPPER",
@@ -788,7 +809,8 @@
         "P": {
           "type": "float",
           "required": false,
-          "default": 0.0
+          "default": 0.0,
+          "minval": 0.0
         }
       },
       "mux_key": null,
@@ -981,12 +1003,16 @@
         "TAPS": {
           "type": "int",
           "required": false,
-          "default": 3
+          "default": 3,
+          "minval": 1,
+          "maxval": 10
         },
         "TIMEOUT": {
           "type": "float",
           "required": false,
-          "default": 30.0
+          "default": 30.0,
+          "minval": 1.0,
+          "maxval": 120.0
         }
       },
       "mux_key": null,
@@ -1006,7 +1032,8 @@
         "T": {
           "type": "int",
           "required": false,
-          "default": null
+          "default": null,
+          "minval": 0
         }
       },
       "mux_key": null,
@@ -1029,7 +1056,8 @@
         "S": {
           "type": "float",
           "required": false,
-          "default": 255.0
+          "default": 255.0,
+          "minval": 0.0
         }
       },
       "mux_key": null,
@@ -1157,17 +1185,20 @@
         "S": {
           "type": "float",
           "required": false,
-          "default": null
+          "default": null,
+          "above": 0.0
         },
         "P": {
           "type": "float",
           "required": false,
-          "default": null
+          "default": null,
+          "above": 0.0
         },
         "T": {
           "type": "float",
           "required": false,
-          "default": null
+          "default": null,
+          "above": 0.0
         }
       },
       "mux_key": null,
@@ -1192,7 +1223,8 @@
         "S": {
           "type": "float",
           "required": false,
-          "default": 100.0
+          "default": 100.0,
+          "above": 0.0
         }
       },
       "mux_key": null,
@@ -1207,7 +1239,8 @@
         "S": {
           "type": "float",
           "required": false,
-          "default": 100.0
+          "default": 100.0,
+          "above": 0.0
         }
       },
       "mux_key": null,
@@ -1253,7 +1286,8 @@
       "params": {
         "S": {
           "type": "int",
-          "required": true
+          "required": true,
+          "minval": 0
         }
       },
       "mux_key": null,
@@ -1382,11 +1416,13 @@
         },
         "SPEED": {
           "type": "float",
-          "required": false
+          "required": false,
+          "above": 0.0
         },
         "ACCEL": {
           "type": "float",
-          "required": false
+          "required": false,
+          "minval": 0.0
         },
         "STOP_ON_ENDSTOP": {
           "type": "str",
@@ -1418,7 +1454,8 @@
         "MEAS_TIME": {
           "type": "float",
           "required": false,
-          "default": 2.0
+          "default": 2.0,
+          "above": 0.0
         }
       },
       "mux_key": null,
@@ -1536,7 +1573,8 @@
         "SAMPLES": {
           "type": "int",
           "required": false,
-          "default": 10
+          "default": 10,
+          "minval": 1
         }
       },
       "mux_key": null,
@@ -1566,7 +1604,8 @@
         "PROBE_SPEED": {
           "type": "float",
           "required": false,
-          "default": 5.0
+          "default": 5.0,
+          "above": 0.0
         }
       },
       "mux_key": "CHIP",
@@ -1615,7 +1654,8 @@
         "PULLUP": {
           "type": "float",
           "required": false,
-          "default": null
+          "default": null,
+          "above": 0.0
         }
       },
       "mux_key": null,
@@ -1758,7 +1798,8 @@
         "MOVE_SPEED": {
           "type": "float",
           "required": false,
-          "default": 0.0
+          "default": 0.0,
+          "above": 0.0
         },
         "MOVE": {
           "type": "int",
@@ -1787,7 +1828,8 @@
         },
         "MOVE_SPEED": {
           "type": "float",
-          "required": false
+          "required": false,
+          "above": 0.0
         }
       },
       "mux_key": null,
@@ -1899,7 +1941,8 @@
       "params": {
         "COUNT": {
           "type": "int",
-          "required": true
+          "required": true,
+          "minval": 0
         }
       },
       "mux_key": null,
@@ -1964,7 +2007,8 @@
         },
         "WIPER": {
           "type": "float",
-          "required": true
+          "required": true,
+          "minval": 0.0
         }
       },
       "mux_key": "DIGIPOT",
@@ -2100,7 +2144,8 @@
         },
         "MOVE_SPEED": {
           "type": "float",
-          "required": false
+          "required": false,
+          "above": 0.0
         },
         "X": {
           "type": "float",
@@ -2187,7 +2232,8 @@
       "params": {
         "TIMEOUT": {
           "type": "float",
-          "required": false
+          "required": false,
+          "above": 0.0
         }
       },
       "mux_key": null,
@@ -2262,27 +2308,36 @@
         "RED": {
           "type": "float",
           "required": false,
-          "default": 0.0
+          "default": 0.0,
+          "minval": 0.0,
+          "maxval": 1.0
         },
         "GREEN": {
           "type": "float",
           "required": false,
-          "default": 0.0
+          "default": 0.0,
+          "minval": 0.0,
+          "maxval": 1.0
         },
         "BLUE": {
           "type": "float",
           "required": false,
-          "default": 0.0
+          "default": 0.0,
+          "minval": 0.0,
+          "maxval": 1.0
         },
         "WHITE": {
           "type": "float",
           "required": false,
-          "default": 0.0
+          "default": 0.0,
+          "minval": 0.0,
+          "maxval": 1.0
         },
         "INDEX": {
           "type": "int",
           "required": false,
-          "default": null
+          "default": null,
+          "minval": 1
         },
         "TRANSMIT": {
           "type": "int",
@@ -2315,7 +2370,8 @@
         "INDEX": {
           "type": "int",
           "required": false,
-          "default": null
+          "default": null,
+          "minval": 1
         }
       },
       "mux_key": "LED",
@@ -2337,7 +2393,8 @@
         "VALUE": {
           "type": "float",
           "required": true,
-          "default": null
+          "default": null,
+          "minval": 0.0
         },
         "TEMPLATE": {
           "type": "str",
@@ -2346,7 +2403,8 @@
         },
         "CYCLE_TIME": {
           "type": "float",
-          "required": false
+          "required": false,
+          "above": 0.0
         }
       },
       "mux_key": "PIN",
@@ -2363,11 +2421,14 @@
         },
         "ADVANCE": {
           "type": "float",
-          "required": false
+          "required": false,
+          "minval": 0.0
         },
         "SMOOTH_TIME": {
           "type": "float",
-          "required": false
+          "required": false,
+          "minval": 0.0,
+          "maxval": 0.2
         }
       },
       "mux_key": "EXTRUDER",
@@ -2381,11 +2442,13 @@
       "params": {
         "TOTAL_LAYER": {
           "type": "int",
-          "required": false
+          "required": false,
+          "minval": 0
         },
         "CURRENT_LAYER": {
           "type": "int",
-          "required": false
+          "required": false,
+          "minval": 0
         }
       },
       "mux_key": null,
@@ -2401,19 +2464,23 @@
       "params": {
         "RETRACT_LENGTH": {
           "type": "float",
-          "required": false
+          "required": false,
+          "minval": 0.0
         },
         "RETRACT_SPEED": {
           "type": "float",
-          "required": false
+          "required": false,
+          "minval": 1
         },
         "UNRETRACT_EXTRA_LENGTH": {
           "type": "float",
-          "required": false
+          "required": false,
+          "minval": 0.0
         },
         "UNRETRACT_SPEED": {
           "type": "float",
-          "required": false
+          "required": false,
+          "minval": 1
         }
       },
       "mux_key": null,
@@ -2471,15 +2538,19 @@
         "SENSITIVITY": {
           "type": "int",
           "required": false,
-          "default": null
+          "default": null,
+          "minval": 0,
+          "maxval": 255
         },
         "ACCEL": {
           "type": "float",
-          "required": false
+          "required": false,
+          "minval": 0.0
         },
         "RECOVERY_TIME": {
           "type": "float",
-          "required": false
+          "required": false,
+          "minval": 0.0
         }
       },
       "mux_key": null,
@@ -2576,12 +2647,14 @@
         "CURRENT": {
           "type": "float",
           "required": false,
-          "default": null
+          "default": null,
+          "minval": 0.0
         },
         "HOLDCURRENT": {
           "type": "float",
           "required": false,
-          "default": null
+          "default": null,
+          "above": 0.0
         }
       },
       "mux_key": "STEPPER",
@@ -2618,7 +2691,8 @@
         "VELOCITY": {
           "type": "float",
           "required": false,
-          "default": null
+          "default": null,
+          "minval": 0.0
         }
       },
       "mux_key": "STEPPER",
@@ -2633,22 +2707,27 @@
         "VELOCITY": {
           "type": "float",
           "required": false,
-          "default": null
+          "default": null,
+          "above": 0.0
         },
         "ACCEL": {
           "type": "float",
           "required": false,
-          "default": null
+          "default": null,
+          "above": 0.0
         },
         "SQUARE_CORNER_VELOCITY": {
           "type": "float",
           "required": false,
-          "default": null
+          "default": null,
+          "minval": 0.0
         },
         "MINIMUM_CRUISE_RATIO": {
           "type": "float",
           "required": false,
-          "default": null
+          "default": null,
+          "minval": 0.0,
+          "below": 1.0
         }
       },
       "mux_key": null,
@@ -2665,12 +2744,16 @@
         "ENABLE": {
           "type": "int",
           "required": false,
-          "default": null
+          "default": null,
+          "minval": 0,
+          "maxval": 1
         },
         "TEMP_COEFF": {
           "type": "float",
           "required": false,
-          "default": null
+          "default": null,
+          "minval": -1,
+          "maxval": 1
         },
         "REF_TEMP": {
           "type": "float",
@@ -2701,7 +2784,8 @@
         },
         "MAX_SMOOTHING": {
           "type": "float",
-          "required": false
+          "required": false,
+          "minval": 0.05
         },
         "NAME": {
           "type": "str",
@@ -2810,7 +2894,8 @@
         "STEP": {
           "type": "float",
           "required": false,
-          "default": 2.0
+          "default": 2.0,
+          "minval": 1.0
         }
       },
       "mux_key": "PROBE",
@@ -2951,7 +3036,8 @@
         "BAND": {
           "type": "float",
           "required": false,
-          "default": 0.0
+          "default": 0.0,
+          "minval": 0.0
         },
         "STEP_DELTA": {
           "type": "float",
@@ -2961,12 +3047,14 @@
         "STEP_HEIGHT": {
           "type": "float",
           "required": false,
-          "default": 0.0
+          "default": 0.0,
+          "minval": 0.0
         },
         "SKIP": {
           "type": "float",
           "required": false,
-          "default": 0.0
+          "default": 0.0,
+          "minval": 0.0
         }
       },
       "mux_key": null,
@@ -2993,7 +3081,8 @@
         },
         "DURATION": {
           "type": "float",
-          "required": true
+          "required": true,
+          "minval": 0.0
         }
       },
       "mux_key": "ID",

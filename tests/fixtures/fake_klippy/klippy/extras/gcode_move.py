@@ -34,7 +34,9 @@ class FakeConventionHandlers:
             self.speed = gcmd.get_float('MOVE_SPEED', self.speed, above=0.)
 
     def cmd_GET_STATE(self, gcmd):
-        gcmd.get_int('INDEX', 1)
+        gcmd.get_int('INDEX', 1, minval=0, maxval=self.count)
+        gcmd.get_float('SPEED', 1., above=0.)
+        gcmd.get_float('OFFSET', 0., minval=-1, maxval=1)
 
     cmd_SET_GCODE_STATE_help = "set state"
 

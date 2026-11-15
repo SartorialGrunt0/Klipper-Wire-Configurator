@@ -96,7 +96,8 @@ def test_fixture_extracts_param_types_and_required():
     params = registry["commands"]["SET_LED"]["params"]
     assert params["LED"] == {"required": True}
     assert params["RED"] == {"type": "float", "required": False, "default": 0.0}
-    assert params["INDEX"] == {"type": "int", "required": False, "default": None}
+    assert params["INDEX"] == {"type": "int", "required": False,
+                               "default": None, "minval": 1}
     assert params["SYNC"] == {"type": "bool", "required": False, "default": True}
     assert params["LABEL"] == {"type": "str", "required": True}
 
@@ -144,9 +145,15 @@ def test_fixture_loop_getattr_resolves_handler_by_convention():
     assert state["NAME"] == {"type": "str", "required": False,
                              "default": "default"}
     assert state["MOVE"] == {"type": "int", "required": False, "default": 0}
-    assert state["MOVE_SPEED"] == {"type": "float", "required": False}
+    assert state["MOVE_SPEED"] == {"type": "float", "required": False,
+                                    "above": 0.0}
     assert cmds["GET_STATE"]["params"] == {
-        "INDEX": {"type": "int", "required": False, "default": 1}}
+        "INDEX": {"type": "int", "required": False, "default": 1,
+                  "minval": 0},
+        "SPEED": {"type": "float", "required": False, "default": 1.0,
+                  "above": 0.0},
+        "OFFSET": {"type": "float", "required": False, "default": 0.0,
+                   "minval": -1, "maxval": 1}}
 
 
 def test_fixture_shared_dispatch_handler_not_attributed():
@@ -226,14 +233,29 @@ def test_real_tree_guarded_families_not_required():
     # preserved-correct entries (the SET_LED assertion of plan 2.2):
     led = cmds["SET_LED"]["params"]
     assert led["LED"]["required"] is True
-    assert led["RED"] == {"type": "float", "required": False, "default": 0.0}
+    assert led["RED"] == {"type": "float", "required": False, "default": 0.0,
+                          "minval": 0.0, "maxval": 1.0}
+
+
+def test_fixture_literal_bounds_recorded_dynamic_ones_not():
+    """v4: Klipper's own range refusals ride the param entry, but only when
+    the limit is a LITERAL. `maxval=self.count` is a config value, so the
+    check would be a guess — the key must be absent, not defaulted."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(FAKE_TREE)["commands"]
+    state = cmds["GET_STATE"]["params"]
+    assert state["INDEX"]["minval"] == 0
+    assert "maxval" not in state["INDEX"], state["INDEX"]
+    assert state["SPEED"]["above"] == 0.0
+    assert state["OFFSET"] == {"type": "float", "required": False,
+                               "default": 0.0, "minval": -1, "maxval": 1}
 
 
 def test_fixture_schema_version_bumped():
     mod = _load_extractor()
-    assert mod.SCHEMA_VERSION == 3
+    assert mod.SCHEMA_VERSION == 4
     registry = mod.extract_registry(FAKE_TREE)
-    assert registry["schema_version"] == 3
+    assert registry["schema_version"] == 4
 
 
 def test_fixture_gcode_builtin_has_no_gate():
@@ -365,7 +387,7 @@ def test_artifact_schema_shape():
     if not ARTIFACT.is_file():
         pytest.skip("artifact not generated yet")
     data = json.loads(ARTIFACT.read_text())
-    assert data["schema_version"] == 3
+    assert data["schema_version"] == 4
     assert isinstance(data["commands"], dict) and data["commands"]
     entry = data["commands"]["SET_LED"]
     assert set(entry) >= {"extra", "requires_sections", "requires_mode",

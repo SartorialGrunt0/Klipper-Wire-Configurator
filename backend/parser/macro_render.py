@@ -1053,16 +1053,20 @@ def _check_rendered_line(text: str, registry: dict, variant: int,
                     "an empty string.", variant=variant))
             continue
         ptype = pdef.get("type")
+        number: float | None = None
         try:
             if ptype == "float":
-                float(value)
+                number = float(value)
             elif ptype == "int":
-                int(value)
+                number = int(value)
         except ValueError:
             findings.append(RenderFinding(
                 "error", "macro_param_unparseable",
                 f"Parameter {pname}={value!r} does not parse as "
                 f"{ptype} that {token} expects.", variant=variant))
+        if number is not None:
+            findings.extend(_bound_findings(token, pname, value, number, pdef,
+                                            variant, source_line))
 
     if token == "SET_GCODE_VARIABLE":
         # Klipper stores VALUE through ast.literal_eval + json.dumps
@@ -1081,6 +1085,7 @@ def _check_rendered_line(text: str, registry: dict, variant: int,
                     "literal — Klipper parses VALUE with literal_eval and "
                     "fails the call at run time (quote strings: "
                     "VALUE='on').", variant=variant))
+    findings.extend(_either_of_findings(token, present, variant, source_line))
     findings.extend(_enum_findings(token, present, variant, source_line))
     findings.extend(_mux_target_findings(token, entry, present, sections,
                                          variant, source_line))
@@ -1130,7 +1135,12 @@ def _check_rendered_line(text: str, registry: dict, variant: int,
 #               'temperature_sensor chamber' — space and all.
 #   STEPPER     MANUAL_STEPPER -> [manual_stepper X], FORCE_MOVE ->
 #               stepper_x/z1, DUMP_TMC -> the tmc section: three spaces.
-#   CHIP        adxl345 / angle / ldc1612 / probe_eddy_current.
+#   CHIP        adxl345 / angle / ldc1612 / probe_eddy_current, all
+#               registered `"CHIP", config.get_name().split()[-1]` — the
+#               trailing name is the value ([adxl345] -> 'adxl345',
+#               [angle my_chip] -> 'my_chip').
+_CHIP_FAMILIES = ("adxl345", "angle", "ldc1612", "probe_eddy_current")
+
 _MUX_TARGET_FAMILIES: dict[str, tuple[str, ...]] = {
     "SET_FAN_SPEED": ("fan_generic",),
     "SET_LED": ("neopixel", "dotstar", "pca9533", "pca9632", "led"),
@@ -1152,7 +1162,43 @@ _MUX_TARGET_FAMILIES: dict[str, tuple[str, ...]] = {
     "QUERY_FILAMENT_SENSOR": ("filament_switch_sensor",
                               "filament_motion_sensor"),
     "SET_DIGIPOT": ("mcp4018",),
+    # v2 (P4): the CHIP space.
+    "ACCELEROMETER_MEASURE": _CHIP_FAMILIES,
+    "ACCELEROMETER_QUERY": _CHIP_FAMILIES,
+    "ACCELEROMETER_DEBUG_READ": _CHIP_FAMILIES,
+    "ACCELEROMETER_DEBUG_WRITE": _CHIP_FAMILIES,
+    "ANGLE_CALIBRATE": _CHIP_FAMILIES,
+    "ANGLE_CHIP_CALIBRATE": _CHIP_FAMILIES,
+    "ANGLE_DEBUG_READ": _CHIP_FAMILIES,
+    "ANGLE_DEBUG_WRITE": _CHIP_FAMILIES,
+    "LDC_CALIBRATE_DRIVE_CURRENT": _CHIP_FAMILIES,
+    "PROBE_EDDY_CURRENT_CALIBRATE": _CHIP_FAMILIES,
+    # MANUAL_STEPPER resolves against [manual_stepper NAME]; the OTHER
+    # stepper-keyed commands resolve against rail names (see below).
+    "MANUAL_STEPPER": ("manual_stepper",),
 }
+
+# Mux families whose VALUE is the full section header, not its last token:
+# heaters.py register_sensor uses config.get_name(), so the legal
+# TEMPERATURE_WAIT SENSOR value is 'temperature_sensor chamber', space and
+# all. Every module that calls pheaters.register_sensor is listed, or a
+# legitimate target would be reported missing.
+_MUX_FULL_NAME_FAMILIES: dict[str, tuple[str, ...]] = {
+    "TEMPERATURE_WAIT": ("extruder", "heater_bed", "heater_generic",
+                         "temperature_fan", "temperature_probe",
+                         "temperature_sensor", "z_thermal_adjust"),
+}
+
+# Commands whose mux value is a STEPPER RAIL name: force_move and
+# stepper_enable register per `mcu_stepper.get_name()` ('stepper_x',
+# extruder rails 'extruder'/'extruder1'), tmc registers
+# `config.get_name().split()[-1]` ('stepper_x' from [tmc2209 stepper_x]).
+# The legal set is the rails the project declares, so it is derived from
+# section headers rather than from a family list.
+_MUX_STEPPER_RAIL_COMMANDS = frozenset({
+    "DUMP_TMC", "INIT_TMC", "SET_TMC_CURRENT", "SET_TMC_FIELD",
+    "FORCE_MOVE", "STEPPER_BUZZ", "SET_STEPPER_ENABLE",
+})
 
 # Section types that register themselves under a bare name (the value is
 # the section name) and, for extruders, also under a numbered name.
@@ -1181,6 +1227,39 @@ def _mux_target_names(sections: "frozenset[str] | None",
     return names
 
 
+def _full_section_names(sections: "frozenset[str] | None",
+                        families: tuple[str, ...]) -> set[str]:
+    """Every legal value for a mux command whose target is a FULL section
+    header (heaters.py register_sensor: config.get_name())."""
+    names: set[str] = set()
+    for raw in sections or ():
+        header = str(raw).strip().lower()
+        if header.partition(" ")[0] in families:
+            names.add(header)
+    return names
+
+
+def _stepper_rail_names(sections: "frozenset[str] | None") -> set[str]:
+    """Every stepper RAIL name the project declares.
+
+    Klipper registers the stepper-keyed mux commands per rail: `stepper_x`
+    and friends come from their own section header, extruders from
+    [extruder]/[extruder1], and a manual stepper's rail from the token after
+    `[manual_stepper NAME]`.
+    """
+    names: set[str] = set()
+    for raw in sections or ():
+        header = str(raw).strip().lower()
+        head, _, rest = header.partition(" ")
+        if re.fullmatch(r"stepper_[a-z0-9_]+", head):
+            names.add(head)
+        elif head == "extruder" or re.fullmatch(r"extruder\d+", head):
+            names.add(head)
+        elif head == "manual_stepper" and rest.strip():
+            names.add(rest.split()[-1])
+    return names
+
+
 # ── enum params: legal values Klipper refuses anything else for ───────────
 #
 # Only params whose membership test RAISES gcmd.error belong here: those
@@ -1206,6 +1285,91 @@ _PARAM_ENUMS: dict[str, dict[str, frozenset[str]]] = {
     "SET_DUAL_CARRIAGE": {"MODE": frozenset({"inactive", "primary",
                                              "copy", "mirror"})},
 }
+
+# ── either-of rules: the call is refused unless a SET of params is supplied ─
+#
+# Only shapes where Klipper RAISES belong here (same test as _PARAM_ENUMS):
+#   SET_FAN_SPEED     fan_generic.py: `(speed is None) == (template is None)`
+#                     raises, so BOTH missing and BOTH present are refused —
+#                     exactly one ("xor").
+#   TEMPERATURE_WAIT  heaters.py: raises only when MINIMUM and MAXIMUM are
+#                     both absent — at least one ("or").
+_PARAM_EITHER_OF: dict[str, tuple[tuple[str, ...], str]] = {
+    "SET_FAN_SPEED": (("SPEED", "TEMPLATE"), "xor"),
+    "TEMPERATURE_WAIT": (("MINIMUM", "MAXIMUM"), "or"),
+}
+
+
+def _either_of_findings(token: str, present: dict[str, str], variant: int,
+                        source_line: int | None) -> list[RenderFinding]:
+    """Reject a call whose supplied-parameter SET Klipper refuses."""
+    rule = _PARAM_EITHER_OF.get(token)
+    if not rule:
+        return []
+    names, mode = rule
+    values = {name: present.get(name) for name in names}
+    if any(v is not None and _looks_unknown(v) for v in values.values()):
+        # A rendered-unknown value may or may not be supplied: undecidable.
+        return []
+    supplied = [name for name, v in values.items()
+                if v is not None and str(v).strip() != ""]
+    listed = " or ".join(names)
+    if mode == "xor":
+        if len(supplied) == 1:
+            return []
+        if supplied:
+            wording = (f"accepts only ONE of {listed} — both "
+                       f"{' and '.join(supplied)} were given")
+        else:
+            wording = f"needs exactly one of {listed} — neither was given"
+    else:                                    # "or": at least one
+        if supplied:
+            return []
+        wording = f"needs at least one of {listed} — neither was given"
+    return [RenderFinding(
+        "error", "macro_param_missing_choice",
+        f"{token} {wording}. Klipper refuses the call at run time.",
+        variant=variant, source_line=source_line)]
+
+
+_RANGE_WORDING = {
+    "minval": "must have minimum of",
+    "maxval": "must have maximum of",
+    "above": "must be above",
+    "below": "must be below",
+}
+
+
+def _bound_findings(token: str, pname: str, raw: str, number: float,
+                    pdef: dict, variant: int,
+                    source_line: int | None) -> list[RenderFinding]:
+    """Reject a literal value outside the range Klipper's own get() enforces.
+
+    gcode.py `GCodeCommand.get()` raises when `value < minval` or
+    `value > maxval` (inclusive limits), and when `value <= above` or
+    `value >= below` (exclusive). Only LITERAL limits reach the artifact — a
+    config-derived limit (`maxval=self.scale`, `above=min_temp`) is never
+    recorded — so anything reported here is decidable from the template.
+    Klipper raises at the first failing check, in this order.
+    """
+    for key in ("minval", "maxval", "above", "below"):
+        limit = pdef.get(key)
+        if not isinstance(limit, (int, float)) or isinstance(limit, bool):
+            continue
+        violated = {
+            "minval": number < limit,
+            "maxval": number > limit,
+            "above": number <= limit,
+            "below": number >= limit,
+        }[key]
+        if not violated:
+            continue
+        return [RenderFinding(
+            "error", "macro_param_out_of_bounds",
+            f"{token} {pname}={raw} is outside the range Klipper accepts — "
+            f"the call errors at run time ({pname} {_RANGE_WORDING[key]} "
+            f"{limit}).", variant=variant, source_line=source_line)]
+    return []
 
 
 def _enum_findings(token: str, present: dict[str, str], variant: int,
@@ -1239,17 +1403,27 @@ def _mux_target_findings(token: str, entry: dict, present: dict[str, str],
     include we cannot read, no project at all): silence, never a guess —
     the same decidable-absence law the variable checks follow.
     """
-    families = _MUX_TARGET_FAMILIES.get(token)
     key = str(entry.get("mux_key") or "").upper()
-    if not families or not key or sections is None:
+    if not key or sections is None:
         return []
     value = present.get(key)
     if not value or _looks_unknown(value):
         return []          # empty is an ERROR above; unknown is undeclared
-    legal = _mux_target_names(sections, families)
+    families = _MUX_TARGET_FAMILIES.get(token)
+    full = _MUX_FULL_NAME_FAMILIES.get(token)
+    if full is not None:
+        legal = _full_section_names(sections, full)
+        label = "/".join(f"[{f}]" for f in full)
+    elif token in _MUX_STEPPER_RAIL_COMMANDS:
+        legal = _stepper_rail_names(sections)
+        label = "stepper rail"
+    elif families:
+        legal = _mux_target_names(sections, families)
+        label = "/".join(f"[{f}]" for f in families)
+    else:
+        return []
     if value.strip().lower() in legal:
         return []
-    label = "/".join(f"[{f}]" for f in families)
     guess = ""
     matches = sorted(n for n in legal if value.strip().lower() in n)
     if matches:

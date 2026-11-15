@@ -27,9 +27,12 @@ REPO = Path(__file__).resolve().parent.parent
 DEFAULT_KLIPPER = REPO / "reference" / "klipper"
 DEFAULT_OUTPUT = REPO / "backend" / "data" / "gcode_commands.json"
 
-SCHEMA_VERSION = 3  # 2026-11 W1: params gained "type"/"default"/"required";
+SCHEMA_VERSION = 4  # 2026-11 W1: params gained "type"/"default"/"required";
                     # review round-1: required ⟺ unconditional bare gcmd read,
-                    # gcmd-receiver-only harvesting
+                    # gcmd-receiver-only harvesting.
+                    # v4: params gained literal "minval"/"maxval"/"above"/
+                    # "below" (Klipper's own range refusals) — config-derived
+                    # limits are never recorded, so a bound here is decidable.
 
 # gcmd parameter getters (reference/klipper/klippy/gcode.py GCodeCommand):
 # the default is the SECOND positional arg; a call with only the option
@@ -42,6 +45,9 @@ _PARAM_GETTER_TYPES = {
 
 # Comprehension scopes that can bind an axis name, like `for` statements.
 COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
+
+# gcode.py GCodeCommand.get() range keywords, in the order they raise.
+_BOUND_KEYWORDS = ("minval", "maxval", "above", "below")
 
 # ---------------------------------------------------------------------------
 # Gate table: extras module -> config section types whose presence enables the
@@ -479,6 +485,24 @@ def _loop_axis_params(func_node: ast.FunctionDef) -> dict[str, dict]:
     return out
 
 
+def _literal_number(node: ast.AST) -> int | float | None:
+    """A numeric literal, including a negative one (`-1` is UnaryOp(USub)).
+
+    Bounds are only recordable when the limit is this: gcode.py's
+    minval/maxval/above/below comparison refuses the call at run time, but a
+    limit read from CONFIG (`maxval=self.scale`, `above=min_temp`) is not
+    decidable from the template, so it is never recorded."""
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.USub):
+        inner = _literal_number(node.operand)
+        return None if inner is None else -inner
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, ast.UAdd):
+        return _literal_number(node.operand)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) \
+            and not isinstance(node.value, bool):
+        return node.value
+    return None
+
+
 def _extract_handler_params(func_node: ast.FunctionDef) -> dict[str, dict]:
     """Parse gcmd.get/get_int/get_float/getboolean('NAME', default…) calls
     out of a command handler into {PARAM: {type, required[, default]}}.
@@ -519,6 +543,20 @@ def _extract_handler_params(func_node: ast.FunctionDef) -> dict[str, dict]:
                     dnode.value, (str, int, float, bool)) or (
                     isinstance(dnode, ast.Constant) and dnode.value is None):
                 entry["default"] = dnode.value
+        # Range refusals: gcode.py get() raises when the value is outside
+        # minval/maxval (inclusive) or above/below (exclusive). Only literal
+        # limits are recorded — a config-derived one is undecidable from the
+        # template. First site wins, like `default`.
+        for bound in _BOUND_KEYWORDS:
+            if bound in entry:
+                continue
+            for kw in call.keywords:
+                if kw.arg != bound:
+                    continue
+                limit = _literal_number(kw.value)
+                if limit is not None:
+                    entry[bound] = limit
+                break
     # Per-axis names (axis loops) — merged last so a LITERAL read of the
     # same name keeps its own default/requiredness.
     for pname, pdef in _loop_axis_params(func_node).items():
