@@ -4687,6 +4687,24 @@ def parse_question_filter(spec: str, questions: list[TestQuestion]) -> list[int]
 
 
 # ── Main ───────────────────────────────────────────────────────────────
+def exit_code_for(failed, errored, conditional) -> int:
+    """Process exit code for a finished run (review round-1 F11).
+
+    0 = every question clean; 2 = at least one FAIL or ERROR (unchanged);
+    3 = no hard failure but at least one CONDITIONAL pass — the answer was
+    right yet the required tool was never called (PASS*) or the wrong tool
+    was called (PASS+). Before this, a leg whose every required tool was
+    skipped still exited 0, so CI could not tell 'tool-use compliance' from
+    'answered without the tool'. 1 stays fatal-setup, 3 also flags the
+    API-key-leak guard.
+    """
+    if failed or errored:
+        return 2
+    if conditional:
+        return 3
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Test AI chat accuracy and MCP tool usage against the running backend.",
@@ -5095,7 +5113,7 @@ def main() -> int:
         print(f"Tools NEVER used: {', '.join(missing)}")
     print(f"\nFull log: {log_path}")
     print(f"Machine-readable: {results_path}")
-    return 0 if not failed and not errored else 2
+    return exit_code_for(failed, errored, conditional)
 
 
 if __name__ == "__main__":

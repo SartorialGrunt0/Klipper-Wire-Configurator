@@ -224,3 +224,14 @@ def test_renders_clean_fails_broken_template_syntax():
     assert not _renders_clean(
         "[gcode_macro BROKE]\ngcode:\n"
         "    {% if %}\n    M106 S1\n")
+
+
+# ── F11: conditional passes must not exit 0 ──────────────────────────────
+
+def test_exit_code_distinguishes_conditional_passes():
+    assert H.exit_code_for([], [], []) == 0
+    assert H.exit_code_for(["q"], [], []) == 2
+    assert H.exit_code_for([], ["q"], []) == 2
+    assert H.exit_code_for([], [], ["q"]) == 3
+    # a hard failure outranks a conditional pass
+    assert H.exit_code_for(["q"], [], ["q2"]) == 2
