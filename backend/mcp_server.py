@@ -1246,7 +1246,11 @@ class McpServer:
                     "variable_fan_on as fan_on, so {'fan_on': 'True'} is "
                     "the state, never {'variable_fan_on': ...}; a name "
                     "the section does not declare is refused with a "
-                    "warning and NOT injected. runs=N models N CONSECUTIVE "
+                    "warning and NOT injected. For ONE invocation skip the scenarios "
+                    "wrapper: params / variables / printer_state at the "
+                    "TOP LEVEL of the call are that one invocation "
+                    "(scenarios is only for comparing independent "
+                    "states). runs=N models N CONSECUTIVE "
                     "calls from one starting state, threading the macro's "
                     "own SET_GCODE_VARIABLE writes between calls (Klipper "
                     "renders a body before executing it, so a write shows "
@@ -1282,6 +1286,18 @@ class McpServer:
                             "maxItems": 8,
                             "description": "Invocations to simulate, each rendered independently: {name?: 'hotend-only home', params?: {'S': '215'}, printer_state?: {'toolhead.homed_axes': 'xyz'}, variables?: {'speed': '50'}}. Omit for one default-invocation render.",
                             "items": {"type": "object"},
+                        },
+                        "params": {
+                            "type": "object",
+                            "description": "SHORTHAND for a single invocation: same as scenarios=[{params: {...}}]. Use params/variables/printer_state at the top level when you have ONE state to test; use scenarios=[...] only to compare independent states. Do not pass both.",
+                        },
+                        "printer_state": {
+                            "type": "object",
+                            "description": "SHORTHAND for a single invocation: dotted Klipper status paths as declared values, e.g. {'toolhead.homed_axes': 'xyz', 'extruder.temperature': 205.0}.",
+                        },
+                        "variables": {
+                            "type": "object",
+                            "description": "SHORTHAND for a single invocation: a DECLARED variable_* by its stripped name, e.g. {'fan_on': 'True'} for variable_fan_on.",
                         },
                         "runs": {
                             "type": "integer",
@@ -3761,6 +3777,27 @@ class McpServer:
                         "{name?, params?, printer_state?, variables?}.\n\n"
                         + self._SIM_LIMITS)
         truncated = False
+        # Single-invocation shorthand: params / variables / printer_state
+        # at the top level ARE the one implicit scenario, so the common
+        # call is {"macro": "X", "params": {...}} instead of a one-element
+        # scenarios array (measured: 4 of the 5 SIMTOOL questions need
+        # exactly one invocation per call).
+        shorthand = {k: args.get(k)
+                     for k in ("params", "variables", "printer_state")
+                     if args.get(k) is not None}
+        if shorthand:
+            bad_short = next((k for k, v in shorthand.items()
+                              if not isinstance(v, dict)), None)
+            if bad_short is not None:
+                return (f"Top-level '{bad_short}' must be an object of "
+                        "key→value, e.g. params={'S': '215'}.\n\n"
+                        + self._SIM_LIMITS)
+            if scenarios_raw is not None:
+                return ("Pass either scenarios=[...] or the top-level "
+                        "params/variables/printer_state shorthand, not "
+                        "both — one invocation shape per call.\n\n"
+                        + self._SIM_LIMITS)
+            scenarios_raw = [shorthand]
         if scenarios_raw is None:
             scenarios_raw = [{}]
         if not isinstance(scenarios_raw, list) or not scenarios_raw:
@@ -3929,9 +3966,13 @@ class McpServer:
                 tag = f" [path {line.variant}]" \
                     if result.variants_rendered > 1 else ""
                 out.append(f"{ln}: {line.text}{tag}")
+        elif any(f.code == "macro_jinja_syntax" for f in result.findings):
+            out.append("  (nothing rendered — the body did NOT compile; "
+                       "see the Jinja error below)")
         else:
-            out.append("  (nothing rendered — the body aborted or was "
-                       "empty on this invocation)")
+            out.append("  (0 commands on this invocation — the body "
+                       "compiled but produced no gcode: a branch reached "
+                       "an empty arm, or it only assigns variables)")
 
         effects = McpServer._sim_effect_lines(
             [line.text for line in result.rendered])

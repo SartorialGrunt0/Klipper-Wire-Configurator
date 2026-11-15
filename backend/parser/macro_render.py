@@ -112,6 +112,7 @@ SIM_FINDING_CODES = frozenset({
     "macro_render_blocked",
     "macro_render_unexplored",
     "macro_rendered_g1_no_feedrate",
+    "macro_jinja_syntax",
 })
 
 
@@ -758,11 +759,27 @@ def _render_one(env: jinja2.Environment, src: str, params: dict[str, str],
     try:
         out = env.from_string(src).render(
             _render_context(params, variables, printer_state))
-    except jinja2.TemplateSyntaxError:
-        # Broken template: _validate_macro_jinja already reports it with
-        # the engine's own message and the right code. The simulation
-        # adds nothing here and must not crash the validation pass.
-        return [], None
+    except jinja2.TemplateSyntaxError as exc:
+        # The body does not compile under Klipper's delimiters
+        # (jinja2.Environment('{%', '%}', '{', '}'): expressions are
+        # SINGLE-brace {expr}; {{ expr }} is a syntax error). Returning
+        # [] with no finding made the tool mute — "nothing rendered,
+        # Findings: none" — and the r7/r8/r9 SIMTOOL-02 legs burned up
+        # to 12 probe calls chasing it. The static Jinja check also
+        # reports this class; a repeated finding on the tool surface is
+        # the honest trade for never being silent.
+        hint = ""
+        if "{{" in src:
+            hint = (" Klipper's template environment uses SINGLE braces "
+                    "for expressions — write {value}, not {{ value }} "
+                    "(only {% ... %} blocks take double braces).")
+        return [], RenderFinding(
+            "error", "macro_jinja_syntax",
+            f"Body does not compile as a Klipper template: {exc.message} "
+            f"(line {exc.lineno}).{hint} Nothing was rendered.",
+            source_line=exc.lineno,
+            variant=variant,
+        )
     except UndefinedError as exc:
         lineno = getattr(exc, "lineno", None) or _undefined_line(
             getattr(exc, "message", ""), src)

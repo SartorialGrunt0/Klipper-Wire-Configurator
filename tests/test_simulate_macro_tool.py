@@ -289,6 +289,89 @@ def test_expected_effect_maps_fan_generic_speed_to_percent():
     assert "fan 'Aux_Fan' commanded to 50%" in out
 
 
+# ── D4: a body that does not compile is never silent ───────────────────────
+
+_DOUBLE_BRACE = (
+    "[gcode_macro SHOW_STATE]\n"
+    "variable_fan_on: False\n"
+    "gcode:\n"
+    '  RESPOND TYPE=echo TEXT="state: {{ fan_on }}"\n'
+)
+
+
+def test_double_brace_expression_from_prose_is_a_syntax_error_not_silence():
+    """Klipper's env is jinja2.Environment('{%','%}','{','}'): expressions
+    are SINGLE braces, so '{{ fan_on }}' does not compile. The engine used
+    to swallow TemplateSyntaxError and return [] with no finding — the tool
+    printed "nothing rendered / Findings: none" and r9 SIMTOOL-02 leg b
+    burned 12 probe calls reverse-engineering it."""
+    out = _call(macro_text=_DOUBLE_BRACE)
+    assert "macro_jinja_syntax" not in out  # codes are internal
+    assert "does not compile as a Klipper template" in out
+    assert "SINGLE braces" in out
+    assert "Nothing was rendered" in out
+    # and the empty-render line must not claim the body compiled
+    assert "did NOT compile" in out
+    assert "Findings: none" not in out
+
+
+def test_broken_body_is_an_error_so_the_write_gate_refuses_it():
+    from parser.macro_render import simulate_macro  # noqa: PLC0415
+    res = simulate_macro('RESPOND TYPE=echo TEXT="state: {{ fan_on }}"')
+    assert [(f.severity, f.code) for f in res.findings] == [
+        ("error", "macro_jinja_syntax")]
+    assert res.rendered == []
+
+
+def test_single_brace_expression_renders_the_declared_value():
+    text = ("[gcode_macro SHOW_STATE]\n"
+            "variable_fan_on: False\n"
+            "gcode:\n"
+            '  RESPOND TYPE=echo TEXT="state: {fan_on}"\n')
+    out = _call(macro_text=text, variables={"fan_on": "False"})
+    assert 'state: False' in out.replace("\\n", "\n") or "state: False" in out
+    assert "does not compile" not in out
+
+
+# ── single-invocation shorthand (one nesting level less) ──────────────────
+
+_SHOUT = ("[gcode_macro SHOUT]\n"
+          "gcode:\n"
+          "  M117 hello {params.NAME}\n")
+
+
+def test_top_level_params_are_the_one_implicit_scenario():
+    out = _call(macro_text=_SHOUT, params={"NAME": "world"})
+    assert "M117 hello world" in out
+    # one call, one invocation: nothing about comparing scenarios
+    assert "Rendered (" in out
+
+
+def test_top_level_variables_are_the_one_implicit_scenario():
+    text = ("[gcode_macro TOGGLE_FAN]\n"
+            "variable_fan_on: False\n"
+            "gcode:\n"
+            "  {% if fan_on %}\n"
+            "  M107\n"
+            "  {% else %}\n"
+            "  M106 S255\n"
+            "  {% endif %}\n")
+    out = _call(macro_text=text, variables={"fan_on": "True"})
+    assert "M107" in out
+    assert "M106" not in out.split("Rendered")[1][:200]
+
+
+def test_shorthand_plus_scenarios_is_refused_with_a_reason():
+    out = _call(macro_text=_SHOUT, params={"NAME": "x"},
+                scenarios=[{"name": "s"}])
+    assert "not both" in out
+
+
+def test_shorthand_must_be_an_object():
+    out = _call(macro_text=_SHOUT, params="NAME=world")
+    assert "must be an object" in out
+
+
 # ── working state shadows disk (W3 scope ruling) ───────────────────────────
 
 def test_staged_content_shadows_the_macro_lookup():
