@@ -2069,3 +2069,71 @@ def test_chat_staged_edit_with_lost_summary_names_the_change(monkeypatch):
     assert body['pendingEdits'], 'setup: the edit must stage'
     assert 'staged 1 change to printer.cfg' in body['content']
     assert 'parameter=' not in body['content']
+
+
+def test_chat_proxy_stops_when_client_disconnects_mid_tool_loop(monkeypatch):
+    # Orphan guard (review follow-up 2026-11-14): the tool loop used to
+    # keep running after the HTTP client vanished — a timed-out harness
+    # request was observed looping 10+ simulate_macro turns for hours
+    # (turn_cap is 50 on the edit arm), holding the single-slot local
+    # router. With the disconnect check the loop must stop before the
+    # next provider call.
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(ai_routes, '_execute_tool_call',
+                        lambda call: f"result for {call['name']}")
+
+    calls = []
+
+    def fake_post(url, headers, payload):
+        calls.append(payload)
+        return DummyResponse(
+            {'choices': [{'message': {
+                'content': None,
+                'tool_calls': [{
+                    'type': 'function',
+                    'id': f'call_{len(calls)}',
+                    'function': {'name': 'search_klipper_docs',
+                                 'arguments': '{"query": "bed_mesh"}'},
+                }],
+            }}]},
+            url=url,
+        )
+
+    monkeypatch.setattr(
+        httpx, 'AsyncClient',
+        lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
+
+    class GoneRequest:
+        async def is_disconnected(self):
+            return True
+
+    req = ai_routes.ChatRequest(
+        messages=[{'role': 'user', 'content': 'hi'}],
+        apiKey='openai-token',
+        model='gpt-4o',
+        apiUrl='https://api.openai.com/v1/chat/completions',
+        apiProvider='chatgpt',
+    )
+    asyncio.run(ai_routes.chat_proxy(req, GoneRequest()))
+
+    # The initial query runs, the tool executes once, then the guard sees
+    # the client is gone and breaks — exactly one provider call, not 50.
+    assert len(calls) == 1, f"loop kept querying a disconnected client: {len(calls)} calls"
+
+
+def test_client_disconnected_helper_never_raises():
+    class Boom:
+        async def is_disconnected(self):
+            raise RuntimeError('transport gone')
+
+    class Yes:
+        async def is_disconnected(self):
+            return True
+
+    class No:
+        async def is_disconnected(self):
+            return False
+
+    assert asyncio.run(ai_routes._client_disconnected(Boom())) is False
+    assert asyncio.run(ai_routes._client_disconnected(Yes())) is True
+    assert asyncio.run(ai_routes._client_disconnected(No())) is False

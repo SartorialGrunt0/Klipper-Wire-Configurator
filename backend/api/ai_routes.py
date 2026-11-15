@@ -11,7 +11,7 @@ import re
 from urllib.parse import urlparse, urlunparse
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from api.printer_memory_routes import (  # noqa: E402
@@ -3684,8 +3684,25 @@ def _mirror_user_config_files() -> dict[str, dict]:
 
 
 
+async def _client_disconnected(request: Request) -> bool:
+    """True when the HTTP client has gone away mid-request.
+
+    The tool loop is expensive (a slow provider can spend minutes per
+    turn) and nothing else cancels it: without this check an abandoned
+    request keeps looping up to ``turn_cap`` (50 on the edit arm),
+    holding the single-slot local router for hours after the harness or
+    the browser gave up (observed: SIMTOOL-02 r5/r5b, 2026-11-14).
+    Detection must never be the thing that kills a request — any error
+    from the transport layer means 'keep going'.
+    """
+    try:
+        return bool(await request.is_disconnected())
+    except Exception:  # noqa: BLE001 — detection is advisory only
+        return False
+
+
 @router.post("/ai/chat")
-async def chat_proxy(req: ChatRequest):
+async def chat_proxy(req: ChatRequest, request: Request):
     """Proxy chat messages to the user's configured API provider."""
     # ── Tool-mediated config editing session ──
     # Request-scoped: seeded from the user-config mirror as a FLOOR with
@@ -3948,6 +3965,16 @@ async def chat_proxy(req: ChatRequest):
                     break
                 if stop_event is not None and stop_event.is_set():
                     raise ChatStoppedError()
+                # Orphan guard: if the client is gone, further turns are
+                # pure waste — stop before another (possibly multi-minute)
+                # provider call. See _client_disconnected.
+                if await _client_disconnected(request):
+                    logger.warning(
+                        "Client disconnected mid tool-loop | stopping | "
+                        "turns=%d executed_calls=%d requestId=%s",
+                        tool_turns, len(executed_tool_calls),
+                        req.requestId or 'none')
+                    break
                 # Invisible runaway ceiling (2026-10-16): an absolute
                 # executed-call cap per request. NOT announced to the
                 # model and NOT part of the thrash directive — reaching
@@ -4564,6 +4591,15 @@ async def chat_proxy(req: ChatRequest):
             while not final_content and empty_reprompts < EMPTY_REPROMPT_LIMIT:
                 if stop_event is not None and stop_event.is_set():
                     raise ChatStoppedError()
+                # Same orphan guard as the tool loop: a disconnected
+                # client must not fund re-prompts either (probe: 12 more
+                # provider calls after the tool loop stopped).
+                if await _client_disconnected(request):
+                    logger.warning(
+                        "Client disconnected during empty-reprompt | "
+                        "stopping | reprompts=%d requestId=%s",
+                        empty_reprompts, req.requestId or 'none')
+                    break
                 empty_reprompts += 1
                 # THRASH charge: the empty round-trip was really spent.
                 # Deliberately NOT refunded when the re-prompt turns out
