@@ -52,19 +52,21 @@ Practically:
 
 ## 3. Coverage today
 
-Registry: **192 commands**, 128 documented, **0 documented-but-unregistered**
-(after this review's fixes). Parameter metadata exists for 189 params on
-documented commands (152 typed, 70 required).
+Registry: **192 commands**; **123 documented** commands (`G-Codes.md` `####`
+headers; every one registered, **0 documented-but-unregistered**). Parameter
+metadata: **233 entries artifact-wide, 199 on documented commands** (166 typed,
+66 required). The earlier pass's "128 documented / 189 param entries" used a
+looser header match that also picked prose words out of backticks.
 
 **Mux targets** (commands that resolve a key against the config's objects):
-41 documented mux commands. **16 are target-resolved** (v1):
+**37 documented** mux commands, **12 target-resolved** (v1):
 `SET_FAN_SPEED, SET_LED, SET_LED_TEMPLATE, SET_PIN, SET_SERVO,
 SET_HEATER_TEMPERATURE, SET_TEMPERATURE_FAN_TARGET, TEMPERATURE_PROBE_CALIBRATE,
-TEMPERATURE_PROBE_ENABLE, QUERY_BUTTON, UPDATE_DELAYED_GCODE, LOAD_CELL_*,
-SET_FILAMENT_SENSOR, QUERY_FILAMENT_SENSOR, SET_DIGIPOT`.
+UPDATE_DELAYED_GCODE, SET_FILAMENT_SENSOR, QUERY_FILAMENT_SENSOR, SET_DIGIPOT`.
 **25 deferred**, grouped by what blocks them:
-- `STEPPER` (8): `MANUAL_STEPPER` → `[manual_stepper X]`, `FORCE_MOVE` →
-  `stepper_x/z1/extruder`, `DUMP_TMC` → the tmc section — three object spaces.
+- `STEPPER` (8): `DUMP_TMC, FORCE_MOVE, INIT_TMC, MANUAL_STEPPER,
+  SET_STEPPER_ENABLE, SET_TMC_CURRENT, SET_TMC_FIELD, STEPPER_BUZZ` — three
+  object spaces (`[manual_stepper X]`, `stepper_x/z1/extruder`, the tmc section).
 - `CHIP` (10): adxl345 / angle / ldc1612 / probe_eddy_current.
 - `EXTRUDER` (4): `kinematics/extruder.py` registers a `None` key for a single
   extruder and enumerates `extruder1+` otherwise.
@@ -98,46 +100,61 @@ Both are pinned by tests in `tests/test_gcode_registry_extract.py`. After the
 fixes the display line produces the *true* warning instead: "needs a
 `[display]` section".
 
-## 5. Remaining gaps, prioritized
+## 5. Gaps, prioritized
 
-### P0 — false ERROR on the human save gate: `{rawparams}` splat
+### P0 — DONE (`be7e894`): `{rawparams}` was treated as absent, not undecided
 
 Klipper's own samples (`reference/config/Probe/sample-bigtreetech-eddy*.cfg`)
 and the user's `mainsail.cfg` / `Knomi.cfg` pass parameters through with
-`{rawparams}`. When no invocation is declared the splat renders as the UNKNOWN
-sentinel, and a required-param check then concludes "missing":
+`{rawparams}`. Two independent defects produced the same false ERROR:
 
-```
-Rendered command 'PROBE_EDDY_CURRENT_CALIBRATE' is missing required parameter CHIP
-```
+1. **No invocation.** The undeclared splat rendered as `''`, and the
+   required-param check then concluded "missing": `Rendered command
+   'PROBE_EDDY_CURRENT_CALIBRATE' is missing required parameter CHIP` — 6
+   save-gate errors across the corpus, on configs Klipper accepts. This is the
+   same epistemic error 3.1 forbids for `{params.X}`: an unknown *arity* means
+   param-dependent, not absent. The splat line now downgrades to the existing
+   `macro_param_undefined` info, and suppresses only findings that claim a
+   param is **absent** — a literal defect sharing the line (`RESPOND
+   {rawparams} TYPE=info`) still reports.
+2. **With an invocation**, `rawparams` was hardcoded to `''`, so a forwarding
+   macro always rendered as a bare call and reported the same error *even when
+   the caller passed the parameter*. It is now reconstructed from the declared
+   invocation (`NAME=value`, values with spaces quoted for the shlex
+   tokenizer). Declared `params_*` defaults are excluded — Klipper's
+   `rawparams` carries only what the caller typed. A body that assigns
+   `rawparams` itself has decided it, so those keep full checking.
 
-6 such errors across the corpus (2 distinct files, 3 copies). It is the same
-epistemic mistake the 3.1 invocation model already forbids for named params: an
-unknown splat means the params are *undecidable*, not absent. Fix: when the
-rendered line carries an unknown marker in param position, downgrade
-"missing required" to param-dependent **info**. Risk: low — it only affects
-lines that already contain `<unknown>`.
+### P1 — DONE (`2139dad`, `67b2cee`): parameter metadata gaps
 
-### P1 — parameter metadata gaps (23 documented commands)
+The earlier diagnosis here was **wrong**: it blamed handlers that read params
+"indirectly" and pointed at a `MANUAL_EXTRAS` seam that does not exist (the
+seam is `EXTRA_MANUAL`, and it holds only `FORCE_MOVE` /
+`SET_KINEMATIC_POSITION`). The real causes were two extraction shapes:
 
-The registry has no params for commands whose handler reads them indirectly or
-builds names dynamically, so *every* param check is blind to them. Real cases:
+1. **Loop-registered handlers** (`2139dad`). `gcode_move.py` registers its
+   whole handler table as `func = getattr(self, 'cmd_' + cmd);
+   register_command(cmd, func)`. The registered argument is a *local*, so the
+   visitor recorded `handler=None` and every name in the loop lost its params:
+   `M220`, `M221`, `SET_GCODE_OFFSET`, `M26`, `SAVE_GCODE_STATE`,
+   `RESTORE_GCODE_STATE`. The `cmd_<NAME>` convention makes the handler
+   derivable, and a loop that passes a *fixed* callable (gcode.py's builtin
+   dispatch) still records none — pinned by a negative-control fixture.
+2. **Names built from a literal loop** (`67b2cee`). `gcmd.get_float(axis)` over
+   `enumerate('XYZE')`, `axis + '_ADJUST'`, and G92's comprehension
+   `[gcmd.get_float(a, None) for a in 'XYZE']`. The extractor now resolves
+   literal iterables and expands the bound variable, **for numeric getters
+   only** — `gcmd.get(axis)` is a presence read (`G28 X Y` is canonical and
+   carries no value) and `SET_SKEW`'s planes are comma-list strings, so typing
+   either would fabricate "renders EMPTY" on working configs. Per-axis params
+   are always individually optional.
 
-- `SET_GCODE_OFFSET` (`X/Y/Z/X_ADJUST/…/MOVE/MOVE_SPEED`) — `MOVE` is an int
-  with bounds 0–2, the rest floats.
-- `SAVE_GCODE_STATE` / `RESTORE_GCODE_STATE` (`NAME`, `MOVE`, `MOVE_SPEED`).
-- `SET_LED_TEMPLATE TEMPLATE=` — read inside led.py's template helper.
-- `PROBE` / `PROBE_ACCURACY` / `PROBE_CALIBRATE` / `MANUAL_PROBE` /
-  `Z_ENDSTOP_CALIBRATE` (param-helper indirection).
-- `BED_MESH_PROFILE` (`LOAD/SAVE/REMOVE/NAME`) — profile *existence* is stateful,
-  so only the shape is checkable.
-- `SET_INPUT_SHAPER`, `SHAPER_CALIBRATE`, `TEST_RESONANCES` — names built per
-  axis (`'SHAPER_FREQ_' + axis`) and from a chip list.
-
-Fix direction: teach the extractor two patterns (per-axis name concatenation and
-the `param_helper` object), and add a manual-override table for the rest —
-the generator already has a `MANUAL_EXTRAS` seam. Risk: moderate (generator
-change), value: high — it unblocks bounds/enum checks for the most-used commands.
+**What remains in this class** (verified, not estimated): `BED_MESH_PROFILE`
+is the only documented command that still has no params at all; its `key` read
+is a profile **name**, and existence is runtime state (§6), so only shape is
+checkable and the `LOAD/SAVE/REMOVE` keys already cover it. The rest are names
+resolved against config (`STEPPER=`, `CHIP=`, `STATE=`) — mux work (P4) or
+stateful existence, not typing work.
 
 ### P2 — either-of / at-least-one rules
 
@@ -171,10 +188,19 @@ but `SET_TMC_CURRENT STEPPER=` typos are a real class on TMC-heavy configs.
 ## 7. Numbers used above (reproducible)
 
 - Corpus sweep: 871 `.cfg` files, 827 macro bodies, per-directory project
-  sections. After this review: 0 enum errors, 3 mux warnings — all three the
+  sections. **Before P0/P1:** 0 enum errors, 3 mux warnings — all three the
   same genuine defect (`Hotkey.cfg` M301 does `SET_PIN PIN=beeper` with no
-  `[output_pin beeper]` in that project) — and 6 `{rawparams}` false errors
-  (P0).
+  `[output_pin beeper]` in that project) — and **6 `{rawparams}` false
+  errors**. **After:** 0 errors.
+- Ablation, run after each fix (repo + `~/printer_data/config`): every code
+  count is identical to the pre-fix baseline except the class being fixed —
+  `macro_unknown_value` 206, warning `macro_param_undefined` 9,
+  `macro_render_blocked` 42, `macro_render_unexplored` 7,
+  `macro_rendered_g1_no_feedrate` 6. `macro_param_undefined` infos 98 → 118:
+  the new splat notes on the 10 forwarding macros (+ their
+  `frontend/public/reference` copies). Both registry changes left the corpus
+  output **byte-identical** — new metadata with no new findings, i.e. no
+  false positives introduced.
 - Simulator tests: `tests/test_simulate_macro_tool.py`,
   `tests/test_macro_render*.py`; registry: `tests/test_gcode_registry_extract.py`,
   `tests/test_gcode_registry_service.py`.
