@@ -341,14 +341,16 @@ def test_expected_effect_lists_pure_blocking_waits():
             "gcode:\n"
             "  TEMPERATURE_WAIT SENSOR=extruder MINIMUM=219 MAXIMUM=221\n"
             "  G4 P500\n"
-            "  G4 P1=2\n"
+            "  G4 P2500\n"
             "  M400\n")
     out = _call(macro_text=text)
     assert ("Wait (blocking) — sensor 'extruder' reaches MINIMUM=219, "
             "MAXIMUM=221") in out
     assert "dwell 500 ms" in out
-    assert "dwell 2 s" in out
+    assert "dwell 2500 ms" in out
     assert "all queued moves complete" in out
+    # ('G4 P1=2' style is NOT a legal wait — live-proven on .164:
+    # G4 P1=0.01 -> "unable to parse 1=0.01". Covered in the reject test.)
 
 
 # ── D4: a body that does not compile is never silent ───────────────────────
@@ -598,3 +600,36 @@ def test_facade_and_default_sim_are_independent_surfaces():
     simulate_macro does the declared ones; both read the same engine."""
     out = _call(macro_text=_TOGGLE)  # no scenarios -> default invocation
     assert "scenario-1" in out  # one default scenario, labeled
+
+
+def test_expected_effect_rejects_equals_on_letter_commands():
+    """'M109 S={temp}' renders 'M109 S=220' — a shape real Klipper
+    refuses on every call (letter params never carry '='; live-proven
+    on .164). The effect line must NOT print a happy Set-and-Wait for a
+    line that never runs, and the finding must name the fix."""
+    text = ("[gcode_macro HEAT_EQ]\n"
+            "gcode:\n"
+            "  {% set temp = params.T|default(220)|int %}\n"
+            "  M109 S={temp}\n")
+    out = _call(macro_text=text)
+    assert "WILL BE REJECTED on the real printer" in out
+    assert "write S220 not S=220" in out
+    assert "Set and Wait (the macro BLOCKS" not in out
+    assert "macro" not in out or "does not parse as float" in out \
+        or "unable to parse" in out
+    # the canonical spelling keeps the clean Set-and-Wait line
+    ok = _call(macro_text=text.replace("S={temp}", "S{temp}"))
+    assert "Set and Wait (the macro BLOCKS" in ok
+    assert "WILL BE REJECTED" not in ok
+
+
+def test_expected_effect_rejects_p1_equals_dwell():
+    """'G4 P1=2' is the mid-value '=' shape: Klipper reads it as
+    P='1=2' and raises 'unable to parse 1=2' (live-proven on .164).
+    No dwell effect may be reported for it."""
+    out = _call(macro_text=("[gcode_macro DWELL_EQ]\n"
+                           "gcode:\n"
+                           "  G4 P1=2\n"))
+    assert "WILL BE REJECTED on the real printer" in out
+    assert "unable to parse 1=2" in out
+    assert "dwell" not in out.split("WILL BE REJECTED")[0].split("## scenario-1")[-1]

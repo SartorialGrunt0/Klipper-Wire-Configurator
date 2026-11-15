@@ -730,7 +730,16 @@ def test_loop_registered_command_params_are_consumed():
     assert [(f.severity, f.code) for f in bad_speed.findings] == [
         ("error", "macro_param_unparseable")], [f.message for f in bad_speed.findings]
 
-    assert not simulate_macro("M220 S=100").findings
+    # 'M220 S=100' genuinely FAILS on a printer — M220 is a traditional
+    # letter command, Klipper's tokenizer keeps the '=' in the value and
+    # get_float('S') raises 'unable to parse =100' (live-proven 2026-11-15
+    # on the .164 host: M104 S=0 -> Error, M104 S0 -> ok). This line used
+    # to pin the sim's wrong '='-tolerance for letter commands.
+    eq_speed = simulate_macro("M220 S=100")
+    assert any(f.code == "macro_param_unparseable" and "=100" in f.message
+               for f in eq_speed.findings), [f.message
+                                             for f in eq_speed.findings]
+    assert not simulate_macro("M220 S100").findings
 
     bad_move = simulate_macro("SET_GCODE_OFFSET Z=0.1 MOVE=half")
     assert ("error", "macro_param_unparseable") in [
@@ -755,3 +764,47 @@ def test_loop_registered_command_params_are_consumed():
     # G28's axes are a PRESENCE read — `G28 X Y` is canonical and must
     # never be typed (that would fabricate 'renders EMPTY').
     assert not simulate_macro("G28 X Y").findings
+
+
+# ── letter commands take NO '=' in params (live-proven parity) ────────────
+
+def test_letter_commands_reject_equals_params():
+    """Klipper's args_r tokenizer (gcode.py:201/210-218) never consumes
+    '=' for traditional letter+number commands: 'S=220' is the VALUE
+    '=220' and the handler's float() raises "unable to parse =220".
+    Live-proven 2026-11-15 on the .164 printer: `M104 S=0` -> Error on
+    'M104 S=0': unable to parse =0, while `M104 S0` -> ok. The sim used
+    to accept the KEY=value shape for letter commands — the exact shape
+    a dogfooded model wrote (M109 S={temp})."""
+    for line in ("M104 S=220", "M109 S=220", "M190 S=60", "M106 S=255"):
+        errs = [f for f in simulate_macro(line).findings
+                if f.code == "macro_param_unparseable"]
+        assert errs, line
+        assert "write S" in errs[0].message, errs[0].message
+    # The canonical letter spellings stay silent — the fix did not
+    # blind the checker.
+    for line in ("M104 S220", "M109 S220", "M190 S60", "M106 S255"):
+        assert not simulate_macro(line).findings, line
+
+
+def test_letter_equals_midvalue_shape_is_rejected():
+    """'G4 P1=2' — the '=' inside the value: naive parse gives P='1=2',
+    float fails, real printer raises 'unable to parse 1=2' (live-proven
+    .164). The hint must name the letter grammar, not a bogus P12 fix."""
+    errs = [f for f in simulate_macro("G4 P1=2").findings
+            if f.code == "macro_param_unparseable"]
+    assert errs and "no 'KEY=value' grammar" in errs[0].message, \
+        [f.message for f in errs]
+    assert not simulate_macro("G4 P2500").findings
+
+
+def test_extended_commands_keep_equals_grammar():
+    """The mirror direction: 'KEY=value' is the ONLY grammar extended
+    commands have (register_command wraps them with
+    _get_extended_params, gcode.py:151) — letter-command strictness must
+    not leak into them."""
+    assert not simulate_macro(
+        "TEMPERATURE_WAIT SENSOR=extruder MINIMUM=219 MAXIMUM=221"
+    ).findings
+    assert not simulate_macro(
+        "SET_LED LED=strip RED=1 GREEN=0 BLUE=0").findings

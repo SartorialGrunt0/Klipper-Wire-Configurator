@@ -4252,11 +4252,22 @@ class McpServer:
             if not text:
                 continue
             token = text.split()[0].upper()
+            from parser.macro_render import _is_traditional_gcode
+            traditional = _is_traditional_gcode(token)
             params: dict[str, str] = {}
             try:
                 lexer = shlex.shlex(text[len(token):], posix=True)
                 lexer.whitespace_split = True
                 for arg in lexer:
+                    if traditional:
+                        # Klipper's letter-param grammar never consumes
+                        # '=' (gcode.py args_r split) — 'S=220' is value
+                        # '=220' and the real printer raises "unable to
+                        # parse =220" (live-proven .164). Mirror that:
+                        # '=' stays IN the value.
+                        if len(arg) > 1 and arg[0].isalpha():
+                            params[arg[0].upper()] = arg[1:]
+                        continue
                     key, sep, val = arg.partition("=")
                     if sep:
                         params[key.upper()] = val
@@ -4265,6 +4276,22 @@ class McpServer:
                         params[key[0].upper()] = key[1:]
             except ValueError:
                 continue
+            if traditional:
+                bad = next(((k, v) for k, v in params.items()
+                            if "=" in v), None)
+                if bad is not None:
+                    k, v = bad
+                    fix = (f" — write {k}{v[1:]} not {k}={v[1:]}"
+                           if v.startswith("=") else
+                           " — there is no 'KEY=value' grammar here; "
+                           "spell the plain letter form (G4 P<ms>, "
+                           "M109 S<temp>)")
+                    out.append(
+                        f"{token} WILL BE REJECTED on the real printer — "
+                        f"letter-style commands take no '=' in "
+                        f"parameters (Klipper raises 'unable to parse "
+                        f"{v}'){fix} — no effect happens")
+                    continue
             if token == "M106":
                 out.append("part-cooling fan ([fan]) commanded to "
                            + as_pct_of_255(params.get("S", "255")))

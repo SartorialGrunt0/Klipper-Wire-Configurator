@@ -983,13 +983,16 @@ def _check_rendered_line(text: str, registry: dict, variant: int,
     present: dict[str, str] = {}
     malformed = False
     if _is_traditional_gcode(token):
+        # Letter params only (gcode.py:201/210-218 args_r split): the
+        # tokenizer never consumes '=', so 'S=220' is value '=220' and
+        # the handler's float() raises "unable to parse =220" — proven
+        # LIVE on the .164 printer: `M104 S=0` -> Error on 'M104 S=0':
+        # unable to parse =0, while `M104 S0` -> ok. The '=' must stay
+        # IN the value here so the type checks below fail it exactly
+        # like Klipper does. (The extended branch is the only place
+        # 'KEY=value' grammar exists.)
         for tok in text.split()[1:]:
-            if "=" in tok:
-                key, _, value = tok.partition("=")
-                if key:
-                    present[key.upper()] = value
-            else:
-                present[tok[0].upper()] = tok[1:]
+            present[tok[0].upper()] = tok[1:]
     else:
         lexer = shlex.shlex(text[len(token):], posix=True)
         lexer.whitespace_split = True
@@ -1060,10 +1063,23 @@ def _check_rendered_line(text: str, registry: dict, variant: int,
             elif ptype == "int":
                 number = int(value)
         except ValueError:
+            _hint = ""
+            if value.startswith("="):
+                _hint = (f" — letter-style commands like {token} take "
+                         f"no '=' after the parameter letter: write "
+                         f"{pname}{value[1:]} not {pname}={value[1:]} "
+                         "(Klipper's own error: 'unable to parse "
+                         f"{value}').")
+            elif "=" in value:
+                _hint = (f" — letter-style commands like {token} have no "
+                         f"'KEY=value' grammar at all: Klipper read "
+                         f"{pname} as '{value}' (the '=' is part of the "
+                         "value). Spell it as a plain letter parameter "
+                         "(e.g. G4 uses P<milliseconds>).")
             findings.append(RenderFinding(
                 "error", "macro_param_unparseable",
                 f"Parameter {pname}={value!r} does not parse as "
-                f"{ptype} that {token} expects.", variant=variant))
+                f"{ptype} that {token} expects.{_hint}", variant=variant))
         if number is not None:
             findings.extend(_bound_findings(token, pname, value, number, pdef,
                                             variant, source_line))
