@@ -78,6 +78,7 @@ shows whether the invocation is legal.
 from __future__ import annotations
 
 import ast
+import json
 import logging
 import re
 import shlex
@@ -883,8 +884,17 @@ def _check_rendered_line(text: str, registry: dict, variant: int,
         return []
     token = parts[0].upper()
 
-    if token == "SET_GCODE_VARIABLE":
-        return []  # every param is str; tracked by the caller
+    # SET_GCODE_VARIABLE is shape-checked like any command: Klipper
+    # dispatches it as a MUX command on MACRO (gcode_macro.py:148 →
+    # gcode.py _cmd_mux → gcmd.get(key) with no default), so a line
+    # spelling ACTION=/MACRO-less dies with "Error on '...': missing
+    # MACRO" before the body runs. The registry entry already carries
+    # MACRO/VARIABLE/VALUE required + mux_key, so the generic checks
+    # below handle presence; this block adds Klipper's literal rule for
+    # VALUE (gcode_macro.py:180-185: ast.literal_eval + json.dumps).
+    # (It used to return [] wholesale — "every param is str; tracked by
+    # the caller" — which let `SET_GCODE_VARIABLE ACTION=TOGGLE_FAN ...`
+    # pass both the sim and the write gate on every branch.)
 
     if _G1_RE.match(text):
         # Traditional motion commands have no registry entry; the
@@ -998,6 +1008,24 @@ def _check_rendered_line(text: str, registry: dict, variant: int,
                 "error", "macro_param_unparseable",
                 f"Parameter {pname}={value!r} does not parse as "
                 f"{ptype} that {token} expects.", variant=variant))
+
+    if token == "SET_GCODE_VARIABLE":
+        # Klipper stores VALUE through ast.literal_eval + json.dumps
+        # (gcode_macro.py:180-185), so an unquoted string (`VALUE=on`)
+        # or a bare `VALUE=` is refused at run time. Registry type str
+        # alone cannot express that; check it here. Rendered <unknown>
+        # was already downgraded to info above.
+        stored = present.get("VALUE")
+        if stored is not None and not _looks_unknown(stored):
+            try:
+                json.dumps(ast.literal_eval(stored), separators=(",", ":"))
+            except (SyntaxError, ValueError, TypeError):
+                findings.append(RenderFinding(
+                    "error", "macro_param_unparseable",
+                    f"SET_GCODE_VARIABLE VALUE={stored!r} is not a Python "
+                    "literal — Klipper parses VALUE with literal_eval and "
+                    "fails the call at run time (quote strings: "
+                    "VALUE='on').", variant=variant))
     return findings
 
 

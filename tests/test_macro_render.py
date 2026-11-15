@@ -65,9 +65,51 @@ def test_led_repro_empty_typed_params_is_error():
 
 
 def test_empty_string_param_not_typed_error():
-    # VALUE on SET_GCODE_VARIABLE is str-typed: empty is legal there.
+    # MOTION_QUEUE on SYNC_EXTRUDER_MOTION is str-typed and Klipper's own
+    # documented way to detach (extruder.py: empty -> sync to None), so a
+    # required STRING param rendering '' must stay clean. (VALUE on
+    # SET_GCODE_VARIABLE is the exception — Klipper literal_evals it,
+    # see test_set_gcode_variable_empty_value_is_error.)
+    body = "SYNC_EXTRUDER_MOTION EXTRUDER=e0 MOTION_QUEUE={params.queue}"
+    result = simulate_macro(body, {"queue": ""})
+    assert _codes(result) == [], [f.message for f in result.findings]
+
+
+def test_set_gcode_variable_empty_value_is_error():
+    # gcode_macro.py cmd_SET_GCODE_VARIABLE stores VALUE through
+    # ast.literal_eval + json.dumps, so '' raises "Unable to parse" at
+    # run time. Registry type str alone cannot express that.
     body = "SET_GCODE_VARIABLE MACRO=FOO VARIABLE=v VALUE={params.val}"
     result = simulate_macro(body, {"val": ""})
+    assert _codes(result) == ["macro_param_unparseable"], \
+        [f.message for f in result.findings]
+    assert _findings(result, "macro_param_unparseable")[0].severity == "error"
+
+
+def test_set_gcode_variable_unquoted_string_value_is_error():
+    # VALUE=on is not a Python literal; Klipper refuses the call.
+    result = simulate_macro(
+        "SET_GCODE_VARIABLE MACRO=FOO VARIABLE=v VALUE={params.val}",
+        {"val": "on"})
+    assert "macro_param_unparseable" in _codes(result)
+
+
+def test_set_gcode_variable_missing_macro_key_is_error():
+    """The r8 SIMTOOL-02 leg-c artifact: Klipper dispatches
+    SET_GCODE_VARIABLE as a mux command on MACRO, so ACTION= leaves the
+    mux key missing -> 'missing MACRO' before the body runs. This line
+    used to return no findings at all (blanket skip)."""
+    result = simulate_macro(
+        "SET_GCODE_VARIABLE ACTION=TOGGLE_FAN VARIABLE=fan_on VALUE=True")
+    codes = _codes(result)
+    assert "macro_param_renders_empty" in codes, [f.message for f in result.findings]
+    msg = " ".join(f.message for f in result.findings)
+    assert "MACRO" in msg
+
+
+def test_set_gcode_variable_literal_value_and_keys_is_clean():
+    result = simulate_macro(
+        "SET_GCODE_VARIABLE MACRO=TOGGLE_FAN VARIABLE=fan_on VALUE=True")
     assert _codes(result) == [], [f.message for f in result.findings]
 
 
