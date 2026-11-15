@@ -282,3 +282,78 @@ def test_mixed_line_reaches_the_human_save_gate():
     errs = [e for e in (human.get("errors") or [])
             if e.get("code") == "macro_param_renders_empty"]
     assert errs and "RED" in errs[0]["message"], human
+
+
+# ── {rawparams}: unknown ARITY is param-dependency, not absence ────────────
+# Klipper's own eddy samples pass parameters through with `{rawparams}`.
+# Without an invocation the splat is undecidable exactly like an undeclared
+# `{params.X}` read: absence from the template is not absence at run time.
+# Treating the empty render as a bare call fabricated a save-gate ERROR
+# ("missing required parameter CHIP") on Klipper's shipped sample configs.
+
+def test_rawparams_splat_does_not_fabricate_missing_required():
+    result = simulate_macro("PROBE_EDDY_CURRENT_CALIBRATE {rawparams}")
+    assert ("error", "macro_param_renders_empty") not in _codes(result), \
+        [f.message for f in result.findings]
+    infos = [f for f in result.findings
+             if f.severity == "info" and f.code == "macro_param_undefined"]
+    assert len(infos) == 1 and "rawparams" in infos[0].message, \
+        [f.message for f in result.findings]
+
+
+def test_rawparams_splat_with_invocation_is_fully_verified():
+    # A declared invocation decides the splat — the check must come back.
+    ok = simulate_macro("PROBE_EDDY_CURRENT_CALIBRATE {rawparams}",
+                        {"CHIP": "btt_eddy"})
+    assert _texts(ok) == ["PROBE_EDDY_CURRENT_CALIBRATE CHIP=btt_eddy"]
+    assert ("error", "macro_param_renders_empty") not in _codes(ok)
+
+    # A genuinely BARE call (explicit {}) really does fail in Klipper.
+    bare = simulate_macro("PROBE_EDDY_CURRENT_CALIBRATE {rawparams}", {})
+    assert ("error", "macro_param_renders_empty") in _codes(bare), \
+        [f.message for f in bare.findings]
+
+
+def test_locally_assigned_rawparams_is_not_treated_as_unknown():
+    # `{% set rawparams = ... %}` shadows the caller's splat: the render is
+    # decided, so the required-param verdict stands (and here it passes).
+    body = ('    {% set rawparams = "CHIP=btt_eddy" %}\n'
+            '    PROBE_EDDY_CURRENT_CALIBRATE {rawparams}\n')
+    result = simulate_macro(body)
+    assert _texts(result) == ["PROBE_EDDY_CURRENT_CALIBRATE CHIP=btt_eddy"], \
+        _texts(result)
+    assert ("error", "macro_param_renders_empty") not in _codes(result), \
+        [f.message for f in result.findings]
+
+
+def test_literal_defect_on_a_splat_line_still_reports():
+    # Suppression is per FINDING: a literal illegal value sharing the line
+    # with the splat is still decidable and must not be swallowed.
+    result = simulate_macro("RESPOND {rawparams} TYPE=info")
+    assert ("error", "macro_param_enum_invalid") in _codes(result), \
+        [f.message for f in result.findings]
+
+
+def test_rawparams_value_with_spaces_does_not_fabricate_a_malformed_line():
+    # A quoted invocation value must round-trip through the splat: an
+    # unquoted `MSG=hello world` would split and read as a bare argument.
+    result = simulate_macro("RESPOND {rawparams}",
+                            {"MSG": "hello world"})
+    assert _texts(result) == ['RESPOND MSG="hello world"'], _texts(result)
+    assert ("error", "macro_param_unparseable") not in _codes(result), \
+        [f.message for f in result.findings]
+
+
+def test_rawparams_false_error_is_gone_from_the_shipped_eddy_sample():
+    # End-to-end on Klipper's own config: the human save gate must stay quiet.
+    sample = (Path(__file__).resolve().parents[1] / "reference" / "config"
+              / "Probe" / "sample-bigtreetech-eddy.cfg")
+    if not sample.exists():
+        import pytest
+        pytest.skip("Klipper reference checkout not present")
+    res = validate_config(parse_config(sample.read_text()))
+    human = res.human_to_dict()
+    errs = [e for e in (human.get("errors") or [])
+            if "missing required parameter CHIP" in str(e.get("message"))]
+    assert not errs, errs
+

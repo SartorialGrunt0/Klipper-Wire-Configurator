@@ -572,7 +572,8 @@ def _noop_action(*args, **kwargs):
 
 def _render_context(params: dict[str, str],
                     variables: dict[str, str] | None = None,
-                    printer_state: dict | None = None) -> dict:
+                    printer_state: dict | None = None,
+                    rawparams: str = "") -> dict:
     # Klipper's cmd(): kwparams = dict(self.variables), then
     # create_template_context() update, then params/rawparams from the
     # command line (klippy/extras/gcode_macro.py). Variables are
@@ -599,7 +600,15 @@ def _render_context(params: dict[str, str],
         # params.S / params.VELOCITY; a lowercase template reference MISSES
         # in real Klipper too — exactness, not tolerance.
         "params": {k.upper(): v for k, v in params.items()},
-        "rawparams": "",
+        # rawparams is the caller's UNPARSED parameter text (gcode.py keeps
+        # the remainder of the line for the template context). A declared
+        # invocation's params ARE that text in NAME=value form, so a
+        # forwarding macro (`G28 {rawparams}`) renders as the call it
+        # really makes instead of as a bare one. Declared params_* defaults
+        # are deliberately NOT in here: Klipper's rawparams carries only
+        # what the caller typed. With no invocation the string stays empty
+        # and the caller treats the splat as undecided (never as absent).
+        "rawparams": rawparams,
     })
     return ctx
 
@@ -718,6 +727,14 @@ _FINDING_PARAM_RE = re.compile(
     r"|Parameter (\w+)=.*does not parse"
     r"|missing required parameter (\w+))")
 
+# A caller-parameter SPLAT in a template — `{rawparams}`. Klipper expressions
+# are single-brace, so this also skips `{% if rawparams %}` (no match) while
+# catching `{ rawparams }` and `{rawparams.split()}`.
+_RAWPARAMS_SPLAT_RE = re.compile(r"\{\s*rawparams\b")
+# A body that ASSIGNS rawparams has decided it locally: the caller's splat is
+# shadowed, so the rendered text is the truth and checks must keep running.
+_RAWPARAMS_ASSIGN_RE = re.compile(r"\{%-?\s*set\s+rawparams\b")
+
 
 def _expr_depends_on_missing(expr: str, alias_map: dict[str, str],
                              param_dependent: frozenset[str]) -> bool:
@@ -735,7 +752,8 @@ def _expr_depends_on_missing(expr: str, alias_map: dict[str, str],
 
 def _finding_is_param_dependent(finding: RenderFinding, src_line: str,
                                 alias_map: dict[str, str],
-                                param_dependent: frozenset[str]) -> bool:
+                                param_dependent: frozenset[str],
+                                splat_unknown: bool = False) -> bool:
     """Attribute ONE finding to the param-dependent read that produced it.
 
     Round-2 review D1: suppressing the whole LINE dropped statically
@@ -757,6 +775,12 @@ def _finding_is_param_dependent(finding: RenderFinding, src_line: str,
         if "{" in val:
             return _expr_depends_on_missing(val, alias_map, param_dependent)
         return False
+    if splat_unknown:
+        # The line forwards the caller's parameters wholesale. A param that
+        # is absent from the TEMPLATE TEXT may still arrive through the
+        # splat, so "missing" is undecidable — not observed. Same law as an
+        # undeclared `{params.X}` read (3.1): no invocation, no verdict.
+        return True
     return _expr_depends_on_missing(src_line, alias_map, param_dependent)
 
 
@@ -764,11 +788,12 @@ def _render_one(env: jinja2.Environment, src: str, params: dict[str, str],
                 variant: int,
                 variables: dict[str, str] | None = None,
                 printer_state: dict | None = None,
-                param_dependent: frozenset[str] = frozenset()
+                param_dependent: frozenset[str] = frozenset(),
+                rawparams: str = ""
                 ) -> tuple[list[str], RenderFinding | None]:
     try:
         out = env.from_string(src).render(
-            _render_context(params, variables, printer_state))
+            _render_context(params, variables, printer_state, rawparams))
     except jinja2.TemplateSyntaxError as exc:
         # The body does not compile under Klipper's delimiters
         # (jinja2.Environment('{%', '%}', '{', '}'): expressions are
@@ -1270,6 +1295,25 @@ def _coerce_str_map(mapping: dict | None) -> dict[str, str]:
             for k, v in mapping.items()}
 
 
+def _rawparam_text(params: dict[str, str]) -> str:
+    """Reconstruct the caller's parameter text for ``{rawparams}``.
+
+    Klipper hands the template the raw remainder of the command line, so a
+    declared invocation's params ARE that text in NAME=value form. Values
+    that need it are quoted the way the shlex-based extended-param tokenizer
+    expects, so a splat round-trips through the rendered-line parse instead
+    of fabricating a 'Malformed command' (a value with a space would
+    otherwise split into a bare argument).
+    """
+    parts: list[str] = []
+    for key, value in params.items():
+        text = str(value)
+        if any(ch.isspace() for ch in text) or '"' in text:
+            text = '"' + text.replace('"', '\\"') + '"'
+        parts.append(f"{str(key).upper()}={text}")
+    return " ".join(parts)
+
+
 def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
                             known_macros: frozenset[str] = frozenset(),
                             max_variants: int = MAX_RENDER_VARIANTS,
@@ -1343,6 +1387,20 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
     variants, held = _expand_variants(stripped, defined, max_variants,
                                       declared_state)
 
+    # P0: `{rawparams}` forwards the caller's parameters, so a line using it
+    # has unknown ARITY without an invocation — a param absent from the
+    # template may still arrive through the splat (Klipper's own eddy samples
+    # forward `{rawparams}` into PROBE_EDDY_CURRENT_CALIBRATE). Suppressing
+    # "missing required" here is the same law 3.1 already applies to
+    # `{params.X}`: undecidable is not absent. A body that assigns rawparams
+    # itself has decided the text — those keep full checking.
+    splat_undecided = (not invocation_given
+                       and bool(_RAWPARAMS_SPLAT_RE.search(stripped))
+                       and not _RAWPARAMS_ASSIGN_RE.search(stripped))
+    # rawparams for a DECLARED invocation: the caller's own text (the
+    # params_* defaults are not part of what the caller typed).
+    raw_tail = _rawparam_text(params)
+
     try:
         from services.gcode_registry import load_registry
         registry = load_registry()
@@ -1358,7 +1416,8 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
             else {}
         lines, finding = _render_one(_MACRO_JINJA_ENV, variant_src,
                                      render_params, vi, variables,
-                                     printer_state, param_dependent)
+                                     printer_state, param_dependent,
+                                     raw_tail)
         if finding is not None:
             findings.append(finding)
             continue
@@ -1386,7 +1445,10 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
                         "the body expands to an unusually large command "
                         "set; later lines were not verified."))
                 break
+            line_splat = False
             if not invocation_given and line_src is not None:
+                line_splat = bool(splat_undecided
+                                  and _RAWPARAMS_SPLAT_RE.search(line_src))
                 missing = _missing_param_reads(line_src, declared_lower)
                 # Reads hidden behind Jinja aliases (`{% set led =
                 # params.LED|string %}`, a for-loop over a stringified
@@ -1410,13 +1472,23 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
                             "line is param-dependent — pass params to "
                             "simulate_macro for a full verdict.",
                             variant=vi, source_line=src_line))
+                if line_splat and "rawparams" not in pd_reported:
+                    pd_reported.add("rawparams")
+                    findings.append(RenderFinding(
+                        "info", "macro_param_undefined",
+                        "'rawparams' forwards the caller's parameters and "
+                        "no invocation was given: params on this line are "
+                        "param-dependent — pass params to simulate_macro "
+                        "for a full verdict.",
+                        variant=vi, source_line=src_line))
             for f in _check_rendered_line(text, registry, vi, sections=sections):
                 # Round-2 D1: suppress per FINDING, never per line —
                 # a literal defect sharing the line with a
                 # param-dependent read stays a real verdict.
                 if (not invocation_given and line_src is not None
                         and _finding_is_param_dependent(
-                            f, line_src, alias_map, param_dependent)):
+                            f, line_src, alias_map, param_dependent,
+                            splat_unknown=line_splat)):
                     continue
                 findings.append(replace(f, source_line=f.source_line or src_line))
 
