@@ -130,6 +130,46 @@ def test_choice_check_is_undecidable_when_a_member_renders_unknown():
         _messages(r)
 
 
+# ── round 2: params reached through helper objects ─────────────────────────
+# The probe family reads through helpers; now that the registry carries those
+# params, the ordinary type/bound checks apply to them. Every one is optional,
+# so a bare `PROBE` must stay clean.
+
+def test_probe_params_are_type_checked():
+    r = simulate_macro("PROBE SAMPLES=abc")
+    assert "macro_param_unparseable" in [f.code for f in r.findings], \
+        _messages(r)
+
+
+def test_probe_params_are_range_checked():
+    # ProbeParameterHelper.get_probe_params: SAMPLES minval=1, PROBE_SPEED
+    # above=0 (probe.py:299-301).
+    for body in ("PROBE SAMPLES=0", "PROBE PROBE_SPEED=0"):
+        r = simulate_macro(body)
+        assert "macro_param_out_of_bounds" in [f.code for f in r.findings], \
+            (body, _messages(r))
+
+
+def test_bare_calibration_commands_stay_clean():
+    # All helper-supplied params are optional: the bare invocations Klipper's
+    # own docs show must never report a missing parameter.
+    for body in ("PROBE", "PROBE_CALIBRATE", "BED_TILT_CALIBRATE",
+                 "DELTA_CALIBRATE", "QUAD_GANTRY_LEVEL", "Z_TILT_ADJUST",
+                 "M109 S250", "M190 S60"):
+        r = simulate_macro(body)
+        assert not [f for f in r.findings if f.severity == "error"], \
+            (body, _messages(r))
+
+
+def test_shaper_axis_variants_are_range_checked():
+    r = simulate_macro("SET_INPUT_SHAPER DAMPING_RATIO_Z=abc")
+    assert "macro_param_unparseable" in [f.code for f in r.findings], \
+        _messages(r)
+    ok = simulate_macro("SET_INPUT_SHAPER DAMPING_RATIO_Z=0.1 "
+                        "SHAPER_FREQ_X=50")
+    assert not [f for f in ok.findings if f.severity == "error"], _messages(ok)
+
+
 # ── P4: mux object spaces ──────────────────────────────────────────────────
 
 def test_chip_space_resolves_against_chip_sections():

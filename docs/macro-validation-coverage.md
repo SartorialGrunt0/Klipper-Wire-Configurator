@@ -55,8 +55,8 @@ Practically:
 
 Registry: **192 commands**; **127 documented** commands (`G-Codes.md` `####`
 headers, de-quoted; every one registered, **0 documented-but-unregistered**).
-Parameter metadata: **233 entries artifact-wide, 206 on documented commands**
-(173 typed, 67 required, 58 with a bound). Two earlier counts were wrong and are
+Parameter metadata: **337 entries artifact-wide, 288 on documented commands**
+(255 typed, 68 required, 108 with a bound). Two earlier counts were wrong and are
 superseded: "128 documented / 189 param entries" used a looser header match that
 picked prose words out of backticks, and "123 documented" dropped the four
 backtick-quoted `EXCLUDE_OBJECT` headings (the audit in §7 reconciles both).
@@ -78,7 +78,7 @@ params whose membership test *raises*.
 **Either-of rules**: 2, in two modes — `SET_FAN_SPEED` exactly one of
 `SPEED`/`TEMPLATE`, `TEMPERATURE_WAIT` at least one of `MINIMUM`/`MAXIMUM`.
 
-**Bounds**: **70 params on 42 commands**, all from literal limits in the
+**Bounds**: **121 params on 51 commands**, all from literal limits in the
 handler source (inclusive `minval`/`maxval`, exclusive `above`/`below`). Ten
 config-derived limit sites are deliberately unrecorded (§5, P3).
 
@@ -151,52 +151,58 @@ seam is `EXTRA_MANUAL`, and it holds only `FORCE_MOVE` /
    either would fabricate "renders EMPTY" on working configs. Per-axis params
    are always individually optional.
 
-**What remains in this class** (verified by an independent handler-by-handler
-inventory, cross-checked against the artifact — not estimated): **20 commands
-still read parameters the registry does not know about** — 10 documented
-(`PROBE`, `PROBE_CALIBRATE`, `MANUAL_PROBE`, `Z_ENDSTOP_CALIBRATE`,
-`BED_TILT_CALIBRATE`, `DELTA_CALIBRATE`, `QUAD_GANTRY_LEVEL`, `Z_TILT_ADJUST`,
-`BED_MESH_PROFILE`, `SET_INPUT_SHAPER`) and 10 undocumented (`G0`, `G1`, `G2`,
-`G3`, `G28`, `M23`, `M109`, `M190`, `M117`, `M118`). None of them produces a
-false "missing parameter" error — `M26 S` was the only required one in the whole
-gap set and it is now covered — so the cost is silent **under-validation**
-(non-numeric values are never type-checked), not false positives.
+**CLOSED generically.** The 20 commands above were closed by following the
+delegation in the extractor instead of transcribing parameter lists, so a
+Klipper regen keeps them correct:
 
-Three mechanisms, in value order:
+1. **`gcmd` handed to a same-file callable** (the bulk). One pass resolves
+   `obj.method(gcmd)`, a **constructor** hand-off (`ManualProbeHelper(printer,
+   gcmd, cb)` reads `SPEED` in `__init__`), and module-level functions
+   (`run_single_probe(probe, gcmd)`) — depth ≤ 3, cycle-guarded. That alone
+   closed `M109`→`cmd_M104`, `M190`→`cmd_M140`, `G2`/`G3`→`_cmd_inner`,
+   `MANUAL_PROBE`/`Z_ENDSTOP_CALIBRATE`, and `Z_TILT_ADJUST`'s retry params.
+   **Ambiguity is refused, not guessed**: a method name defined by more than
+   one class in the file is skipped, because attributing the wrong class's
+   reads fabricates parameters (pinned by a two-class negative-control fixture).
+2. **A resolution table for what (1) cannot reach** — seven entries, all
+   cross-module or polymorphic (`probe.py` defines `get_probe_params` twice and
+   `start_probe_session` four times). The table records **locations**
+   `(module, class, method)`, never parameter lists: the extractor parses those
+   bodies, so types, defaults and literal bounds still come from source.
+3. **Prefix-built names** (`'SHAPER_TYPE_' + self.axis.upper()`). Klipper builds
+   one object per axis from a **literal** argument (`AxisInputShaper('x'|'y'|
+   'z', config)`), so the axis set is derivable and the names expand to
+   `SHAPER_TYPE_X/_Y/_Z`, `SHAPER_FREQ_*`, `DAMPING_RATIO_*`.
 
-1. **`gcmd` handed to a helper object** (8 commands — the probe family). The
-   handler passes `gcmd` to `ProbeParameterHelper.get_probe_params`,
-   `ProbePointsHelper.start_probe`, `ManualProbeHelper.__init__` or
-   `z_tilt.RetryHelper.start`, and the reads happen there. A small table of
-   (module, class, method) → params closes it; every param must be optional
-   because those helpers supply config-derived defaults.
-2. **Intra-file delegation** (`M109` → `cmd_M104`, `M190` → `cmd_M140`, `G2`/`G3`
-   → `_cmd_inner`, `SET_INPUT_SHAPER` → `update`). Merge the same-file callee's
-   params, depth ≤ 3, cycle-guarded — but do **not** merge a callee that builds
-   a synthetic command with `create_gcode_command`: those params belong to the
-   synthesized command, not the invoked one.
-3. **Raw / positional text** (`M23` filename, `M117`/`M118` message,
-   `G0`/`G1` reading `get_command_parameters()` as a dict). There is no
-   `NAME=value` parameter here, so params must stay **empty** — inventing a
-   `FILENAME=`/`MSG=` param would mean the simulator never sees what the user
-   actually writes.
+Delegated params are **always optional**: a helper may be invoked with a
+synthetic command (`create_gcode_command("", "", {})`) or a gcmd whose read is
+guarded by the caller, so claiming one required would produce exactly the false
+"missing parameter" error this review exists to remove. The win is type, enum
+and bound checking — `PROBE SAMPLES=abc`, `PROBE SAMPLES=0`,
+`SET_INPUT_SHAPER DAMPING_RATIO_Z=abc` are now caught; bare `PROBE` stays clean.
 
-Deliberate non-goals inside this residue: `G2`/`G3`'s `R` is read only to be
-rejected (`gcode_arcs.py:72`); `G28`'s axes are a presence read and typing them
-as numbers would fabricate "renders EMPTY" on canonical `G28 X Y` (typing them as
-str is safe but buys nothing); and `G1`'s axis set is runtime-extensible
-(`toolhead.get_extra_axes()`), so X/Y/Z/E is only the statically provable floor.
+Cross-verification: 8 of the 10 commands now carry **exactly** the parameter set
+the independent handler-by-handler inventory produced, name for name and type
+for type — two methods agreeing. The exceptions are `BED_MESH_PROFILE` (a
+presence read; see §6) and the `*_Z` shaper variants, where the inventory was
+wrong and the extractor is right.
 
-**Correction to the inventory that produced this list:** it claimed
+Deliberate non-goals: `G2`/`G3`'s `R` is read only to be rejected
+(`gcode_arcs.py:72`); `G28`'s axes are a presence read and typing them as
+numbers would fabricate "renders EMPTY" on canonical `G28 X Y`; `G1`'s axis set
+is runtime-extensible (`toolhead.get_extra_axes()`), so X/Y/Z/E is only the
+statically provable floor; `M23`/`M117`/`M118` carry raw/positional text, so
+inventing `FILENAME=`/`MSG=` params would mean the simulator never sees what the
+user actually writes.
+
+**Correction to the inventory that produced the list:** it claimed
 `SET_INPUT_SHAPER` has no `*_Z` params in this checkout because only x and y
-shapers are built. That is false — `input_shaper.py:112` constructs
+shapers are built. That is false — `input_shaper.py:112-114` constructs
 `AxisInputShaper('z', config)` and `cmd_SET_INPUT_SHAPER` calls `shaper.update`
-for all three, so `SHAPER_TYPE_Z`, `SHAPER_FREQ_Z` and `DAMPING_RATIO_Z` ARE
-read (`'SHAPER_TYPE_' + axis`, `:31`; `'DAMPING_RATIO_' + axis`, `:35`;
-`'SHAPER_FREQ_' + axis`, `:41`). Anyone closing this command must include the Z
-variants. (Its names are prefix-built from an axis loop, so the P1 prefix
-pattern would cover them once the handler's `shaper.update(gcmd)` delegation is
-followed.)
+for all three axes, so `SHAPER_TYPE_Z`, `SHAPER_FREQ_Z` and `DAMPING_RATIO_Z` ARE
+read (`'SHAPER_TYPE_' + axis` :31, `'DAMPING_RATIO_' + axis` :35,
+`'SHAPER_FREQ_' + axis` :41). The extractor derives all three from the literal
+constructor arguments, and a test pins it.
 
 ### P2 — DONE (`48d316e`): two either-of rules, not one
 
@@ -269,31 +275,34 @@ registry (2026-11-15, round 2):
   the `SET_TMC_*` family) are validated even though G-Codes.md gives them no
   `####` heading. The registry is generated from handlers, not from the docs,
   and that is the right direction of dependency.
-- **82/127 (64.6%) carry per-command metadata** — a param set, a mux key, or
-  both. 203 params on documented commands, 60 of them with a literal bound, 38
+- **91/127 (71.7%) carry per-command metadata** — a param set, a mux key, or
+  both. 288 params on documented commands, 108 of them with a literal bound, 38
   commands with a mux key.
-- **45 carry none**, and they split cleanly rather than evenly:
+- **36 carry none**, and they split cleanly rather than evenly:
   - **35 are genuinely parameter-free** — `RESTART`, `FIRMWARE_RESTART`,
     `TURN_OFF_HEATERS`, `QUERY_PROBE`, `GET_POSITION`, `BED_SCREWS_ADJUST`,
     `SAVE_CONFIG`, `CLEAR_PAUSE`, … An empty param set is the *truth* for these;
     there is nothing to validate per command, and inventing params to make the
     number look better would be the defect.
-  - **10 are the P1 residue** — `PROBE`, `PROBE_CALIBRATE`, `MANUAL_PROBE`,
-    `Z_ENDSTOP_CALIBRATE`, `BED_TILT_CALIBRATE`, `DELTA_CALIBRATE`,
-    `QUAD_GANTRY_LEVEL`, `Z_TILT_ADJUST`, `BED_MESH_PROFILE`,
-    `SET_INPUT_SHAPER` — **67 params total** the registry does not know.
+  - **1 is a deliberate non-goal** — `BED_MESH_PROFILE`, whose three params
+    (`LOAD`/`SAVE`/`REMOVE`) are read with `gcmd.get(key, None)`: a presence
+    read, the same shape as `G28 X Y`. Typing a presence read fabricates
+    "renders EMPTY" on valid invocations, so it stays out (3 params).
 
-### The residue is a `simulate_macro` gap, not a different surface
+### The residue was a `simulate_macro` gap, and it was closed as one
 
-All 67 params guard refusals that are decidable from the **rendered line**:
+All 67 params guarded refusals that were decidable from the **rendered
+line**:
 `PROBE_CALIBRATE SPEED=fast` is a float parse error, `BED_TILT_CALIBRATE
 RETRIES=2.5` an int error, `SET_INPUT_SHAPER SHAPER_TYPE=foo` a choice error.
-They sit behind helper objects in the *source*; they sit behind nothing in the
-*rendered line*. So the fix is extractor coverage (the `(module, class, method)
-→ params` table described in §5), not a new check surface. The same holds for
-the 10 undocumented commands (`M109`, `M190`, `G0`–`G3`, `G28`, `M23`, `M117`,
-`M118`): they are gaps against G-Codes.md's headings, not against
-line-decidability.
+They sat behind helper objects in the *source* and behind nothing in the
+*rendered line*, so the fix was extractor coverage (§5) — **not** a new check
+surface. Following the delegation closed 8 of the 10 commands and all of the
+undocumented set (`M109`, `M190`, `G0`–`G3`, `M23`, `M117`, `M118`); only
+`BED_MESH_PROFILE` remains, and for a reason that has nothing to do with
+surfaces (a presence read cannot be typed). Pushing any of it onto
+`validate_macro` or the config validator would have moved a line-decididable
+error to a surface that cannot see the line.
 
 What genuinely belongs on the other surfaces:
 
@@ -351,6 +360,18 @@ line-decididable error to a surface that cannot see the line.
 - **Artifact isolation check**: the regenerated registry differs from the
   previous commit by `schema_version` (3 → 4), `generated_at`, and the 70 params
   that gained bounds — **0 command-set changes, 0 non-bound param changes**.
+- **Round 3 (helper delegation)**: total param entries **233 → 337**; the
+  registry delta is **purely additive — 104 params added, 0 removed, 0
+  changed**, across 19 commands (including 6 nobody targeted:
+  `BED_MESH_CALIBRATE`, `MANUAL_STEPPER`, `SHAPER_CALIBRATE`,
+  `TEST_RESONANCES`, `TEMPERATURE_PROBE_ENABLE`, `EXCLUDE_OBJECT_DEFINE`, which
+  the generic same-file resolver found on its own).
+  Corpus after the change: **0 errors, 0 warnings, 0 new findings of any
+  severity**; the only movement is `macro_unknown_value` infos 206 → 212, which
+  is `M109 S{…}` / `MANUAL_STEPPER MOVE={…}` in Klipper's own
+  `sample-mmu2s-diy.cfg` now saying "shape simulated, value not" — accurate,
+  info-tier, previously silent because the params were unknown.
+  Suite: **4244 passed**.
 - Simulator tests: `tests/test_simulate_macro_tool.py`,
   `tests/test_macro_render*.py`, `tests/test_macro_render_ranges_choices_mux.py`;
   registry: `tests/test_gcode_registry_extract.py`,

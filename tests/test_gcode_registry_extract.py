@@ -52,6 +52,9 @@ def test_fixture_extracts_exact_name_set():
         "SET_FAKE_OFFSET", "FAKE_HOME",
         # guards.py review-F1/F2 policy fixtures
         "GUARDED", "ALIASED",
+        # delegation.py: same-file method / ctor / ambiguous / axis-prefix
+        "DELEGATE_METHOD", "DELEGATE_CTOR", "DELEGATE_AMBIGUOUS",
+        "DELEGATE_AXIS",
     }
 
 
@@ -249,6 +252,84 @@ def test_fixture_literal_bounds_recorded_dynamic_ones_not():
     assert state["SPEED"]["above"] == 0.0
     assert state["OFFSET"] == {"type": "float", "required": False,
                                "default": 0.0, "minval": -1, "maxval": 1}
+
+
+# ── same-file delegation (round 2) ─────────────────────────────────────────
+# A handler that hands its gcmd to another callable in the same file hides its
+# parameters there: `obj.method(gcmd)`, a constructor that reads in __init__,
+# or a module-level function. Params found this way are ALWAYS optional — a
+# helper may be invoked with a synthetic command, so claiming one is required
+# would produce a false "missing parameter" error.
+
+
+def test_fixture_same_file_method_delegation():
+    mod = _load_extractor()
+    cmds = mod.extract_registry(FAKE_TREE)["commands"]
+    assert cmds["DELEGATE_METHOD"]["params"] == {
+        "PROBE_SPEED": {"type": "float", "required": False, "above": 0.0},
+        "SAMPLES": {"type": "int", "required": False, "default": 1,
+                    "minval": 1},
+        "SAMPLES_RESULT": {"type": "str", "required": False,
+                           "default": "average"},
+    }
+
+
+def test_fixture_constructor_hand_off_reads_init():
+    mod = _load_extractor()
+    cmds = mod.extract_registry(FAKE_TREE)["commands"]
+    assert cmds["DELEGATE_CTOR"]["params"] == {
+        "MANUAL_SPEED": {"type": "float", "required": False,
+                         "default": 5.0}}
+
+
+def test_fixture_ambiguous_method_is_refused_not_guessed():
+    """`ambiguous` is defined by two classes: resolving it would need type
+    inference, and attributing the wrong class's reads fabricates params."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(FAKE_TREE)["commands"]
+    assert "params" not in cmds["DELEGATE_AMBIGUOUS"], \
+        cmds["DELEGATE_AMBIGUOUS"]
+
+
+def test_fixture_axis_prefix_names_expand_from_literal_constructors():
+    """'PREFIX_' + self.axis.upper(), with one object built per literal axis."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(FAKE_TREE)["commands"]
+    params = cmds["DELEGATE_AXIS"]["params"]
+    assert set(params) == {"SHAPER_KIND_X", "SHAPER_KIND_Y", "SHAPER_KIND_Z"}
+    assert all(p["type"] == "str" and p["required"] is False
+               for p in params.values())
+
+
+@pytest.mark.skipif(not REAL_KLIPPY.is_dir(), reason="reference klipper absent")
+def test_real_tree_probe_family_params_come_from_the_helpers():
+    """The probe family reads through helper objects; the registry must carry
+    those params, all optional (the helpers supply config-derived defaults)."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(REAL_KLIPPY)["commands"]
+    probe_expected = {"PROBE_SPEED", "LIFT_SPEED", "SAMPLES",
+                      "SAMPLE_RETRACT_DIST", "SAMPLES_TOLERANCE",
+                      "SAMPLES_TOLERANCE_RETRIES", "SAMPLES_RESULT"}
+    assert set(cmds["PROBE"]["params"]) == probe_expected
+    assert set(cmds["PROBE_CALIBRATE"]["params"]) == probe_expected | {"SPEED"}
+    for name in ("BED_TILT_CALIBRATE", "DELTA_CALIBRATE", "Z_TILT_ADJUST",
+                 "QUAD_GANTRY_LEVEL"):
+        params = cmds[name]["params"]
+        assert probe_expected <= set(params), (name, sorted(params))
+        assert not any(p["required"] for p in params.values()), name
+
+
+@pytest.mark.skipif(not REAL_KLIPPY.is_dir(), reason="reference klipper absent")
+def test_real_tree_input_shaper_has_the_z_variants():
+    """input_shaper builds AxisInputShaper('z'), so SHAPER_*_Z ARE read.
+    (An earlier inventory claimed otherwise and was wrong.)"""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(REAL_KLIPPY)["commands"]
+    params = cmds["SET_INPUT_SHAPER"]["params"]
+    for axis in ("X", "Y", "Z"):
+        assert f"SHAPER_TYPE_{axis}" in params
+        assert f"SHAPER_FREQ_{axis}" in params
+        assert f"DAMPING_RATIO_{axis}" in params
 
 
 def test_fixture_schema_version_bumped():

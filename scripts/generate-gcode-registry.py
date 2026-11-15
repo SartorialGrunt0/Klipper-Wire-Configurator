@@ -503,7 +503,199 @@ def _literal_number(node: ast.AST) -> int | float | None:
     return None
 
 
-def _extract_handler_params(func_node: ast.FunctionDef) -> dict[str, dict]:
+_DELEGATION_DEPTH = 3
+
+# Cross-module / polymorphic hand-offs, verified against this checkout.
+#
+#   (command) -> ((module, class, method), ...)  ← WHERE the gcmd reads are.
+#
+# Every entry here exists because the same-file resolver cannot reach the
+# reads on its own:
+#   * the helper lives in ANOTHER module (bed_tilt.py -> probe.py), or
+#   * the method name is defined by several classes, so following it would
+#     need type inference (probe.py defines get_probe_params twice: the
+#     parameter-holding helper at :296 and PrinterProbe's delegating wrapper
+#     at :621; start_probe_session four times).
+#
+# The table records LOCATIONS, never parameter lists: the extractor parses the
+# named body, so types, defaults and literal bounds still come from source.
+# Params reached this way are always optional (see _extract_handler_params).
+#
+# ProbePointsHelper.start_probe reads METHOD and HORIZONTAL_MOVE_Z itself, then
+# delegates to probe.get_probe_params(gcmd) — which is why both the points
+# helper and the parameter helper are listed for the calibration commands.
+_PROBE_POINTS_HOPS = (
+    ("probe", "ProbePointsHelper", "start_probe"),          # probe.py:477
+    ("probe", "ProbeParameterHelper", "get_probe_params"),  # probe.py:296
+)
+
+_DELEGATION_TARGETS: dict[str, tuple[tuple[str, str, str], ...]] = {
+    "PROBE": (("probe", "ProbeParameterHelper", "get_probe_params"),),
+    "PROBE_CALIBRATE": (
+        ("probe", "ProbeParameterHelper", "get_probe_params"),
+        # manual_probe.ManualProbeHelper(printer, gcmd, cb) — reads SPEED in
+        # __init__ (manual_probe.py:171).
+        ("manual_probe", "ManualProbeHelper", "__init__"),
+    ),
+    "BED_TILT_CALIBRATE": _PROBE_POINTS_HOPS,
+    "DELTA_CALIBRATE": _PROBE_POINTS_HOPS,
+    "QUAD_GANTRY_LEVEL": (
+        ("z_tilt", "RetryHelper", "start"),                 # z_tilt.py:117
+    ) + _PROBE_POINTS_HOPS,
+    "Z_TILT_ADJUST": _PROBE_POINTS_HOPS,
+    # SET_INPUT_SHAPER calls shaper.update(gcmd) for x/y/z; `update` is defined
+    # by both AxisInputShaper and InputShaperParams, so the hop is ambiguous.
+    "SET_INPUT_SHAPER": (
+        ("input_shaper", "AxisInputShaper", "update"),          # :75
+        ("input_shaper", "InputShaperParams", "update"),        # :27
+    ),
+}
+
+
+def _gcmd_delegations(func_node: ast.FunctionDef,
+                      file_ctx: "_FileVisitor",
+                      seen: frozenset[int] = frozenset(),
+                      ) -> list[ast.FunctionDef]:
+    """Callables in the SAME FILE that this handler hands its `gcmd` to.
+
+    This is how the probe/calibration family hides its parameters: the
+    handler's own body never calls `gcmd.get*`, it passes the command object
+    on — `self.probe.get_probe_params(gcmd)`, a constructor
+    (`ManualProbeHelper(printer, gcmd, cb)`, whose __init__ reads SPEED), a
+    module function (`run_single_probe(probe, gcmd)`), or a method on a
+    per-axis object (`shaper.update(gcmd)`).
+
+    Only a call that RECEIVES a gcmd object qualifies: a body that merely
+    mentions gcmd (e.g. `register_command('ACCEPT', self.cmd_ACCEPT)`) is
+    not a parameter hand-off.
+
+    Ambiguity is refused, not guessed: a method name defined in more than one
+    class of the file is skipped, because resolving it would need type
+    inference, and attributing the wrong class's reads fabricates parameters
+    Klipper never looks at for this command.
+    """
+    receivers = _gcmd_receivers(func_node)
+    found: list[ast.FunctionDef] = []
+    for call in ast.walk(func_node):
+        if not isinstance(call, ast.Call):
+            continue
+        handed = any(isinstance(a, ast.Name) and a.id in receivers
+                     for a in call.args) or any(
+            kw.value is not None and isinstance(kw.value, ast.Name)
+            and kw.value.id in receivers for kw in call.keywords)
+        if not handed:
+            continue
+        target: ast.FunctionDef | None = None
+        callee = call.func
+        if isinstance(callee, ast.Attribute):
+            candidates = file_ctx.methods.get(callee.attr) or []
+            if len(candidates) == 1:
+                target = candidates[0]
+        elif isinstance(callee, ast.Name):
+            cls = file_ctx.classes.get(callee.id)
+            if cls is not None:
+                # Constructor hand-off: the reads live in __init__.
+                target = next(
+                    (c for c in cls.body
+                     if isinstance(c, ast.FunctionDef)
+                     and c.name == "__init__"), None)
+            else:
+                target = file_ctx.module_functions.get(callee.id)
+        if target is not None and id(target) not in seen:
+            found.append(target)
+    return found
+
+
+def _constructor_axis_values(file_ctx: "_FileVisitor") -> set[str]:
+    """Literal values passed as a constructor's first argument, per module.
+
+    Klipper builds one object per axis with a literal name and then reads
+    parameters as `'PREFIX_' + self.axis.upper()`::
+
+        self.shapers = [AxisInputShaper('x', config),
+                        AxisInputShaper('y', config),
+                        AxisInputShaper('z', config)]      # input_shaper.py:112
+
+    The literal arguments ARE the axis set, so the parameter names are
+    derivable without type inference. Values are only accepted when they look
+    like axis names (short, alphanumeric) — that keeps the expansion from
+    inventing a parameter namespace out of unrelated constructor arguments.
+    """
+    values: set[str] = set()
+    for tree_holder in (file_ctx.axis_literals,):
+        values |= tree_holder
+    return values
+
+
+def _prefix_expanded_calls(func_node: ast.FunctionDef,
+                           file_ctx: "_FileVisitor") -> dict[str, dict]:
+    """Params whose name is a literal prefix concatenated with a per-axis value.
+
+    Only the `self.<attr>` shape is expanded: a loop variable is already
+    handled by _loop_axis_params, and a genuinely dynamic name stays unknown.
+    """
+    params: dict[str, dict] = {}
+    axis_values = _constructor_axis_values(file_ctx)
+    if not axis_values:
+        return params
+    receivers = _gcmd_receivers(func_node)
+    # `axis = self.axis.upper()` / `axis = self.axis` inside the method.
+    attr_vars: set[str] = set()
+    for sub in ast.walk(func_node):
+        if (isinstance(sub, ast.Assign) and len(sub.targets) == 1
+                and isinstance(sub.targets[0], ast.Name)):
+            value = sub.value
+            if (isinstance(value, ast.Call)
+                    and isinstance(value.func, ast.Attribute)
+                    and value.func.attr in ("upper", "lower", "strip")):
+                value = value.func.value
+            if isinstance(value, ast.Attribute):
+                attr_vars.add(sub.targets[0].id)
+    if not attr_vars:
+        return params
+    for call in ast.walk(func_node):
+        # NOTE: _gcmd_getter_calls filters to LITERAL names, which is exactly
+        # what a prefix-built name is not — so this scan is its own.
+        if not (isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Attribute)):
+            continue
+        if call.func.attr not in _PARAM_GETTER_TYPES:
+            continue
+        if not (isinstance(call.func.value, ast.Name)
+                and call.func.value.id in receivers):
+            continue
+        if not call.args:
+            continue
+        name_arg = call.args[0]
+        if not (isinstance(name_arg, ast.BinOp)
+                and isinstance(name_arg.op, ast.Add)
+                and isinstance(name_arg.left, ast.Constant)
+                and isinstance(name_arg.left.value, str)
+                and isinstance(name_arg.right, ast.Name)
+                and name_arg.right.id in attr_vars):
+            continue
+        prefix = name_arg.left.value
+        for axis in sorted(axis_values):
+            pname = f"{prefix}{axis}".upper()
+            if not isinstance(call.func, ast.Attribute):
+                continue
+            entry = params.setdefault(pname, {
+                "type": _PARAM_GETTER_TYPES[call.func.attr],
+                "required": False})
+            for bound in _BOUND_KEYWORDS:
+                for kw in call.keywords:
+                    if kw.arg == bound and bound not in entry:
+                        limit = _literal_number(kw.value)
+                        if limit is not None:
+                            entry[bound] = limit
+    return params
+
+
+def _extract_handler_params(func_node: ast.FunctionDef,
+                            file_ctx: "_FileVisitor | None" = None,
+                            _depth: int = 0,
+                            _seen: frozenset[int] = frozenset(),
+                            ) -> dict[str, dict]:
     """Parse gcmd.get/get_int/get_float/getboolean('NAME', default…) calls
     out of a command handler into {PARAM: {type, required[, default]}}.
 
@@ -561,6 +753,26 @@ def _extract_handler_params(func_node: ast.FunctionDef) -> dict[str, dict]:
     # same name keeps its own default/requiredness.
     for pname, pdef in _loop_axis_params(func_node).items():
         params.setdefault(pname, pdef)
+    # Names built as 'PREFIX_' + self.<axis> (input_shaper's per-axis shaper).
+    if file_ctx is not None:
+        for pname, pdef in _prefix_expanded_calls(func_node, file_ctx).items():
+            params.setdefault(pname, pdef)
+    # Same-file delegation: the handler passed its gcmd on, so the reads live
+    # in the callee. Types/defaults/bounds are still read from source — this
+    # is resolution, not transcription. Delegated params are ALWAYS optional:
+    # a helper may be invoked with a synthetic command (`dummy_gcode_cmd`) or
+    # a gcmd whose relevant read is guarded by the caller, so claiming one is
+    # required would produce the false "missing parameter" error this whole
+    # review exists to remove.
+    if file_ctx is not None and _depth < _DELEGATION_DEPTH:
+        visited = _seen | {id(func_node)}
+        for callee in _gcmd_delegations(func_node, file_ctx, visited):
+            deeper = _extract_handler_params(callee, file_ctx, _depth + 1,
+                                             visited)
+            for pname, pdef in deeper.items():
+                if pname in params:
+                    continue          # the handler's own read wins
+                params[pname] = {**pdef, "required": False}
     return params
 
 
@@ -587,6 +799,27 @@ class _FileVisitor(ast.NodeVisitor):
         self.registrations: list[tuple[str, str | None, bool, int, str | None]] = []
         self.list_bindings: dict[str, list[str]] = {}
         self.functions: dict[str, ast.FunctionDef] = {}
+        # Delegation context: a handler that hands its `gcmd` to another
+        # callable in the SAME FILE (a helper object's method, a constructor,
+        # or a module-level function) hides the real reads there. Resolution
+        # needs the class/method index, so collect it alongside registrations.
+        self.module_functions: dict[str, ast.FunctionDef] = {}
+        self.classes: dict[str, ast.ClassDef] = {}
+        self.methods: dict[str, list[ast.FunctionDef]] = {}
+        self.axis_literals: set[str] = set()
+
+    def visit_Module(self, node: ast.Module) -> None:
+        for child in node.body:
+            if isinstance(child, ast.FunctionDef):
+                self.module_functions.setdefault(child.name, child)
+        self.generic_visit(node)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        self.classes.setdefault(node.name, node)
+        for child in node.body:
+            if isinstance(child, ast.FunctionDef):
+                self.methods.setdefault(child.name, []).append(child)
+        self.generic_visit(node)
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self.functions.setdefault(node.name, node)
@@ -642,6 +875,20 @@ class _FileVisitor(ast.NodeVisitor):
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
+        # Axis-set evidence: Klipper builds one object per axis with a LITERAL
+        # name (`AxisInputShaper('x', config)`); _prefix_expanded_calls turns
+        # that into 'SHAPER_TYPE_X' etc. Only short alphanumeric first
+        # arguments qualify, so unrelated constructor calls add nothing.
+        callee = node.func
+        cname = callee.id if isinstance(callee, ast.Name) else (
+            callee.attr if isinstance(callee, ast.Attribute) else "")
+        if cname[:1].isupper() and node.args:
+            first = node.args[0]
+            if (isinstance(first, ast.Constant)
+                    and isinstance(first.value, str)
+                    and 0 < len(first.value) <= 3
+                    and first.value.isalnum()):
+                self.axis_literals.add(first.value.lower())
         fname = _call_name(node.func)
         if fname in ("register_command", "register_mux_command") and node.args:
             name = _literal_str(node.args[0])
@@ -731,7 +978,7 @@ def extract_registry(klipper_root: Path) -> dict:
 
     def record(name: str, module: str, mux_key: str | None,
                key_optional: bool, line: int,
-               functions: dict[str, ast.FunctionDef],
+               visitor: _FileVisitor,
                handler: str | None) -> None:
         if not _is_command_name(name):
             return
@@ -770,22 +1017,41 @@ def extract_registry(klipper_root: Path) -> dict:
         # Handler-derived typed params. A mux key is already required=True
         # from the gate key; parsing must never downgrade it (mux commands
         # never read the key via gcmd.get).
-        func_node = _resolve_handler(functions, handler)
+        func_node = _resolve_handler(visitor.functions, handler)
         if func_node is not None:
             params = entry.setdefault("params", {})
-            for pname, pdef in _extract_handler_params(func_node).items():
-                existing = params.setdefault(pname, {})
-                for field, value in pdef.items():
-                    if field == "required" and existing.get("required") is True:
-                        continue
-                    if (field == "required" and pname.upper()
-                            == str(entry.get("mux_key") or "").upper()):
-                        # The mux key's optionality is decided by its
-                        # register_mux_command VALUE (None ⇒ optional),
-                        # never by a gcmd read inside the handler.
-                        continue
-                    existing[field] = value
+            merge_params(params,
+                         _extract_handler_params(func_node, visitor),
+                         entry.get("mux_key"))
+        # Cross-module / polymorphic hops: the handler hands gcmd to an object
+        # owned by another module (bed_tilt -> probe.ProbePointsHelper), or to
+        # a method name defined by several classes, which the same-file
+        # resolver refuses to guess. The table names WHERE the reads are; the
+        # extractor still parses those bodies, so types/defaults/bounds come
+        # from source. Optional-only: see _extract_handler_params.
+        for target_mod, target_cls, target_method in _DELEGATION_TARGETS.get(
+                name, ()):
+            target_visitor = visitors.get(target_mod)
+            if target_visitor is None:
+                continue
+            cls_node = target_visitor.classes.get(target_cls)
+            if cls_node is None:
+                continue
+            target_fn = next(
+                (c for c in cls_node.body
+                 if isinstance(c, ast.FunctionDef)
+                 and c.name == target_method), None)
+            if target_fn is None:
+                continue
+            params = entry.setdefault("params", {})
+            incoming = {p: {**d, "required": False} for p, d in
+                        _extract_handler_params(target_fn,
+                                                target_visitor).items()}
+            merge_params(params, incoming, entry.get("mux_key"))
 
+    # Parse every file ONCE: cross-module delegation targets may live in a
+    # module that appears later in the walk, and re-parsing is wasteful.
+    visitors: dict[str, _FileVisitor] = {}
     for module, path in files:
         try:
             tree = ast.parse(path.read_text(), filename=str(path))
@@ -794,9 +1060,29 @@ def extract_registry(klipper_root: Path) -> dict:
             continue
         v = _FileVisitor()
         v.visit(tree)
+        visitors[module] = v
+
+    def merge_params(params: dict[str, dict], incoming: dict[str, dict],
+                     mux_key: str | None) -> None:
+        for pname, pdef in incoming.items():
+            existing = params.setdefault(pname, {})
+            for field, value in pdef.items():
+                if field == "required" and existing.get("required") is True:
+                    continue
+                if (field == "required" and pname.upper()
+                        == str(mux_key or "").upper()):
+                    # The mux key's optionality is decided by its
+                    # register_mux_command VALUE (None ⇒ optional), never by
+                    # a gcmd read inside the handler.
+                    continue
+                existing[field] = value
+
+    for module, path in files:
+        v = visitors.get(module)
+        if v is None:
+            continue
         for name, mux_key, key_optional, line, handler in v.registrations:
-            record(name, module, mux_key, key_optional, line, v.functions,
-                   handler)
+            record(name, module, mux_key, key_optional, line, v, handler)
 
     # Manual extras are applied by main(), NOT inside extract_registry:
     # fixture trees must extract exactly what their source says.

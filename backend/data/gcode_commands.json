@@ -1,7 +1,7 @@
 {
   "schema_version": 4,
   "source_rev": "2d7717e3b62ea2fe3401b27f54f8681f80451c69",
-  "generated_at": "2026-11-15T16:13:41+00:00",
+  "generated_at": "2026-11-15T16:54:44+00:00",
   "commands": {
     "ABORT": {
       "extra": "bed_screws",
@@ -242,6 +242,45 @@
           "type": "str",
           "required": false,
           "default": "default"
+        },
+        "METHOD": {
+          "type": "str",
+          "required": false,
+          "default": "automatic"
+        },
+        "SCAN_SPEED": {
+          "type": "float",
+          "required": false
+        },
+        "HORIZONTAL_MOVE_Z": {
+          "type": "float",
+          "required": false
+        },
+        "SAMPLE_TIME": {
+          "type": "float",
+          "required": false
+        },
+        "MESH_RADIUS": {
+          "type": "float",
+          "required": false
+        },
+        "ROUND_PROBE_COUNT": {
+          "type": "int",
+          "required": false,
+          "minval": 3
+        },
+        "ALGORITHM": {
+          "type": "str",
+          "required": false
+        },
+        "ADAPTIVE": {
+          "type": "int",
+          "required": false,
+          "default": 0
+        },
+        "ADAPTIVE_MARGIN": {
+          "type": "float",
+          "required": false
         }
       },
       "mux_key": null,
@@ -336,6 +375,51 @@
         "bed_tilt"
       ],
       "requires_mode": "any",
+      "params": {
+        "METHOD": {
+          "type": "str",
+          "required": false,
+          "default": "automatic"
+        },
+        "HORIZONTAL_MOVE_Z": {
+          "type": "float",
+          "required": false
+        },
+        "PROBE_SPEED": {
+          "type": "float",
+          "required": false,
+          "above": 0.0
+        },
+        "LIFT_SPEED": {
+          "type": "float",
+          "required": false,
+          "above": 0.0
+        },
+        "SAMPLES": {
+          "type": "int",
+          "required": false,
+          "minval": 1
+        },
+        "SAMPLE_RETRACT_DIST": {
+          "type": "float",
+          "required": false,
+          "above": 0.0
+        },
+        "SAMPLES_TOLERANCE": {
+          "type": "float",
+          "required": false,
+          "minval": 0.0
+        },
+        "SAMPLES_TOLERANCE_RETRIES": {
+          "type": "int",
+          "required": false,
+          "minval": 0
+        },
+        "SAMPLES_RESULT": {
+          "type": "str",
+          "required": false
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 55
@@ -467,6 +551,51 @@
         "delta_calibrate"
       ],
       "requires_mode": "any",
+      "params": {
+        "METHOD": {
+          "type": "str",
+          "required": false,
+          "default": "automatic"
+        },
+        "HORIZONTAL_MOVE_Z": {
+          "type": "float",
+          "required": false
+        },
+        "PROBE_SPEED": {
+          "type": "float",
+          "required": false,
+          "above": 0.0
+        },
+        "LIFT_SPEED": {
+          "type": "float",
+          "required": false,
+          "above": 0.0
+        },
+        "SAMPLES": {
+          "type": "int",
+          "required": false,
+          "minval": 1
+        },
+        "SAMPLE_RETRACT_DIST": {
+          "type": "float",
+          "required": false,
+          "above": 0.0
+        },
+        "SAMPLES_TOLERANCE": {
+          "type": "float",
+          "required": false,
+          "minval": 0.0
+        },
+        "SAMPLES_TOLERANCE_RETRIES": {
+          "type": "int",
+          "required": false,
+          "minval": 0
+        },
+        "SAMPLES_RESULT": {
+          "type": "str",
+          "required": false
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 123
@@ -614,6 +743,11 @@
           "type": "str",
           "required": false,
           "default": ""
+        },
+        "JSON": {
+          "type": "str",
+          "required": false,
+          "default": null
         }
       },
       "mux_key": null,
@@ -763,6 +897,50 @@
         "gcode_arcs"
       ],
       "requires_mode": "any",
+      "params": {
+        "X": {
+          "type": "float",
+          "required": false
+        },
+        "Y": {
+          "type": "float",
+          "required": false
+        },
+        "Z": {
+          "type": "float",
+          "required": false
+        },
+        "R": {
+          "type": "float",
+          "required": false,
+          "default": null
+        },
+        "I": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        },
+        "J": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        },
+        "K": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        },
+        "E": {
+          "type": "float",
+          "required": false,
+          "default": null
+        },
+        "F": {
+          "type": "float",
+          "required": false,
+          "default": null
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 35
@@ -797,6 +975,50 @@
         "gcode_arcs"
       ],
       "requires_mode": "any",
+      "params": {
+        "X": {
+          "type": "float",
+          "required": false
+        },
+        "Y": {
+          "type": "float",
+          "required": false
+        },
+        "Z": {
+          "type": "float",
+          "required": false
+        },
+        "R": {
+          "type": "float",
+          "required": false,
+          "default": null
+        },
+        "I": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        },
+        "J": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        },
+        "K": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        },
+        "E": {
+          "type": "float",
+          "required": false,
+          "default": null
+        },
+        "F": {
+          "type": "float",
+          "required": false,
+          "default": null
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 36
@@ -1076,6 +1298,19 @@
       "extra": "extruder",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "S": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        },
+        "T": {
+          "type": "int",
+          "required": false,
+          "default": null,
+          "minval": 0
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 188
@@ -1163,6 +1398,13 @@
       "extra": "heater_bed",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "S": {
+          "type": "float",
+          "required": false,
+          "default": 0.0
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 17
@@ -1385,6 +1627,13 @@
       "extra": "manual_probe",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "SPEED": {
+          "type": "float",
+          "required": false,
+          "default": 5.0
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 41
@@ -1438,6 +1687,24 @@
           "type": "int",
           "required": false,
           "default": 1
+        },
+        "INSTANTANEOUS_CORNER_VELOCITY": {
+          "type": "float",
+          "required": false,
+          "default": 1.0,
+          "minval": 0.0
+        },
+        "LIMIT_VELOCITY": {
+          "type": "float",
+          "required": false,
+          "default": 999999.9,
+          "above": 0.0
+        },
+        "LIMIT_ACCEL": {
+          "type": "float",
+          "required": false,
+          "default": 999999.9,
+          "above": 0.0
         }
       },
       "mux_key": "STEPPER",
@@ -1559,6 +1826,42 @@
         "probe"
       ],
       "requires_mode": "any",
+      "params": {
+        "PROBE_SPEED": {
+          "type": "float",
+          "required": false,
+          "above": 0.0
+        },
+        "LIFT_SPEED": {
+          "type": "float",
+          "required": false,
+          "above": 0.0
+        },
+        "SAMPLES": {
+          "type": "int",
+          "required": false,
+          "minval": 1
+        },
+        "SAMPLE_RETRACT_DIST": {
+          "type": "float",
+          "required": false,
+          "above": 0.0
+        },
+        "SAMPLES_TOLERANCE": {
+          "type": "float",
+          "required": false,
+          "minval": 0.0
+        },
+        "SAMPLES_TOLERANCE_RETRIES": {
+          "type": "int",
+          "required": false,
+          "minval": 0
+        },
+        "SAMPLES_RESULT": {
+          "type": "str",
+          "required": false
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 54
@@ -1587,6 +1890,47 @@
         "probe"
       ],
       "requires_mode": "any",
+      "params": {
+        "PROBE_SPEED": {
+          "type": "float",
+          "required": false,
+          "above": 0.0
+        },
+        "LIFT_SPEED": {
+          "type": "float",
+          "required": false,
+          "above": 0.0
+        },
+        "SAMPLES": {
+          "type": "int",
+          "required": false,
+          "minval": 1
+        },
+        "SAMPLE_RETRACT_DIST": {
+          "type": "float",
+          "required": false,
+          "above": 0.0
+        },
+        "SAMPLES_TOLERANCE": {
+          "type": "float",
+          "required": false,
+          "minval": 0.0
+        },
+        "SAMPLES_TOLERANCE_RETRIES": {
+          "type": "int",
+          "required": false,
+          "minval": 0
+        },
+        "SAMPLES_RESULT": {
+          "type": "str",
+          "required": false
+        },
+        "SPEED": {
+          "type": "float",
+          "required": false,
+          "default": 5.0
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 59
@@ -1635,6 +1979,63 @@
         "quad_gantry_level"
       ],
       "requires_mode": "any",
+      "params": {
+        "RETRIES": {
+          "type": "int",
+          "required": false,
+          "minval": 0,
+          "maxval": 30
+        },
+        "RETRY_TOLERANCE": {
+          "type": "float",
+          "required": false,
+          "minval": 0.0,
+          "maxval": 1.0
+        },
+        "METHOD": {
+          "type": "str",
+          "required": false,
+          "default": "automatic"
+        },
+        "HORIZONTAL_MOVE_Z": {
+          "type": "float",
+          "required": false
+        },
+        "PROBE_SPEED": {
+          "type": "float",
+          "required": false,
+          "above": 0.0
+        },
+        "LIFT_SPEED": {
+          "type": "float",
+          "required": false,
+          "above": 0.0
+        },
+        "SAMPLES": {
+          "type": "int",
+          "required": false,
+          "minval": 1
+        },
+        "SAMPLE_RETRACT_DIST": {
+          "type": "float",
+          "required": false,
+          "above": 0.0
+        },
+        "SAMPLES_TOLERANCE": {
+          "type": "float",
+          "required": false,
+          "minval": 0.0
+        },
+        "SAMPLES_TOLERANCE_RETRIES": {
+          "type": "int",
+          "required": false,
+          "minval": 0
+        },
+        "SAMPLES_RESULT": {
+          "type": "str",
+          "required": false
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 45
@@ -2246,6 +2647,55 @@
         "input_shaper"
       ],
       "requires_mode": "any",
+      "params": {
+        "SHAPER_TYPE": {
+          "type": "str",
+          "required": false,
+          "default": null
+        },
+        "DAMPING_RATIO_X": {
+          "type": "float",
+          "required": false,
+          "minval": 0.0
+        },
+        "DAMPING_RATIO_Y": {
+          "type": "float",
+          "required": false,
+          "minval": 0.0
+        },
+        "DAMPING_RATIO_Z": {
+          "type": "float",
+          "required": false,
+          "minval": 0.0
+        },
+        "SHAPER_FREQ_X": {
+          "type": "float",
+          "required": false,
+          "minval": 0.0
+        },
+        "SHAPER_FREQ_Y": {
+          "type": "float",
+          "required": false,
+          "minval": 0.0
+        },
+        "SHAPER_FREQ_Z": {
+          "type": "float",
+          "required": false,
+          "minval": 0.0
+        },
+        "SHAPER_TYPE_X": {
+          "type": "str",
+          "required": false
+        },
+        "SHAPER_TYPE_Y": {
+          "type": "str",
+          "required": false
+        },
+        "SHAPER_TYPE_Z": {
+          "type": "str",
+          "required": false
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 119
@@ -2790,6 +3240,11 @@
         "NAME": {
           "type": "str",
           "required": false
+        },
+        "INPUT_SHAPING": {
+          "type": "int",
+          "required": false,
+          "default": 0
         }
       },
       "mux_key": null,
@@ -2921,6 +3376,10 @@
       "params": {
         "PROBE": {
           "required": true
+        },
+        "ENABLE": {
+          "type": "int",
+          "required": false
         }
       },
       "mux_key": "PROBE",
@@ -3002,6 +3461,11 @@
         "NAME": {
           "type": "str",
           "required": false
+        },
+        "INPUT_SHAPING": {
+          "type": "int",
+          "required": false,
+          "default": 0
         }
       },
       "mux_key": null,
@@ -3093,6 +3557,13 @@
       "extra": "manual_probe",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "SPEED": {
+          "type": "float",
+          "required": false,
+          "default": 5.0
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 67
@@ -3129,6 +3600,63 @@
         "z_tilt"
       ],
       "requires_mode": "any",
+      "params": {
+        "RETRIES": {
+          "type": "int",
+          "required": false,
+          "minval": 0,
+          "maxval": 30
+        },
+        "RETRY_TOLERANCE": {
+          "type": "float",
+          "required": false,
+          "minval": 0.0,
+          "maxval": 1.0
+        },
+        "METHOD": {
+          "type": "str",
+          "required": false,
+          "default": "automatic"
+        },
+        "HORIZONTAL_MOVE_Z": {
+          "type": "float",
+          "required": false
+        },
+        "PROBE_SPEED": {
+          "type": "float",
+          "required": false,
+          "above": 0.0
+        },
+        "LIFT_SPEED": {
+          "type": "float",
+          "required": false,
+          "above": 0.0
+        },
+        "SAMPLES": {
+          "type": "int",
+          "required": false,
+          "minval": 1
+        },
+        "SAMPLE_RETRACT_DIST": {
+          "type": "float",
+          "required": false,
+          "above": 0.0
+        },
+        "SAMPLES_TOLERANCE": {
+          "type": "float",
+          "required": false,
+          "minval": 0.0
+        },
+        "SAMPLES_TOLERANCE_RETRIES": {
+          "type": "int",
+          "required": false,
+          "minval": 0
+        },
+        "SAMPLES_RESULT": {
+          "type": "str",
+          "required": false
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 139
