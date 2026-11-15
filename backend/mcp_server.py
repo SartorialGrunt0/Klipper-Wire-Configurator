@@ -1262,8 +1262,18 @@ class McpServer:
                     "'Expected effect (commanded, not observed)': fan "
                     "percent, LED colours, temperature TARGETS, console "
                     "text — so you can check the outcome matches the "
-                    "intent, not merely that it renders. Hardware names "
-                    "(FAN=, LED=, PIN=, SERVO=, HEATER=) are resolved "
+                    "intent, not merely that it renders. Heat lines say "
+                    "'Set' vs 'Set and Wait': M104/M140 return "
+                    "immediately, while M109/M190 BLOCK the macro until "
+                    "the target is reached — the wait works inside "
+                    "macros (it is Klipper's own cmd_M104 with wait=True; "
+                    "the 'M109 does not block in a macro' belief is "
+                    "Marlin lore), except Klipper skips the wait when "
+                    "S=0. Pure blocking waits (TEMPERATURE_WAIT, G4, "
+                    "M400) are listed too. Do NOT add a manual "
+                    "TEMPERATURE_WAIT after M109/M190 to 'make it wait'. "
+                    "Hardware names (FAN=, LED=, PIN=, SERVO=, HEATER=) "
+                    "are resolved "
                     "against the sections THIS project declares: FAN= "
                     "only takes [fan_generic] names (FAN=fan is refused at "
                     "run time even when [fan] exists), and an unknown name "
@@ -1273,8 +1283,9 @@ class McpServer:
                     "printer state unknown; branches on undeclared "
                     "state render BOTH ways). Limits it states on every "
                     "result: it renders the TEMPLATE only — CALL macros "
-                    "are not recursed; motion, waits, and side effects "
-                    "do not execute."
+                    "are not recursed; motion, heating, and delays do "
+                    "not execute (waiting commands are reported as "
+                    "waiting under 'Expected effect', nothing pauses)."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -3666,7 +3677,9 @@ class McpServer:
     _SIM_RUN_CAP = 6
     _SIM_LIMITS = (
         "Limits: this renders the TEMPLATE only — CALL macros are not "
-        "recursed, and motion, waits, and side effects do not execute. "
+        "recursed, and motion, heating, and delays do not execute "
+        "(waiting commands appear under 'Expected effect' as Set / Set "
+        "and Wait / blocking waits, but nothing actually pauses). "
         "Anything not declared in a scenario stayed <unknown>: never "
         "present a rendered value as a printer fact.")
 
@@ -4174,6 +4187,45 @@ class McpServer:
         return changes, notes
 
     @staticmethod
+    def _sim_heat_effect(kind: str, waits_requested: bool,
+                         s: str | None) -> str:
+        """`Set` vs `Set and Wait` — the distinction the dogfood showed was
+        invisible (M104/M140 and M109/M190 rendered as identical target
+        lines, so the simulation could not show that M109 ALREADY blocks:
+        cmd_M109 is cmd_M104 with wait=True, kinematics/extruder.py:277,
+        in macros too — the 'M109 does not wait in a macro' belief is
+        Marlin lore). The one real skip: set_temperature waits only
+        `if wait and temp` (heaters.py:365), so S=0 never blocks; a
+        non-literal S cannot decide it, and the effect line says so."""
+        shown = s if s is not None else "?"
+        if not waits_requested:
+            return (f"{kind} target {shown}C — Set (does not wait; "
+                    "heating not simulated)")
+        numeric = None
+        if s is not None:
+            try:
+                numeric = float(s)
+            except ValueError:
+                numeric = None
+        if numeric is not None and numeric <= 0:
+            return (f"{kind} target {shown}C — Set (NO wait even though "
+                    "this is the waiting command: Klipper skips the wait "
+                    "when S=0 — heaters.py 'if wait and temp')")
+        if numeric is None:
+            return (f"{kind} target {shown}C — Set and Wait, UNLESS the "
+                    "target resolves to 0 (Klipper skips the wait when "
+                    "S=0; the rendered S is not a literal number, so "
+                    "this cannot be decided here)")
+        return (f"{kind} target {shown}C — Set and Wait (the macro "
+                "BLOCKS here until reached; heating itself not "
+                "simulated)")
+
+    @staticmethod
+    def _sim_wait_effect(detail: str, caveat: str) -> str:
+        return (f"Wait (blocking) — {detail} ({caveat}; the wait itself "
+                "is not simulated)")
+
+    @staticmethod
     def _sim_effect_lines(lines: list[str]) -> list[str]:
         """What the rendered commands ASK the printer to do.
 
@@ -4222,11 +4274,29 @@ class McpServer:
                 out.append(f"fan '{params['FAN']}' commanded to "
                            + as_pct_of_one(params.get("SPEED", "0")))
             elif token in ("M104", "M109"):
-                out.append(f"hotend target {params.get('S', '?')}C "
-                           "(heating not simulated)")
+                out.append(McpServer._sim_heat_effect(
+                    "hotend", token == "M109", params.get("S")))
             elif token in ("M140", "M190"):
-                out.append(f"bed target {params.get('S', '?')}C "
-                           "(heating not simulated)")
+                out.append(McpServer._sim_heat_effect(
+                    "bed", token == "M190", params.get("S")))
+            elif token == "TEMPERATURE_WAIT":
+                bounds = ", ".join(
+                    f"{k}={params[k]}"
+                    for k in ("MINIMUM", "MAXIMUM") if k in params)
+                out.append(McpServer._sim_wait_effect(
+                    f"sensor '{params.get('SENSOR', '?')}' reaches "
+                    + (bounds or "the commanded bound"),
+                    "pure wait — sets no target"))
+            elif token == "G4":
+                dwell = (f"{params['P']} ms" if "P" in params
+                         else f"{params['P1']} s" if "P1" in params
+                         else "an unknown duration")
+                out.append(McpServer._sim_wait_effect(
+                    f"dwell {dwell}", "timed delay"))
+            elif token == "M400":
+                out.append(McpServer._sim_wait_effect(
+                    "all queued moves complete before the next command",
+                    "motion queue sync"))
             elif token == "SET_LED" and params.get("LED"):
                 cols = " ".join(f"{c}={params[c]}"
                                 for c in ("RED", "GREEN", "BLUE", "WHITE")

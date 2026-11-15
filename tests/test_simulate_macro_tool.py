@@ -289,6 +289,68 @@ def test_expected_effect_maps_fan_generic_speed_to_percent():
     assert "fan 'Aux_Fan' commanded to 50%" in out
 
 
+def test_expected_effect_distinguishes_set_from_set_and_wait():
+    """Dogfood (2026-11-15): M104/M109 and M140/M190 produced IDENTICAL
+    effect lines, and the model — seeing no distinction in the
+    simulation — invented a manual M104+TEMPERATURE_WAIT wait, claiming
+    M109 does not block inside macros. Klipper truth: cmd_M109 is
+    cmd_M104 with wait=True (kinematics/extruder.py:277), blocking in
+    macros too. The effect lines must show it."""
+    text = ("[gcode_macro HEATUP]\n"
+            "gcode:\n"
+            "  M104 S220\n"
+            "  M109 S220\n"
+            "  M140 S60\n"
+            "  M190 S60\n")
+    out = _call(macro_text=text)
+    assert "hotend target 220C — Set (does not wait" in out
+    assert "hotend target 220C — Set and Wait" in out
+    assert "bed target 60C — Set (does not wait" in out
+    assert "bed target 60C — Set and Wait" in out
+    # and the two hotend lines are NOT the same line
+    hot = [ln for ln in out.splitlines() if "hotend target 220C" in ln]
+    assert len(hot) == 2 and hot[0] != hot[1]
+
+
+def test_m109_zero_target_is_set_only_not_a_wait():
+    """heaters.py set_temperature waits only `if wait and temp` — M109
+    S0 sets and returns like M104, and the effect line must not claim a
+    block that Klipper will skip."""
+    text = ("[gcode_macro COOLDOWN_OFF]\n"
+            "gcode:\n"
+            "  M109 S0\n")
+    out = _call(macro_text=text)
+    assert "Set (NO wait even though" in out
+    assert "Set and Wait (the macro BLOCKS" not in out
+
+
+def test_m109_unknown_target_reports_the_skip_condition():
+    """S rendered from unknown state cannot decide the S=0 skip — say
+    so instead of asserting a wait."""
+    text = ("[gcode_macro HEATUNK]\n"
+            "gcode:\n"
+            "  M109 S{printer.extruder.target}\n")
+    out = _call(macro_text=text)
+    assert "Set and Wait, UNLESS the target resolves to 0" in out
+
+
+def test_expected_effect_lists_pure_blocking_waits():
+    """TEMPERATURE_WAIT / G4 / M400 previously produced NO effect line —
+    a macro whose only logic was waiting looked inert."""
+    text = ("[gcode_macro SETTLE]\n"
+            "gcode:\n"
+            "  TEMPERATURE_WAIT SENSOR=extruder MINIMUM=219 MAXIMUM=221\n"
+            "  G4 P500\n"
+            "  G4 P1=2\n"
+            "  M400\n")
+    out = _call(macro_text=text)
+    assert ("Wait (blocking) — sensor 'extruder' reaches MINIMUM=219, "
+            "MAXIMUM=221") in out
+    assert "dwell 500 ms" in out
+    assert "dwell 2 s" in out
+    assert "all queued moves complete" in out
+
+
 # ── D4: a body that does not compile is never silent ───────────────────────
 
 _DOUBLE_BRACE = (
