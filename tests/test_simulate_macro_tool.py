@@ -468,6 +468,55 @@ def test_handler_stays_silent_when_an_include_is_missing():
     assert "is not valid for FAN" not in out
 
 
+# ── D6/D7: enum membership, and the sentinel that ate the word "info" ─────
+
+def test_respond_type_info_is_an_error_not_unknown_state():
+    """D7: 'inf' used to substring-match inside 'info', so this line was
+    reported as "renders as unknown printer state (info)" — an info note
+    about a call Klipper refuses outright (respond.py:44)."""
+    from parser.macro_render import simulate_macro  # noqa: PLC0415
+    res = simulate_macro('RESPOND TYPE=info MESSAGE="Aux fan on"')
+    codes = [(f.severity, f.code) for f in res.findings]
+    assert codes == [("error", "macro_param_enum_invalid")]
+    assert "not a legal value" in res.findings[0].message
+    assert "'echo'" in res.findings[0].message
+
+
+def test_legal_respond_types_pass():
+    from parser.macro_render import simulate_macro  # noqa: PLC0415
+    for value in ("echo", "command", "error", "echo_no_space", "ECHO"):
+        assert simulate_macro(f'RESPOND TYPE={value} MSG="hi"').findings == []
+
+
+def test_dual_carriage_mode_is_enum_checked():
+    from parser.macro_render import simulate_macro  # noqa: PLC0415
+    ok = simulate_macro("SET_DUAL_CARRIAGE CARRIAGE=0 MODE=copy")
+    assert ok.findings == []
+    bad = simulate_macro("SET_DUAL_CARRIAGE CARRIAGE=0 MODE=full_control")
+    assert [f.code for f in bad.findings] == ["macro_param_enum_invalid"]
+
+
+def test_unknown_rendered_value_is_still_unknown_state():
+    """The sentinel path must keep working: an undeclared printer-state
+    read is undecidable, never an enum verdict."""
+    from parser.macro_render import simulate_macro  # noqa: PLC0415
+    res = simulate_macro("RESPOND TYPE={printer.resp_type}")
+    assert [f.code for f in res.findings] == ["macro_unknown_value"]
+    assert res.findings[0].severity == "info"
+
+
+def test_looks_unknown_is_sentinel_exact():
+    from parser.macro_render import _looks_unknown  # noqa: PLC0415
+    assert _looks_unknown("<unknown>")
+    assert _looks_unknown("nan")
+    assert _looks_unknown("-inf")
+    assert _looks_unknown("Infinity")
+    # the D7 false positives: words that merely CONTAIN inf/nan
+    assert not _looks_unknown("info")
+    assert not _looks_unknown("infeed")
+    assert not _looks_unknown("nanometer")
+
+
 # ── working state shadows disk (W3 scope ruling) ───────────────────────────
 
 def test_staged_content_shadows_the_macro_lookup():

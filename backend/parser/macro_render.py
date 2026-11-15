@@ -98,7 +98,15 @@ MAX_RENDER_VARIANTS = 16
 # coordinate): the UNKNOWN sentinel's string form and the NaN/inf it
 # floats to (which propagate through arithmetic and |round without
 # fabricating a value).
-_UNKNOWN_MARKERS = ("<unknown>", "nan", "inf")
+_UNKNOWN_MARKERS = ("<unknown>",)
+
+# inf/nan are STANDALONE sentinel values (float(UNKNOWN) is NaN and
+# arithmetic propagates it). They used to be matched as SUBSTRINGS, so a
+# rendered literal like `TYPE=info` was read as an unknown value and
+# downgraded from a defect to an info note (D7, found by the r12 retest:
+# RESPOND TYPE=info is a run-time error but the sim called it unknown
+# state). Match the sentinel spelling, never the word.
+_UNKNOWN_NUMERIC_RE = re.compile(r"^[+-]?(?:inf(?:inity)?|nan)$", re.IGNORECASE)
 
 # Every finding code this engine emits (single source for the 4R.2
 # consumption split via is_sim_advisory below). The post-render G1
@@ -114,6 +122,7 @@ SIM_FINDING_CODES = frozenset({
     "macro_rendered_g1_no_feedrate",
     "macro_jinja_syntax",
     "macro_mux_target_unknown",
+    "macro_param_enum_invalid",
 })
 
 
@@ -871,8 +880,9 @@ _G1_F_RE = re.compile(r"\bF\s*[0-9]", re.IGNORECASE)
 
 
 def _looks_unknown(value: str) -> bool:
-    v = value.strip().lower()
-    return any(m in v for m in _UNKNOWN_MARKERS)
+    v = value.strip()
+    return ("<unknown>" in v.lower()
+            or bool(_UNKNOWN_NUMERIC_RE.match(v)))
 
 
 def _is_traditional_gcode(token: str) -> bool:
@@ -1046,6 +1056,7 @@ def _check_rendered_line(text: str, registry: dict, variant: int,
                     "literal — Klipper parses VALUE with literal_eval and "
                     "fails the call at run time (quote strings: "
                     "VALUE='on').", variant=variant))
+    findings.extend(_enum_findings(token, present, variant, source_line))
     findings.extend(_mux_target_findings(token, entry, present, sections,
                                          variant, source_line))
     return findings
@@ -1143,6 +1154,55 @@ def _mux_target_names(sections: "frozenset[str] | None",
         elif numbered and re.fullmatch(r"extruder\d*", head):
             names.add(head)
     return names
+
+
+# ── enum params: legal values Klipper refuses anything else for ───────────
+#
+# Only params whose membership test RAISES gcmd.error belong here: those
+# are run-time refusals of the rendered line, the same class as an
+# unparseable float. A validate-and-respond_info check (BLTouch COMMAND,
+# M204) is NOT one — Klipper prints a hint and carries on, so flagging it
+# would invent a failure.
+#
+#   RESPOND TYPE         respond.py: respond_types + respond_types_no_space
+#                        else raise "RESPOND TYPE 'x' is invalid. Must be
+#                        one of 'echo', 'command', or 'error'"
+#   SET_DUAL_CARRIAGE MODE  kinematics/idex_modes.py VALID_MODES else
+#                        raise "Invalid mode=%s specified"
+#
+# Bounds (minval/maxval) are deliberately NOT validated here: 63 of them
+# exist in klippy and most are config-dependent (`SET_PIN VALUE` maxval is
+# the pin's own scale, `SET_LED INDEX` maxval is the chain length), so a
+# static verdict would be a guess. Literal-only bounds are a separate,
+# smaller follow-up.
+_PARAM_ENUMS: dict[str, dict[str, frozenset[str]]] = {
+    "RESPOND": {"TYPE": frozenset({"echo", "command", "error",
+                                   "echo_no_space"})},
+    "SET_DUAL_CARRIAGE": {"MODE": frozenset({"inactive", "primary",
+                                             "copy", "mirror"})},
+}
+
+
+def _enum_findings(token: str, present: dict[str, str], variant: int,
+                   source_line: int | None) -> list[RenderFinding]:
+    """Reject a param value Klipper's own membership test refuses."""
+    spec = _PARAM_ENUMS.get(token)
+    if not spec:
+        return []
+    out: list[RenderFinding] = []
+    for pname, allowed in spec.items():
+        value = present.get(pname)
+        if value is None or not value.strip() or _looks_unknown(value):
+            continue          # absent = required-check's job; unknown = undecidable
+        if value.strip().lower() in allowed:
+            continue
+        listed = ", ".join("'%s'" % v for v in sorted(allowed))
+        out.append(RenderFinding(
+            "error", "macro_param_enum_invalid",
+            f"{token} {pname}='{value}' is not a legal value — Klipper "
+            f"refuses the call at run time. Allowed: {listed}.",
+            variant=variant, source_line=source_line))
+    return out
 
 
 def _mux_target_findings(token: str, entry: dict, present: dict[str, str],
