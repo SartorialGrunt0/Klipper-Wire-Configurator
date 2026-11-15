@@ -618,6 +618,54 @@ def _missing_param_reads(src_text: str,
     return missing
 
 
+_ALIAS_SET_RE = re.compile(r"\{%-?\s*set\s+(\w+)\s*=(.*?)-?%\}", re.DOTALL)
+_ALIAS_FOR_RE = re.compile(r"\{%-?\s*for\s+(\w+)\s+in\s+(.*?)-?%\}",
+                           re.DOTALL)
+_LINE_EXPR_RE = re.compile(r"\{\{?\s*([A-Za-z_]\w*)\s*\}?\}")
+
+
+def _param_alias_map(src_text: str) -> dict[str, str]:
+    """Template name -> raw param name for reads hidden behind Jinja
+    aliases (the Hotkey.cfg FP class, dev-server dogfood 2026-11-14):
+    ``{% set led = params.LED|string %}`` and ``{% for i in idx %}``
+    over a stringified param. Filter chains are NOT judged here — the
+    body-wide missing set already exempts ``|default`` reads, and the
+    intersection is taken against it. Chains (set→set, for→set) resolve
+    through bounded fixpoint passes; conditional or complex values stay
+    unresolved (no shield — conservative direction for ERRORs is only
+    ever advisory loss, never fabricated verdicts)."""
+    raw: dict[str, str] = {}
+    for _ in range(4):
+        changed = False
+        for m in _ALIAS_SET_RE.finditer(src_text):
+            name, expr = m.group(1), m.group(2)
+            if name in raw:
+                continue
+            pm = _PARAM_READ_RE.search(expr)
+            head = expr.split("|")[0].strip()
+            if pm:
+                raw[name] = pm.group(1) or pm.group(2)
+                changed = True
+            elif head in raw and head != name:
+                raw[name] = raw[head]
+                changed = True
+        for m in _ALIAS_FOR_RE.finditer(src_text):
+            var, it = m.group(1), m.group(2)
+            if var in raw:
+                continue
+            pm = _PARAM_READ_RE.search(it)
+            its = it.strip().strip("'\"")
+            if pm:
+                raw[var] = pm.group(1) or pm.group(2)
+                changed = True
+            elif its in raw and its != var:
+                raw[var] = raw[its]
+                changed = True
+        if not changed:
+            break
+    return raw
+
+
 def _render_one(env: jinja2.Environment, src: str, params: dict[str, str],
                 variant: int,
                 variables: dict[str, str] | None = None,
@@ -955,6 +1003,8 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
     pd_reported: set[str] = set()
     for vi, variant_src in enumerate(variants):
         src_lines = variant_src.split("\n")
+        alias_map = _param_alias_map(variant_src) if not invocation_given \
+            else {}
         lines, finding = _render_one(_MACRO_JINJA_ENV, variant_src,
                                      render_params, vi, variables,
                                      printer_state, param_dependent)
@@ -978,6 +1028,16 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
             if not invocation_given and match is not None:
                 missing = _missing_param_reads(src_lines[match],
                                                declared_lower)
+                # Reads hidden behind Jinja aliases (`{% set led =
+                # params.LED|string %}`, a for-loop over a stringified
+                # param) resolve through the alias map and intersect
+                # with the body-wide missing set — the |default
+                # exemption and declared check already live there.
+                if alias_map:
+                    for em in _LINE_EXPR_RE.finditer(src_lines[match]):
+                        pname = alias_map.get(em.group(1))
+                        if pname and pname in param_dependent:
+                            missing.add(pname)
                 if missing:
                     for nm in sorted(missing):
                         if nm.lower() in pd_reported:

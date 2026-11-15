@@ -171,3 +171,65 @@ def test_validator_declares_defaults_not_invocation():
                   and e.severity == "info"
                   and e.code == "macro_param_undefined"]
     assert len(open_infos) == 1
+
+
+# ── aliased param reads (dev-server dogfood 2026-11-14, Hotkey.cfg class) ──
+#
+# The per-line param-dependence check saw only DIRECT params.X reads on
+# the rendered line. The Hotkey.cfg family hides the read behind
+# `{% set led = params.LED|string %}` (and behind a for-loop over a
+# stringified param), so the Undefined-coerced EMPTY landed on a
+# different source line and was misclassified as a STATIC error. The
+# fix resolves the line's template expressions THROUGH the alias chains
+# to the underlying param before deciding.
+
+def test_set_alias_empty_value_is_param_dependent():
+    body = ("    {% set led = params.LED|string %}\n"
+            "    SET_LED LED={led} RED=1 GREEN=0 BLUE=0\n")
+    r = simulate_macro(body, declared_defaults={})
+    assert not [f for f in r.findings if f.severity == "error"], \
+        [f.message for f in r.findings if f.severity == "error"]
+    assert any(f.code == "macro_param_undefined" and "LED" in f.message
+               for f in r.findings)
+
+
+def test_for_loop_alias_index_is_param_dependent():
+    body = ("    {% set idx = (params.IDX|string).split(',') %}\n"
+            "    {% for i in idx %}\n"
+            "    SET_LED LED=x INDEX={i} RED=0 GREEN=0 BLUE=0\n"
+            "    {% endfor %}\n")
+    r = simulate_macro(body, declared_defaults={})
+    assert not [f for f in r.findings if f.severity == "error"], \
+        [f.message for f in r.findings if f.severity == "error"]
+    assert any(f.code == "macro_param_undefined" for f in r.findings)
+
+
+def test_declared_empty_default_through_alias_stays_error():
+    # the STATIC class must survive aliasing too: params_RED declared
+    # EMPTY rides every invocation regardless of how the body aliases it
+    body = ("    {% set r = params.RED %}\n"
+            "    SET_LED LED=strip RED={r} GREEN=0 BLUE=0\n")
+    r = simulate_macro(body, declared_defaults={"red": ""})
+    errs = [f for f in r.findings
+            if f.severity == "error" and f.code == "macro_param_renders_empty"]
+    assert len(errs) == 1, [f.message for f in r.findings]
+
+
+def test_invocation_through_alias_still_verdicts():
+    # an explicit invocation that OMITS LED genuinely fails — with
+    # invocation_given the alias class keeps full severity
+    body = ("    {% set led = params.LED|string %}\n"
+            "    SET_LED LED={led} RED=1 GREEN=0 BLUE=0\n")
+    r = simulate_macro(body, params={}, declared_defaults={})
+    assert any(f.severity == "error"
+               and f.code == "macro_param_renders_empty"
+               for f in r.findings), [f.message for f in r.findings]
+
+
+def test_defaulted_alias_never_adds_dependency():
+    # params.TRANSMIT|default(1) is decided without any invocation — the
+    # alias must not param-dependency-shield defects on its lines
+    body = ("    {% set t = params.TRANSMIT|default(1) %}\n"
+            "    SET_LED LED=x TRANSMIT={t} RED=1 GREEN=0 BLUE=0\n")
+    r = simulate_macro(body, declared_defaults={})
+    assert r.findings == [], [f.message for f in r.findings]
