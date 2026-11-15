@@ -1038,11 +1038,12 @@ def build_simtool_questions() -> list[TestQuestion]:
         ),
         TestQuestion(
             qid="SIMTOOL-02",
-            title="Sim tool: toggle write job simulates BOTH variable states",
+            title="Sim tool: toggle write job runs twice and flips state",
             text="Add a TOGGLE_FAN macro to printer.cfg that switches the "
                  "fan on and off, using a variable to remember whether it "
-                 "is on. Before you tell me it works, simulate both toggle "
-                 "states and show me what each one sends.",
+                 "is on. Before you tell me it works, run the macro twice "
+                 "in a row — simulate the first call, then the very next "
+                 "call — and show me what each one sends.",
             context_files=_sim_project(""),
             expected_tools=("simulate_macro",),
             require_tool=True,
@@ -1053,20 +1054,30 @@ def build_simtool_questions() -> list[TestQuestion]:
                 # it false-failed the r2 artifact (a CLEAN named-fan
                 # toggle), caught by offline replay 2026-11-14.
                 ("staged_renders_clean", "printer\\.cfg"),
-                # A named-fan toggle (SET_FAN_SPEED FAN=x SPEED=y) is
-                # as correct as M106/M107 — the r2 model chose it after
-                # list_hardware found the project fan. Grade the
+                # PERSISTENCE, graded in the staged artifact: a toggle
+                # that never writes its state back cannot toggle. The r8
+                # leg-b dead toggle ({% set %} only, no write) passed the
+                # old criteria. Klipper's mux key is MACRO
+                # (gcode_macro.py:148), so a row of SET_FAN_SPEED alone
+                # is not a toggle.
+                ("staged_section_regex",
+                 "printer\\.cfg::gcode_macro TOGGLE_FAN::"
+                 "SET_GCODE_VARIABLE MACRO=TOGGLE_FAN"),
+                # Fan command: a named-fan toggle (SET_FAN_SPEED FAN=x
+                # SPEED=y) is as correct as M106/M107 — grade the
                 # behavior, not one spelling.
                 ("staged_section_regex",
-                 "printer\\.cfg::gcode_macro TOGGLE_FAN::SET_FAN_SPEED|M10[67]"),
-                ("any_of", json.dumps([
-                    [["tool_args",
-                      "simulate_macro:scenarios:variables.{0,400}variables"],
-                     ["tool_args", "simulate_macro:scenarios"]],
-                    [["tool_call_count", "simulate_macro::2"],
-                     ["tool_args",
-                      "simulate_macro:scenarios:variables"]],
-                ])),
+                 "printer\\.cfg::gcode_macro TOGGLE_FAN::"
+                 "SET_FAN_SPEED|M10[67]"),
+                # RUNS, not two independent scenarios: only runs=N threads
+                # call 1's own SET_GCODE_VARIABLE into call 2, which is
+                # what "does it toggle" actually means. Two scenarios
+                # prove the branches, never the transition (r7 leg b).
+                ("tool_args", "simulate_macro:runs:[2-6]"),
+                # Grade the tool's own computed verdict, not the reply
+                # prose about it.
+                ("tool_output_regex",
+                 "simulate_macro::commands differ: YES"),
             ),
         ),
         TestQuestion(
