@@ -1026,12 +1026,18 @@ def build_simtool_questions() -> list[TestQuestion]:
             expected_tools=("simulate_macro",),
             require_tool=True,
             criteria=(
-                # Binding is key-anchored: the tool_args kind JSON-renders
-                # the scenarios value, so key and value sit `": "` apart —
-                # the gap must cover `": "` plus a possible escape layer
-                # (stringified scenarios arrive with \" quotes).
-                ("tool_args",
-                 r"simulate_macro:scenarios:extruder.{0,30}temperature.{0,8}180"),
+                # Binding is key-anchored: tool_args value is
+                # "tool:ARG_KEY:regex" and the KEY is a literal argument
+                # name (it is NOT a regex), so the two accepted shapes are
+                # two arms: printer_state inside scenarios[0], or the
+                # top-level single-invocation shorthand. r10 leg a used the
+                # shorthand and was false-failed by a one-spelling anchor.
+                ("any_of", json.dumps([
+                    [["tool_args",
+                      r"simulate_macro:scenarios:extruder.{0,30}temperature.{0,8}180"]],
+                    [["tool_args",
+                      r"simulate_macro:printer_state:extruder.{0,30}temperature.{0,8}180"]],
+                ])),
                 ("tool_output_regex", "simulate_macro::M106 S255"),
                 ("contains", "255"),
             ),
@@ -1090,8 +1096,18 @@ def build_simtool_questions() -> list[TestQuestion]:
             expected_tools=("simulate_macro",),
             require_tool=True,
             criteria=(
-                ("tool_args", "simulate_macro:scenarios:BED.{0,8}60"),
-                ("tool_args", "simulate_macro:scenarios:EXTRUDER.{0,8}230"),
+                # params arrive either inside scenarios[0] or as the
+                # top-level shorthand — the same declared invocation in two
+                # accepted spellings (tool_args keys are literal arg names,
+                # so each spelling is its own arm).
+                ("any_of", json.dumps([
+                    [["tool_args", r"simulate_macro:scenarios:BED.{0,8}60"]],
+                    [["tool_args", r"simulate_macro:params:BED.{0,8}60"]],
+                ])),
+                ("any_of", json.dumps([
+                    [["tool_args", r"simulate_macro:scenarios:EXTRUDER.{0,8}230"]],
+                    [["tool_args", r"simulate_macro:params:EXTRUDER.{0,8}230"]],
+                ])),
                 ("tool_output_regex", "simulate_macro::M104 S230"),
                 ("tool_output_regex", "simulate_macro::M140 S60"),
                 ("contains", "230"),
