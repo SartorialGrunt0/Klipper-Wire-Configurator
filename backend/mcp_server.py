@@ -3258,8 +3258,21 @@ class McpServer:
             if "gcode" not in top_level_keys:
                 issues.append({"severity": "warning", "message": f"Macro '{macro_name}' is missing the 'gcode:' key. A gcode_macro must have a 'gcode:' section with the commands to run."})
 
-            # Check description:
-            has_description = any(line.strip().startswith("description:") for line in lines[1:10])
+            # Check description: — section-bounded, and only top-level keys
+            # of THIS macro count. The previous window scanned absolute
+            # lines 1..9 of the whole text, so any section above the macro
+            # (e.g. a [neopixel] block in a real printer.cfg) pushed the
+            # real `description:` out of range and reported a macro that
+            # HAS one as missing it (found 2026-11-15 while building the
+            # MACRO-15 fixture).
+            macro_section_lines: list[str] = []
+            for line in lines[header_line_idx + 1:]:
+                if line.startswith("["):
+                    break
+                macro_section_lines.append(line)
+            has_description = any(
+                re.match(r"description\s*:", ln, re.IGNORECASE)
+                for ln in macro_section_lines)
             if not has_description:
                 issues.append({"severity": "info", "message": f"Macro '{macro_name}' is missing a 'description:' field. Adding one makes the macro self-documenting."})
 

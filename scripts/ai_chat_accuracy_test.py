@@ -886,6 +886,94 @@ def build_macro_questions() -> list[TestQuestion]:
                 ("not_contains", "renders empty"),
             ),
         ),
+        # ── P2/P3 runtime-class questions (2026-11-15) ────────────────
+        # The render simulator now knows each command's LITERAL bounds and
+        # its either-of rules, so a macro can be wrong in ways the Jinja
+        # compiler, the config schema and the static command-shape check
+        # all pass: a value outside the range Klipper's own get_float()
+        # enforces, or a parameter combination Klipper refuses outright.
+        #
+        # Ground truth (reference/klipper, Aug-2026 checkout):
+        #   led.py:76-78          get_float('RED', 0., minval=0., maxval=1.)
+        #   fan_generic.py:35-38  (speed is None) == (template is None)
+        #                         -> "SET_FAN_SPEED must specify SPEED or
+        #                            TEMPLATE" for BOTH-present too
+        #   heaters.py:369-373    TEMPERATURE_WAIT MINIMUM/MAXIMUM both
+        #                         default to +-inf, then
+        #                         "missing MINIMUM or MAXIMUM"
+        # Both fixtures are single-macro texts because that is the tool's
+        # contract (validate_macro renders ONE [gcode_macro] section).
+        TestQuestion(
+            qid="MACRO-15",
+            title="Macros: out-of-range + contradictory params in a macro we check",
+            text=("A friend sent me this macro from their config. Before I "
+                  "copy it into mine — will it actually run? If Klipper will "
+                  "refuse any of these lines, tell me which ones and why:\n\n"
+                  "```cfg\n"
+                  "[gcode_macro CHAMBER_DIM]\n"
+                  "description: dim the chamber lights and slow the fans "
+                  "for quiet mode\n"
+                  "gcode:\n"
+                  "    SET_LED LED=Chamber_LEDs RED=2.5 GREEN=0.4 BLUE=0.4\n"
+                  "    SET_FAN_SPEED FAN=Chamber_Fan SPEED=0.4 "
+                  'TEMPLATE="40 percent"\n'
+                  "```"),
+            expected_tools=("validate_macro", "simulate_macro"),
+            require_tool=True,
+            criteria=(
+                # (1) the out-of-range class. Klipper's message is
+                # "RED must have maximum of 1.00"; the simulator's is
+                # "outside the range Klipper accepts". Either witness
+                # counts; a generic "check your values" does not.
+                ("regex", r"(?i)out of range|outside the range|"
+                          r"max(imum)? (of|is) 1|exceeds? (the )?(0?\.?1|range)"),
+                # (2) the contradiction class: exactly one of SPEED/TEMPLATE.
+                # r1 (2026-11-15) FALSE-FAILED a correct answer that wrote
+                # "both `SPEED` and `TEMPLATE` are given" and "accepts
+                # exactly one of" — backticks and the "exactly one of"
+                # spelling both missed. Grade the EXCLUSIVITY claim, not one
+                # wording: allow backticks/whitespace between the names.
+                # The EXCLUSIVITY claim only — "both `SPEED` and `TEMPLATE`
+                # are given" alone is a description, and a wrong answer can
+                # phrase it too ("give both, that covers it"). Every arm
+                # below states that only one is allowed.
+                ("regex", r"(?i)(exactly|only) one of|"
+                          r"can.?t (use|specify|set|have|give) both|"
+                          r"either .{0,20}SPEED.{0,40}TEMPLATE|"
+                          r"(never|not) both"),
+                # (3) it must name what is wrong, not just "there are issues".
+                ("regex", r"RED|SPEED|TEMPLATE|SET_LED|SET_FAN_SPEED"),
+                # Negative controls: the two wrong beliefs.
+                ("not_contains", "will run fine"),
+                ("not_contains", "no problems"),
+                ("not_contains", "nothing wrong"),
+            ),
+        ),
+        TestQuestion(
+            qid="MACRO-16",
+            title="Macros: wait macro supplies neither bound (at-least-one rule)",
+            text=("Will this macro work as written? Tell me exactly what "
+                  "happens when I run it:\n\n"
+                  "```cfg\n"
+                  "[gcode_macro WAIT_SOAK]\n"
+                  "description: wait for the chamber to soak\n"
+                  "gcode:\n"
+                  "    TEMPERATURE_WAIT SENSOR=chamber\n"
+                  "```"),
+            expected_tools=("validate_macro",),
+            require_tool=False,
+            criteria=(
+                # heaters.py:369-373 — MINIMUM and MAXIMUM both default to
+                # -inf/+inf, so with neither given the comparison is
+                # vacuous and Klipper raises "missing MINIMUM or MAXIMUM".
+                # The 'or' rule is the inverse of MACRO-15's 'xor' rule.
+                ("regex", r"(?i)TEMPERATURE_WAIT|MINIMUM|MAXIMUM"),
+                ("regex", r"(?i)at least one|neither|must (specify|provide|"
+                          r"give|include)|missing|required"),
+                ("not_contains", "works fine"),
+                ("not_contains", "no problems"),
+            ),
+        ),
     ]
 
 
@@ -983,6 +1071,7 @@ gcode:
     M190 S{params.BED}
     M109 S{params.EXTRUDER}
 """
+
 # NO `params_BED:`/`params_EXTRUDER:` declarations on purpose
 # (review 4.1, 2026-11-14): the shipped static validator currently
 # hard-errors params_* keys on [gcode_macro] as unknown_param (a
@@ -990,6 +1079,37 @@ gcode:
 # into the question already red. Undeclared params are valid Klipper
 # (required-at-invocation); the question supplies both values as
 # explicit scenario params, which render identically.
+
+# Chamber hardware for the questions that need a resolvable SET_LED /
+# SET_FAN_SPEED target: a neopixel and a named fan, so a mux refusal cannot
+# be confused with the parameter defect the question is about.
+_SIM_CHAMBER_HW = """
+[neopixel Chamber_LEDs]
+pin: PB1
+chain_count: 30
+
+[fan_generic Chamber_Fan]
+pin: PB2
+"""
+
+# SIMTOOL-06: the offending value exists only AFTER rendering — the static
+# layer sees `{params.R}`, which is well-formed.
+_SIM_SET_BRIGHT = """
+[gcode_macro SET_BRIGHT]
+description: set chamber light brightness from a 0-1 fraction
+gcode:
+    SET_LED LED=Chamber_LEDs RED={params.R} GREEN={params.R} BLUE={params.R}
+"""
+
+# SIMTOOL-07: the hotend ceiling is CONFIG-derived (max_temp), never a
+# literal in the handler, so no bound is recorded — and none may be invented.
+_SIM_PREHEAT = """
+[gcode_macro PREHEAT]
+description: heat the hotend to the given target and wait for it
+gcode:
+    M104 S{params.T}
+    M109 S{params.T}
+"""
 
 _SIM_LEVEL_FAN = """
 [gcode_macro LEVEL_FAN]
@@ -1151,6 +1271,77 @@ def build_simtool_questions() -> list[TestQuestion]:
             criteria=(
                 ("not_staged_any", ""),
                 ("regex", r"cool_?down|M106|fan"),
+            ),
+        ),
+        TestQuestion(
+            qid="SIMTOOL-06",
+            title="Sim tool: parameter-driven value is out of range at run time",
+            text="I'm about to call SET_BRIGHT R=2 on my chamber lights to "
+                 "make them extra bright. Will that actually work? Run it "
+                 "with R=2 rather than reasoning about the template — the "
+                 "template itself looks fine to me.",
+            context_files=_sim_project(_SIM_CHAMBER_HW + _SIM_SET_BRIGHT),
+            expected_tools=("simulate_macro",),
+            require_tool=True,
+            criteria=(
+                # The value only exists AFTER rendering: the static checks
+                # see `{params.R}` and cannot know it becomes 2. Graded on
+                # the tool artifact (the rendered line + its verdict), never
+                # on prose about "probably fine".
+                # led.py:76-78 bounds RED/GREEN/BLUE to 0..1.
+                ("tool_output_regex", "simulate_macro::RED=2"),
+                ("tool_output_regex",
+                 "simulate_macro::outside the range|maximum of 1"),
+                # The answer must land on the refusal, not on brightness
+                # advice. Either the simulator's wording or the human
+                # outcome counts.
+                ("regex", r"(?i)out of range|outside the range|"
+                          r"max(imum)? of 1|will (be )?(refused|rejected|error)"),
+                ("not_contains", "will work fine"),
+            ),
+        ),
+        TestQuestion(
+            qid="SIMTOOL-07",
+            title="Sim tool negative control: config-derived limits are not invented",
+            # Scope matters (r2 trace, 2026-11-15): "safe to run on my
+            # printer?" invites an audit of the LIVE host, and a model that
+            # finds real environment problems there (a halted klippy, no
+            # [extruder]) is RIGHT to say the call fails — which has nothing
+            # to do with the belief under test. Ask about the value.
+            text="My PREHEAT macro passes its T straight to M104 and M109. "
+                 "Before I call it as PREHEAT T=240, I want to know about the "
+                 "command itself: is 240 outside any range Klipper checks, so "
+                 "the command gets rejected for being out of range? Run it and "
+                 "tell me what the command-level verdict is.",
+            context_files=_sim_project(_SIM_PREHEAT),
+            expected_tools=("simulate_macro",),
+            require_tool=True,
+            criteria=(
+                # The cry-wolf guard for P3: the hotend ceiling comes from
+                # the CONFIG (max_temp), never from a literal in the
+                # handler, so the registry records no bound for M104/M109
+                # and the simulator must NOT invent one. 240 renders and is
+                # accepted; only the project's own config can make it
+                # refused, which this bare project does not.
+                ("tool_output_regex", "simulate_macro::M104 S240"),
+                ("tool_output_not_regex",
+                 "simulate_macro::outside the range|maximum of 1"),
+                # r1 (2026-11-15) FALSE-FAILED "Klipper will accept it" —
+                # the arm listed accepted/accepts but not the bare verb,
+                # which is the most natural phrasing of this verdict.
+                # The command-level verdict must be affirmative. Guards are
+                # the INVENTED-BOUND claim only: "if max_temp is below 240
+                # Klipper will refuse it" is TRUE and must not fail — so the
+                # negative arms name the bound, never the verb "accept"
+                # (r2 trace: "it will not run successfully ... won't accept"
+                # was an environment finding, not a bounds error).
+                ("regex", r"(?i)\b(valid|fine|allowed|ok)\b|"
+                          r"will (be )?accept|accepts\b|"
+                          r"no (issues|problems|refusal)|"
+                          r"not (an )?out.of.range"),
+                ("not_contains", "outside the range Klipper accepts"),
+                ("not_contains", "is outside the range"),
+                ("not_contains", "exceeds the maximum"),
             ),
         ),
     ]

@@ -1715,6 +1715,58 @@ def test_search_user_configs_descriptions_advertise_checklist_and_keywords():
     assert "REFERENCES" in snip and "keywords=" in snip
 
 
+# ── description: check must be section-bounded (found 2026-11-15) ──────────
+# The check used to scan absolute lines 1..9 of the whole text, so any
+# section ABOVE the macro pushed a real `description:` out of the window and
+# reported the macro as missing one. [neopixel] is the trigger seen in the
+# wild: it is what a real printer.cfg has above a chamber-light macro.
+
+_PROBE_DESC_MACRO = ("[gcode_macro CHAMBER_ON]\n"
+                     "description: turn the chamber lights full white\n"
+                     "gcode:\n"
+                     "    SET_LED LED=Chamber_LEDs RED=1 GREEN=1 BLUE=1\n")
+
+
+def _desc_suggestion(out: str) -> bool:
+    return "missing a 'description:'" in out
+
+
+def test_facade_description_not_missing_when_hardware_precedes_the_macro():
+    cfg = ("[printer]\nkinematics: cartesian\n"
+           "\n[neopixel Chamber_LEDs]\npin: PB1\nchain_count: 30\n\n"
+           + _PROBE_DESC_MACRO)
+    assert not _desc_suggestion(McpServer()._handle_validate_macro(
+        {"macro_text": cfg}))
+
+
+def test_facade_description_still_missing_when_truly_absent():
+    cfg = ("[printer]\nkinematics: cartesian\n\n"
+           "[neopixel Chamber_LEDs]\npin: PB1\nchain_count: 30\n\n"
+           "[gcode_macro CHAMBER_ON]\ngcode:\n"
+           "    SET_LED LED=Chamber_LEDs RED=1 GREEN=1 BLUE=1\n")
+    assert _desc_suggestion(McpServer()._handle_validate_macro(
+        {"macro_text": cfg}))
+
+
+def test_facade_indented_description_is_body_text_not_a_key():
+    # A `description:` indented under gcode: is macro BODY (it becomes a
+    # gcode line), not the section key — the old strip()-based scan
+    # accepted it and suppressed a true finding.
+    cfg = "[gcode_macro CHAMBER_ON]\ngcode:\n    description: not a key\n"
+    assert _desc_suggestion(McpServer()._handle_validate_macro(
+        {"macro_text": cfg}))
+
+
+def test_facade_description_from_the_NEXT_macro_does_not_count():
+    # Section-bounded also means the next macro's description cannot
+    # satisfy this one's check.
+    cfg = ("[gcode_macro A_MACRO]\ngcode:\n    M117 hi\n"
+           "\n[gcode_macro B_MACRO]\ndescription: has one\n"
+           "gcode:\n    M117 hi\n")
+    out = McpServer()._handle_validate_macro({"macro_text": cfg})
+    assert "Macro 'A_MACRO' is missing a 'description:'" in out
+
+
 # ── W3: validate_macro runtime_error traceback ─────────────────────────────
 
 _W3_TRACE_MACRO = (

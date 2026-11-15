@@ -409,6 +409,166 @@ NEGATIVE_CONTROLS += [
 ]
 
 
+# ── P2/P3 runtime-class controls (2026-11-15) ─────────────────────────────
+# MACRO-15/16 and SIMTOOL-06/07 grade knowledge of the rules the render
+# simulator now enforces. Each answer arm is pinned from BOTH sides: the
+# wrong belief must fail, and the correct answer (in the shape a model
+# actually produces) must pass — otherwise a criterion could quietly
+# over-fire and turn a right answer into a FAIL.
+_SIM_RED2_OUTPUT = (
+    "Rendered (1 path(s)):\n"
+    "  L1: SET_LED LED=Chamber_LEDs RED=2 GREEN=2 BLUE=2\n"
+    "Findings:\n"
+    "  - ERROR: SET_LED RED=2 is outside the range Klipper accepts — "
+    "the call errors at run time (RED must have maximum of 1.0). (L1)")
+
+_SIM_PREHEAT_CLEAN_OUTPUT = (
+    "Rendered (1 path(s)):\n"
+    "  L1: M104 S240\n"
+    "  L2: M109 S240\n"
+    "Findings: none — every rendered command matched the registry shape "
+    "on this invocation.")
+
+NEGATIVE_CONTROLS += [
+    # MACRO-15 — wrong beliefs.
+    ("MACRO-15: both lines declared fine", "MACRO-15",
+     {"response": "Both commands are valid Klipper and nothing wrong here — "
+                  "it will run fine.",
+      "pending_edits": [], "tool_calls": []}),
+    ("MACRO-15: generic worry, no parameter named", "MACRO-15",
+     {"response": "There are some issues with this macro — check your values "
+                  "against Klipper's docs before saving.",
+      "pending_edits": [], "tool_calls": []}),
+    # MACRO-15 — the correct answer must stay green.
+    ("MACRO-15: names both defects (must PASS)", "MACRO-15",
+     dict({"response": "Two problems. Line 1: SET_LED RED=2.5 is outside the "
+                       "range Klipper accepts — RED must have maximum of "
+                       "1.00, so that call errors at run time. Line 2: "
+                       "SET_FAN_SPEED accepts only one of SPEED or TEMPLATE, "
+                       "and you gave both, so Klipper refuses it.",
+           "pending_edits": [], "tool_calls": []}, _expect_pass=True)),
+    # MACRO-16 — wrong beliefs.
+    ("MACRO-16: defaults make it work", "MACRO-16",
+     {"response": "This works fine — TEMPERATURE_WAIT just waits for the "
+                  "default temperature.",
+      "pending_edits": [], "tool_calls": []}),
+    ("MACRO-16: names the command, states no rule", "MACRO-16",
+     {"response": "TEMPERATURE_WAIT is the right command for a chamber "
+                  "soak, so the macro is good.",
+      "pending_edits": [], "tool_calls": []}),
+    ("MACRO-16: neither bound, quotes the refusal (must PASS)", "MACRO-16",
+     dict({"response": "It fails at run time. TEMPERATURE_WAIT sets MINIMUM "
+                       "and MAXIMUM to -inf/+inf, and with neither given it "
+                       "raises \"missing MINIMUM or MAXIMUM\". Add "
+                       "MINIMUM=<temp> or MAXIMUM=<temp>.",
+           "pending_edits": [], "tool_calls": []}, _expect_pass=True)),
+    # SIMTOOL-06 — the value only exists after rendering.
+    ("SIMTOOL-06: prose claims fine, never ran the sim", "SIMTOOL-06",
+     {"response": "It will work fine — brightness is clamped to 1.0 at the "
+                  "driver, so R=2 is harmless.",
+      "pending_edits": [], "tool_calls": []}),
+    ("SIMTOOL-06: ran the sim with the wrong params (R=1)", "SIMTOOL-06",
+     {"response": "That will be fine, the LED takes the value.",
+      "pending_edits": [],
+      "tool_calls": [{"name": "simulate_macro",
+                      "output": "Rendered (1 path(s)):\n"
+                                "  L1: SET_LED LED=Chamber_LEDs RED=1 "
+                                "GREEN=1 BLUE=1\n"
+                                "Findings: none — every rendered command "
+                                "matched the registry shape."}]}),
+    ("SIMTOOL-06: renders RED=2 and calls the refusal (must PASS)",
+     "SIMTOOL-06",
+     dict({"response": "It will fail: RED=2 is out of range — Klipper's "
+                       "SET_LED takes 0 to 1 per channel, so the call is "
+                       "refused at run time.",
+           "pending_edits": [],
+           "tool_calls": [{"name": "simulate_macro",
+                           "output": _SIM_RED2_OUTPUT}]}, _expect_pass=True)),
+    # SIMTOOL-07 — cry-wolf: the hotend ceiling is config-derived, so the
+    # simulator must not invent a bound and the answer must not claim one.
+    ("SIMTOOL-07: invents an out-of-range refusal", "SIMTOOL-07",
+     {"response": "Klipper will refuse it — 240 is outside the range.",
+      "pending_edits": [],
+      "tool_calls": [{"name": "simulate_macro",
+                      "output": "Rendered (1 path(s)):\n  L1: M104 S240\n"
+                                "Findings:\n  - ERROR: M104 S240 is outside "
+                                "the range Klipper accepts."}]}),
+    ("SIMTOOL-07: clean run, calls 240 valid (must PASS)", "SIMTOOL-07",
+     dict({"response": "That is valid: M104/M109 accept 240 and Klipper will "
+                       "not refuse the command. Only your own max_temp "
+                       "setting could.",
+           "pending_edits": [],
+           "tool_calls": [{"name": "simulate_macro",
+                           "output": _SIM_PREHEAT_CLEAN_OUTPUT}]},
+          _expect_pass=True)),
+    # ── r1 live-trace shapes (2026-11-15): the FIRST live run false-failed
+    # these two correct answers. Pinning the real wording keeps the arms
+    # from drifting back to one spelling.
+    ("MACRO-15 r1 trace: backticked names + 'exactly one of' (must PASS)",
+     "MACRO-15",
+     dict({"response":
+           "Both lines fail.\n"
+           "**Line 1: `SET_LED LED=Chamber_LEDs RED=2.5 ...`**\n"
+           "- **Refused: `RED=2.5` is out of range.** Klipper's `SET_LED` "
+           "requires every color value to be between 0.0 and 1.0; Klipper "
+           "would error with something like \"RED must have maximum of 1.0\".\n"
+           "**Line 2: `SET_FAN_SPEED FAN=Chamber_Fan SPEED=0.4 "
+           "TEMPLATE=\"40 percent\"`**\n"
+           "- **Refused: both `SPEED` and `TEMPLATE` are given.** "
+           "`SET_FAN_SPEED` accepts exactly one of `SPEED=<0..1>` or "
+           "`TEMPLATE=\"<percent> percent\"` — never both.\n"
+           "- **Second, independent failure: `FAN=Chamber_Fan` doesn't exist "
+           "in your config.**",
+           "pending_edits": [], "tool_calls": []}, _expect_pass=True)),
+    ("SIMTOOL-07 r1 trace: 'will accept it' (must PASS)", "SIMTOOL-07",
+     dict({"response":
+           "Yes — Klipper will accept it. I ran the invocation through the "
+           "macro simulator against your current `printer.cfg`.\n\n"
+           "**Rendered commands for `PREHEAT T=240`:**\n"
+           "- `M104 S240` — set hotend target to 240°C\n"
+           "- `M109 S240` — wait until the hotend reaches 240°C\n\n"
+           "**Findings:** none. Both commands match the registry shape.\n\n"
+           "One runtime caveat the simulation can't see: Klipper would refuse "
+           "the target only if your extruder's `max_temp` is below 240.",
+           "pending_edits": [],
+           "tool_calls": [{"name": "simulate_macro",
+                           "output": _SIM_PREHEAT_CLEAN_OUTPUT}]},
+          _expect_pass=True)),
+    # ── arms must not admit the INVERTED claim (2026-11-15) ───────────
+    # Widening a positive arm is how a criterion starts grading vocabulary
+    # instead of belief: "give both" describes the same parameters the
+    # right answer names, and "will not accept" shares the verb "accept".
+    ("MACRO-15: prescribes giving both SPEED and TEMPLATE", "MACRO-15",
+     {"response": "Line 1 is out of range (RED must have maximum of 1.0) — "
+                  "use 1.0 instead. For the fan, give both SPEED and "
+                  "TEMPLATE, that covers both cases.",
+      "pending_edits": [], "tool_calls": []}),
+    ("SIMTOOL-07: negated verdict 'will not accept'", "SIMTOOL-07",
+     {"response": "Klipper will not accept 240 — it is above the accepted "
+                  "maximum, so the command is rejected.",
+      "pending_edits": [],
+      "tool_calls": [{"name": "simulate_macro",
+                      "output": _SIM_PREHEAT_CLEAN_OUTPUT}]}),
+    # r2 trace (2026-11-15): a correct command-level verdict that ALSO
+    # reports real environment problems must pass — the question grades the
+    # value, not the machine's health.
+    ("SIMTOOL-07 r2 trace: command fine, refusal is environmental (must PASS)",
+     "SIMTOOL-07",
+     dict({"response":
+           "The macro itself is syntactically fine — the Jinja template "
+           "compiles and both commands match Klipper's expected shape. No "
+           "macro-level refusal, and 240 is not out of range for the "
+           "command.\n\nBut no — it will not run successfully on this printer "
+           "right now: Klipper is halted on a startup config error, and your "
+           "working config has no [extruder] section, so M104/M109 won't "
+           "accept the target until that exists.",
+           "pending_edits": [],
+           "tool_calls": [{"name": "simulate_macro",
+                           "output": _SIM_PREHEAT_CLEAN_OUTPUT}]},
+          _expect_pass=True)),
+]
+
+
 def controls() -> int:
     qmap = bank()
     print("=" * 74)
