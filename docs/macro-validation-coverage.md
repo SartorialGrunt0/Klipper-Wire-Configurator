@@ -149,12 +149,52 @@ seam is `EXTRA_MANUAL`, and it holds only `FORCE_MOVE` /
    either would fabricate "renders EMPTY" on working configs. Per-axis params
    are always individually optional.
 
-**What remains in this class** (verified, not estimated): `BED_MESH_PROFILE`
-is the only documented command that still has no params at all; its `key` read
-is a profile **name**, and existence is runtime state (§6), so only shape is
-checkable and the `LOAD/SAVE/REMOVE` keys already cover it. The rest are names
-resolved against config (`STEPPER=`, `CHIP=`, `STATE=`) — mux work (P4) or
-stateful existence, not typing work.
+**What remains in this class** (verified by an independent handler-by-handler
+inventory, cross-checked against the artifact — not estimated): **20 commands
+still read parameters the registry does not know about** — 10 documented
+(`PROBE`, `PROBE_CALIBRATE`, `MANUAL_PROBE`, `Z_ENDSTOP_CALIBRATE`,
+`BED_TILT_CALIBRATE`, `DELTA_CALIBRATE`, `QUAD_GANTRY_LEVEL`, `Z_TILT_ADJUST`,
+`BED_MESH_PROFILE`, `SET_INPUT_SHAPER`) and 10 undocumented (`G0`, `G1`, `G2`,
+`G3`, `G28`, `M23`, `M109`, `M190`, `M117`, `M118`). None of them produces a
+false "missing parameter" error — `M26 S` was the only required one in the whole
+gap set and it is now covered — so the cost is silent **under-validation**
+(non-numeric values are never type-checked), not false positives.
+
+Three mechanisms, in value order:
+
+1. **`gcmd` handed to a helper object** (8 commands — the probe family). The
+   handler passes `gcmd` to `ProbeParameterHelper.get_probe_params`,
+   `ProbePointsHelper.start_probe`, `ManualProbeHelper.__init__` or
+   `z_tilt.RetryHelper.start`, and the reads happen there. A small table of
+   (module, class, method) → params closes it; every param must be optional
+   because those helpers supply config-derived defaults.
+2. **Intra-file delegation** (`M109` → `cmd_M104`, `M190` → `cmd_M140`, `G2`/`G3`
+   → `_cmd_inner`, `SET_INPUT_SHAPER` → `update`). Merge the same-file callee's
+   params, depth ≤ 3, cycle-guarded — but do **not** merge a callee that builds
+   a synthetic command with `create_gcode_command`: those params belong to the
+   synthesized command, not the invoked one.
+3. **Raw / positional text** (`M23` filename, `M117`/`M118` message,
+   `G0`/`G1` reading `get_command_parameters()` as a dict). There is no
+   `NAME=value` parameter here, so params must stay **empty** — inventing a
+   `FILENAME=`/`MSG=` param would mean the simulator never sees what the user
+   actually writes.
+
+Deliberate non-goals inside this residue: `G2`/`G3`'s `R` is read only to be
+rejected (`gcode_arcs.py:72`); `G28`'s axes are a presence read and typing them
+as numbers would fabricate "renders EMPTY" on canonical `G28 X Y` (typing them as
+str is safe but buys nothing); and `G1`'s axis set is runtime-extensible
+(`toolhead.get_extra_axes()`), so X/Y/Z/E is only the statically provable floor.
+
+**Correction to the inventory that produced this list:** it claimed
+`SET_INPUT_SHAPER` has no `*_Z` params in this checkout because only x and y
+shapers are built. That is false — `input_shaper.py:112` constructs
+`AxisInputShaper('z', config)` and `cmd_SET_INPUT_SHAPER` calls `shaper.update`
+for all three, so `SHAPER_TYPE_Z`, `SHAPER_FREQ_Z` and `DAMPING_RATIO_Z` ARE
+read (`'SHAPER_TYPE_' + axis`, `:31`; `'DAMPING_RATIO_' + axis`, `:35`;
+`'SHAPER_FREQ_' + axis`, `:41`). Anyone closing this command must include the Z
+variants. (Its names are prefix-built from an axis loop, so the P1 prefix
+pattern would cover them once the handler's `shaper.update(gcmd)` delegation is
+followed.)
 
 ### P2 — either-of / at-least-one rules
 
