@@ -45,7 +45,7 @@ hoping the model is careful.
    - [Honesty guards](#honesty-guards)
 5. [Appendix](#appendix)
    - [Accuracy testing](#accuracy-testing)
-   - [Question bank](#question-bank-111-questions)
+   - [Question bank](#question-bank-119-questions)
    - [Current model results](#current-model-results)
    - [Known failure families](#known-failure-families)
    - [Running the harness](#running-the-harness)
@@ -244,12 +244,18 @@ guesses parameters:
 | `calculate_rotation_distance` | Steps/mm math for belts and leadscrews. |
 | `list_connected_devices` / `get_klippy_status` | Real serial/CAN devices; live Klipper state (ready / startup error / shutdown) — used before edits that depend on whether the printer is even up. |
 
-**Gate visibility**: the render simulator runs inside the save gate and the
-AI delta gate, where only ERROR-class render findings (a command that would
-fail at runtime) surface — human-facing validation and AI write-path review
-never show simulation warnings or infos. Advisory simulation output exists
-only where it was explicitly requested: `validate_macro`'s full set and
-`simulate_macro`'s scenarios.
+**Gate visibility — law A (2026-11-14)**: render-simulation findings are
+consumed on three tiers. Passive surfaces (the human validation feed, the
+native load path, the AI delta gate) show only STATICALLY-DECIDABLE
+findings — ones that follow from the file text and hold under EVERY
+invocation: empty/garbage declared `params_*` defaults, broken literal
+lines. Reads of undeclared params are PARAM-DEPENDENT (info) without a
+declared invocation, never verdicts. The delta gate additionally admits
+sim findings only at error severity. The full finding set exists only
+where simulation was explicitly requested — `validate_macro`'s full
+report and `simulate_macro`'s per-scenario output, each labeled with the
+declared invocation. Nothing in this tier can move a printer: the
+simulator renders templates and never sends gcode.
 
 **The edit layer is skill-gated**: write tools are advertised only after the
 model calls `load_skill(name='config-editing')`, which injects the edit
@@ -433,8 +439,10 @@ Design laws earned the hard way:
 
 ### Current model results
 
-All rows are the **current** bank (111 questions) at temperature 1.0, native
-protocol, edit tools on, against the same backend. Ranges span the full-bank
+All rows were measured on the **111-question** bank of that date at
+temperature 1.0, native protocol, edit tools on, against the same
+backend (the bank now stands at 119 with the SIMTOOL family added
+2026-11-14). Ranges span the full-bank
 runs closest to the shipped build; single-run deltas inside the range are
 noise, not ranking.
 
