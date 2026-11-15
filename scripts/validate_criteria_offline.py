@@ -566,6 +566,69 @@ NEGATIVE_CONTROLS += [
            "tool_calls": [{"name": "simulate_macro",
                            "output": _SIM_PREHEAT_CLEAN_OUTPUT}]},
           _expect_pass=True)),
+    # ── MACRO-17: a value computed with {% set %} ─────────────────────
+    ("MACRO-17: 'SET_LED takes any float'", "MACRO-17",
+     {"response": "The macro is fine — SET_LED accepts any float, so 1.8 is "
+                  "fine and it will run without issues.",
+      "pending_edits": [], "tool_calls": []}),
+    ("MACRO-17: nitpicks the variable name, never the value", "MACRO-17",
+     {"response": "The level variable is a bit unclear — rename it to "
+                  "brightness for readability. Otherwise the macro looks good.",
+      "pending_edits": [], "tool_calls": []}),
+    ("MACRO-17: resolves level and applies the bound (must PASS)", "MACRO-17",
+     dict({"response": "It will fail at run time. `{% set level = 1.8 %}` "
+                       "makes RED/GREEN/BLUE render as 1.8, and SET_LED "
+                       "requires each channel to be at most 1.0 — 1.8 is "
+                       "outside the range Klipper accepts, so that call "
+                       "errors out.",
+           "pending_edits": [], "tool_calls": []}, _expect_pass=True)),
+    # ── SIMTOOL-08: a CALLed macro is not expanded ────────────────────
+    ("SIMTOOL-08: reads 'Findings: none' as 'the lights get set'",
+     "SIMTOOL-08",
+     {"response": "Yes — the run shows G28 then GLOW, and findings were none, "
+                  "so the chamber lights get set when HOME_ALL runs.",
+      "pending_edits": [],
+      "tool_calls": [{"name": "simulate_macro",
+                      "output": "Rendered (1 path(s)):\n  L1: G28\n"
+                                "  L2: GLOW\nFindings: none — every rendered "
+                                "command matched the registry shape."}]}),
+    ("SIMTOOL-08: confabulates the LED result", "SIMTOOL-08",
+     {"response": "Yes: the simulation confirms the chamber lights are set "
+                  "to 40% after G28.",
+      "pending_edits": [],
+      "tool_calls": [{"name": "simulate_macro",
+                      "output": "Rendered (1 path(s)):\n  L1: G28\n"
+                                "  L2: GLOW\nFindings: none — every rendered "
+                                "command matched the registry shape."}]}),
+    # r1 trace (2026-11-15): the model staged a fix and then narrated
+    # `GLOW -> SET_LED ...` as if the run had expanded the CALL. Fabricated
+    # provenance is the exact failure this question exists to catch.
+    ("SIMTOOL-08 r1 trace: narrates an expansion the run never did",
+     "SIMTOOL-08",
+     {"response": "Done — staged the fix in `printer.cfg`. Re-simulated after "
+                  "the edit: `HOME_ALL` -> `G28`, `GLOW` -> `SET_LED "
+                  "LED=Chamber_LEDs RED=1.0 GREEN=1.0 BLUE=1.0` - no "
+                  "findings, so the chamber lights will now actually be set "
+                  "when the macro runs.",
+      "pending_edits": [],
+      "tool_calls": [{"name": "simulate_macro",
+                      "output": "Rendered (1 path(s)):\n  L1: G28\n"
+                                "  L2: GLOW\nFindings: none — every rendered "
+                                "command matched the registry shape."}]}),
+    ("SIMTOOL-08: states the CALL limit (must PASS)", "SIMTOOL-08",
+     dict({"response":
+           "Partly, and I can only answer the part the tool covers: the run "
+           "shows `G28` followed by a `GLOW` call, and findings were none for "
+           "those lines. CALL macros are not expanded by the simulator, so I "
+           "can't verify from this run whether GLOW actually sets the lights. "
+           "Reading GLOW's body separately, it does `SET_LED ... RED=0.4 "
+           "GREEN=0.4 BLUE=0.4`, which is within the 0-1 range.",
+           "pending_edits": [],
+           "tool_calls": [{"name": "simulate_macro",
+                           "output": "Rendered (1 path(s)):\n  L1: G28\n"
+                                     "  L2: GLOW\nFindings: none — every "
+                                     "rendered command matched the registry "
+                                     "shape."}]}, _expect_pass=True)),
 ]
 
 

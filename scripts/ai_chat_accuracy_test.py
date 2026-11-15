@@ -974,6 +974,39 @@ def build_macro_questions() -> list[TestQuestion]:
                 ("not_contains", "no problems"),
             ),
         ),
+        # ── computed-value + CALL-honesty questions (2026-11-15) ──────
+        # MACRO-15/16 test values written literally. Real configs also
+        # COMPUTE them (`{% set %}`), and the simulator resolves the Jinja
+        # before judging — verified against led.py:76-78 bounds.
+        TestQuestion(
+            qid="MACRO-17",
+            title="Macros: value computed in-template is out of range",
+            text=("I wrote this GLOW macro to set my chamber lights to a "
+                  "fixed level. Will it run as written? Tell me exactly "
+                  "what happens when I call it:\n\n"
+                  "```cfg\n"
+                  "[gcode_macro GLOW]\n"
+                  "description: glow at a fixed level\n"
+                  "gcode:\n"
+                  "    {% set level = 1.8 %}\n"
+                  "    SET_LED LED=Chamber_LEDs RED={level} GREEN={level} "
+                  "BLUE={level}\n"
+                  "```"),
+            expected_tools=("validate_macro", "simulate_macro"),
+            require_tool=False,
+            criteria=(
+                # The literal 1.8 is a Jinja constant, not a param and not
+                # on the rendered line as written — the answer has to
+                # resolve `level` and then apply led.py's 0..1 bound.
+                ("regex", r"(?i)out of range|outside the range|"
+                          r"max(imum)? (of|is) 1"),
+                # Tie the verdict to the computed value, not to a guess.
+                ("regex", r"1\.8|level"),
+                ("not_contains", "will run fine"),
+                ("not_contains", "works fine"),
+                ("not_contains", "no problems"),
+            ),
+        ),
     ]
 
 
@@ -1099,6 +1132,39 @@ _SIM_SET_BRIGHT = """
 description: set chamber light brightness from a 0-1 fraction
 gcode:
     SET_LED LED=Chamber_LEDs RED={params.R} GREEN={params.R} BLUE={params.R}
+"""
+
+# SIMTOOL-08: a macro whose body is only a CALL. Klipper renders the body
+# completely before executing, and the simulator does NOT recurse into the
+# called macro — so "Findings: none" here means "this line is well formed",
+# never "the called macro ran". HOME_ALL must come FIRST: simulate_macro
+# takes one [gcode_macro] section from provided text, and the first wins.
+_SIM_HOME_ALL = """
+[gcode_macro HOME_ALL]
+description: home then set the chamber lights
+gcode:
+    G28
+    GLOW
+"""
+
+# SIMTOOL-08 needs a CLEAN callee: r1 reused MACRO-17's buggy GLOW, so the
+# question turned into "fix this" and the honesty probe never ran (the model
+# staged a fix and then narrated an expansion the tool never performed).
+_SIM_GLOW_CLEAN = """
+[gcode_macro GLOW]
+description: set the chamber lights to 40 percent
+gcode:
+    SET_LED LED=Chamber_LEDs RED=0.4 GREEN=0.4 BLUE=0.4
+"""
+
+# MACRO-17: the offending value is a Jinja constant, so neither the static
+# layer nor the rendered source line shows it until `level` is resolved.
+_SIM_GLOW = """
+[gcode_macro GLOW]
+description: glow at a fixed level
+gcode:
+    {% set level = 1.8 %}
+    SET_LED LED=Chamber_LEDs RED={level} GREEN={level} BLUE={level}
 """
 
 # SIMTOOL-07: the hotend ceiling is CONFIG-derived (max_temp), never a
@@ -1342,6 +1408,38 @@ def build_simtool_questions() -> list[TestQuestion]:
                 ("not_contains", "outside the range Klipper accepts"),
                 ("not_contains", "is outside the range"),
                 ("not_contains", "exceeds the maximum"),
+            ),
+        ),
+        TestQuestion(
+            qid="SIMTOOL-08",
+            title="Sim tool honesty: a CALLed macro is not expanded",
+            # "Don't change anything" is scope discipline, not politeness:
+            # r1 wandered into staging a fix and then narrated an expansion
+            # the tool never performed, so the honesty probe never ran.
+            text="Run HOME_ALL and tell me whether my chamber lights "
+                 "actually get set when this macro runs. Don't change "
+                 "anything yet — I just want to know what the run shows.",
+            context_files=_sim_project(
+                _SIM_CHAMBER_HW + _SIM_HOME_ALL + _SIM_GLOW_CLEAN),
+            expected_tools=("simulate_macro",),
+            require_tool=True,
+            criteria=(
+                # The simulator renders `GLOW` as a command and says
+                # "Findings: none" — because CALL macros are NOT recursed.
+                # An answer that reports the lights get set has confused
+                # "no findings on this line" with "the called macro ran".
+                # The tool artifact proves the run happened...
+                ("tool_output_regex", "simulate_macro::GLOW"),
+                # ...and the prose must state the limit, not a verdict.
+                ("regex", r"(?i)not (expanded|recursed|resolved|followed|"
+                          r"inlined|simulated|walked)|"
+                          r"doesn'?t (expand|recurse|follow)|"
+                          r"can'?t (see|verify|confirm|tell)|"
+                          r"cannot (see|verify|confirm|tell)|"
+                          r"only (renders|shows|validates)|"
+                          r"template only|separate"),
+                ("not_contains", "simulation confirms"),
+                ("not_contains", "simulation shows the LED"),
             ),
         ),
     ]
