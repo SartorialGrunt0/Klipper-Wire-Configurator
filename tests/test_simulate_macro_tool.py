@@ -372,6 +372,102 @@ def test_shorthand_must_be_an_object():
     assert "must be an object" in out
 
 
+# ── D5: mux targets are resolved against the project's hardware ───────────
+
+def test_unknown_fan_target_warns_with_klippers_near_miss():
+    """SET_FAN_SPEED FAN= only enumerates [fan_generic NAME]: [fan] is the
+    part-cooling fan driven by M106/M107, so FAN=fan dies at run time with
+    "The value 'fan' is not valid for FAN. Did you mean 'Aux_Fan'?" — the
+    exact artifact SIMTOOL-02 r9 leg b staged and passed."""
+    from parser.macro_render import simulate_macro  # noqa: PLC0415
+    res = simulate_macro("SET_FAN_SPEED FAN=fan SPEED=1.0",
+                         sections=frozenset({"fan", "fan_generic aux_fan"}))
+    codes = [(f.severity, f.code) for f in res.findings]
+    assert codes == [("warning", "macro_mux_target_unknown")]
+    msg = res.findings[0].message
+    assert "The value 'fan' is not valid for FAN" in msg
+    assert "Did you mean 'aux_fan'?" in msg
+    # a shape-valid line is still rendered; the warning is the verdict
+    assert [line.text for line in res.rendered] == ["SET_FAN_SPEED FAN=fan SPEED=1.0"]
+
+
+def test_declared_fan_target_is_clean():
+    from parser.macro_render import simulate_macro  # noqa: PLC0415
+    res = simulate_macro("SET_FAN_SPEED FAN=Aux_Fan SPEED=1.0",
+                         sections=frozenset({"fan", "fan_generic aux_fan"}))
+    assert res.findings == []
+
+
+def test_mux_check_is_silent_when_availability_is_undecidable():
+    """No section inventory (unresolved include / no project) → no verdict.
+    Absence of evidence is not evidence of absence (same law as the
+    variable checks)."""
+    from parser.macro_render import simulate_macro  # noqa: PLC0415
+    res = simulate_macro("SET_FAN_SPEED FAN=fan SPEED=1.0")
+    assert res.findings == []
+
+
+def test_unknown_target_with_no_candidates_names_the_missing_family():
+    from parser.macro_render import simulate_macro  # noqa: PLC0415
+    res = simulate_macro("SET_LED LED=stealthburner RED=1",
+                         sections=frozenset({"printer"}))
+    assert res.findings[0].code == "macro_mux_target_unknown"
+    msg = res.findings[0].message
+    assert "[neopixel]" in msg and "[dotstar]" in msg
+    assert "No [neopixel]" in msg
+
+
+def test_led_and_pin_families_resolve_by_section_name():
+    from parser.macro_render import simulate_macro  # noqa: PLC0415
+    secs = frozenset({"neopixel stealthburner", "output_pin caselight"})
+    assert simulate_macro("SET_LED LED=stealthburner RED=1",
+                          sections=secs).findings == []
+    assert simulate_macro("SET_PIN PIN=caselight VALUE=1",
+                          sections=secs).findings == []
+    assert simulate_macro("SET_PIN PIN=other VALUE=1",
+                          sections=secs).findings[0].code == \
+        "macro_mux_target_unknown"
+
+
+def test_mux_warning_does_not_gate_the_write_path():
+    """warning severity + sim-origin = tool surface only (the human save
+    gate and the model's delta advisories never see it)."""
+    from parser.macro_render import is_sim_advisory  # noqa: PLC0415
+    assert is_sim_advisory("macro_mux_target_unknown", "warning")
+
+
+def test_handler_resolves_targets_from_the_working_state():
+    """End to end through the tool: a project that declares [fan] and
+    [fan_generic Aux_Fan] makes FAN=fan a warning."""
+    text = ("[gcode_macro FAN_TEST]\n"
+            "gcode:\n"
+            "  SET_FAN_SPEED FAN=fan SPEED=1.0\n")
+    project = {
+        "printer.cfg": ("[fan]\npin: PA8\n"
+                        "[fan_generic Aux_Fan]\npin: PA9\n" + text),
+    }
+    mcp_server.set_chat_working_files(project)
+    try:
+        out = _call(macro_text=text)
+    finally:
+        mcp_server.set_chat_working_files(None)
+    assert "is not valid for FAN" in out
+    assert "Did you mean 'aux_fan'?" in out
+
+
+def test_handler_stays_silent_when_an_include_is_missing():
+    text = ("[gcode_macro FAN_TEST]\n"
+            "gcode:\n"
+            "  SET_FAN_SPEED FAN=fan SPEED=1.0\n")
+    project = {"printer.cfg": "[include unknown_hardware.cfg]\n" + text}
+    mcp_server.set_chat_working_files(project)
+    try:
+        out = _call(macro_text=text)
+    finally:
+        mcp_server.set_chat_working_files(None)
+    assert "is not valid for FAN" not in out
+
+
 # ── working state shadows disk (W3 scope ruling) ───────────────────────────
 
 def test_staged_content_shadows_the_macro_lookup():

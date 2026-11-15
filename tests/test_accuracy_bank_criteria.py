@@ -121,6 +121,10 @@ def _regex_parts(kind: str, value: str):
         _, _, pattern = value.partition("::")
         if pattern:
             yield "tool_output_regex.regex", pattern, None, None
+    elif kind == "tool_output_not_regex":
+        _, _, pattern = value.partition("::")
+        if pattern:
+            yield "tool_output_not_regex.regex", pattern, None, None
 
 
 def test_staged_section_regex_values_have_three_parts():
@@ -251,6 +255,39 @@ def test_renders_clean_fails_broken_template_syntax():
     assert not _renders_clean(
         "[gcode_macro BROKE]\ngcode:\n"
         "    {% if %}\n    M106 S1\n")
+
+
+# ── tool_output_not_regex: the negative tool-output criterion is LIVE ────
+
+def _sim_calls(output, name="simulate_macro"):
+    return [{"name": name, "arguments": "{}", "output": output}]
+
+
+def test_tool_output_not_regex_passes_a_clean_sim_output():
+    ok = H.criterion_ok(
+        "tool_output_not_regex", "simulate_macro::is not valid for", "",
+        tool_calls=_sim_calls("Rendered (1 path(s)):\n  L3: M106 S255\n"
+                              "Findings: none"))
+    assert ok
+
+
+def test_tool_output_not_regex_fails_the_r9_leg_b_artifact():
+    # SET_FAN_SPEED FAN=fan against a project with no [fan_generic fan]:
+    # the engine now reports Klipper's own run-time refusal, and THIS is
+    # the criterion that must stop it counting as a pass.
+    out = ("Rendered (1 path(s)):\n  L3: SET_FAN_SPEED FAN=fan SPEED=1.0\n"
+           "Findings:\n  [warning] The value 'fan' is not valid for FAN. "
+           "Did you mean 'aux_fan'?")
+    assert not H.criterion_ok(
+        "tool_output_not_regex", "simulate_macro::is not valid for", "",
+        tool_calls=_sim_calls(out))
+
+
+def test_tool_output_not_regex_requires_the_tool_to_have_run():
+    # Silence from an uncalled tool is not a clean result.
+    assert not H.criterion_ok(
+        "tool_output_not_regex", "simulate_macro::is not valid for", "",
+        tool_calls=[])
 
 
 # ── F11: conditional passes must not exit 0 ──────────────────────────────

@@ -1084,6 +1084,15 @@ def build_simtool_questions() -> list[TestQuestion]:
                 # prose about it.
                 ("tool_output_regex",
                  "simulate_macro::commands differ: YES"),
+                # D5: the toggle must drive hardware the project DECLARES.
+                # The r9 leg-b artifact staged `SET_FAN_SPEED FAN=fan`
+                # against a project with only [fan] + [fan_generic
+                # Aux_Fan] — runtime-fatal ("The value 'fan' is not valid
+                # for FAN"), and the old criteria accepted it. The engine
+                # now resolves mux targets against the project's sections;
+                # a clean run must not report one.
+                ("tool_output_not_regex",
+                 "simulate_macro::is not valid for"),
             ),
         ),
         TestQuestion(
@@ -4125,6 +4134,25 @@ def criterion_ok(kind: str, value: str, content: str,
             if re.search(pattern, output, re.IGNORECASE | re.DOTALL):
                 return True
         return False
+    if kind == "tool_output_not_regex":
+        # value = "tool_name::regex" — passes when the tool was CALLED at
+        # least once and NO call's output matches the regex. The negative
+        # sibling of tool_output_regex, for "the tool must not have
+        # reported this defect" (SIMTOOL-02: simulate_macro flagging a mux
+        # target the project does not define). An uncalled tool never
+        # passes — absence of output is not evidence of a clean run.
+        name, _, pattern = value.partition("::")
+        seen_call = False
+        for call in tool_calls or []:
+            if call.get("name") != name:
+                continue
+            seen_call = True
+            output = call.get("output") or ""
+            if not isinstance(output, str):
+                output = json.dumps(output, ensure_ascii=False)
+            if re.search(pattern, output, re.IGNORECASE | re.DOTALL):
+                return False
+        return seen_call
     return False
 
 

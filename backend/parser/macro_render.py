@@ -113,6 +113,7 @@ SIM_FINDING_CODES = frozenset({
     "macro_render_unexplored",
     "macro_rendered_g1_no_feedrate",
     "macro_jinja_syntax",
+    "macro_mux_target_unknown",
 })
 
 
@@ -884,7 +885,9 @@ def _is_traditional_gcode(token: str) -> bool:
 
 
 def _check_rendered_line(text: str, registry: dict, variant: int,
-                         source_line: int | None = None) -> list[RenderFinding]:
+                         source_line: int | None = None,
+                         sections: "frozenset[str] | None" = None
+                         ) -> list[RenderFinding]:
     from services.gcode_registry import NON_COMMAND_TOKENS, _CMD_TOKEN_RE
 
     # Klipper executes every line comment-stripped (gcode.py:204-208:
@@ -1043,7 +1046,143 @@ def _check_rendered_line(text: str, registry: dict, variant: int,
                     "literal — Klipper parses VALUE with literal_eval and "
                     "fails the call at run time (quote strings: "
                     "VALUE='on').", variant=variant))
+    findings.extend(_mux_target_findings(token, entry, present, sections,
+                                         variant, source_line))
     return findings
+
+
+# ── mux targets: does the named hardware object exist? ────────────────────
+#
+# A mux command resolves its key against the printer objects Klipper
+# REGISTERED from config (gcode.py:317-335 _cmd_mux): an unknown value is
+# a run-time gcmd.error — `The value 'fan' is not valid for FAN. Did you
+# mean 'Aux_Fan'?` — while the config itself loads and boots fine. That
+# makes an unknown target a WARNING here (repo taxonomy: error = Klipper
+# refuses to start or a config value is invalid), and it is sim-origin, so
+# it never reaches the human save gate.
+#
+# The resolution is per FAMILY, not per key: SET_FAN_SPEED's FAN only
+# enumerates [fan_generic NAME] — [fan] is the part-cooling fan driven by
+# M106/M107 and is NOT addressable that way, which is exactly the trap the
+# SIMTOOL-02 r9 leg b walk-through fell into.
+#
+# v1 covers the families whose mux VALUE is the section's own name — each
+# entry below is the set of section types whose code calls
+# register_mux_command, read out of reference/klipper/klippy:
+#   FAN         fan_generic.py only (that is the whole point: [fan] is
+#               NOT addressable)
+#   PIN         output_pin.py, pwm_cycle_time.py, pwm_tool.py
+#   LED         LEDHelper users: neopixel, dotstar, pca9533, pca9632,
+#               [led] (led.py load_config_prefix)
+#   HEATER      heaters.py setup_heater() — [extruder]/[extruderN],
+#               [heater_bed], [heater_generic X]
+#   SERVO       servo.py
+#   BUTTON      gcode_button.py
+#   ID          delayed_gcode.py
+#   LOAD_CELL   load_cell.py
+#   DIGIPOT     mcp4018.py
+#   SENSOR      filament_switch_sensor.py (both switch and motion)
+#   PROBE       temperature_probe.py
+#   TEMPERATURE_FAN temperature_fan.py
+# Deferred to v2, because the value is NOT the section suffix:
+#   EXTRUDER    kinematics/extruder.py registers with key None when there
+#               is a single extruder (key optional) and ACTIVATE_EXTRUDER
+#               enumerates extruder1+ only — a naive suffix rule invents
+#               "extruder1 already exists" warnings.
+#   SENSOR (TEMPERATURE_WAIT) values are FULL section names (heaters.py
+#               register_sensor: config.get_name()), so the target text is
+#               'temperature_sensor chamber' — space and all.
+#   STEPPER     MANUAL_STEPPER -> [manual_stepper X], FORCE_MOVE ->
+#               stepper_x/z1, DUMP_TMC -> the tmc section: three spaces.
+#   CHIP        adxl345 / angle / ldc1612 / probe_eddy_current.
+_MUX_TARGET_FAMILIES: dict[str, tuple[str, ...]] = {
+    "SET_FAN_SPEED": ("fan_generic",),
+    "SET_LED": ("neopixel", "dotstar", "pca9533", "pca9632", "led"),
+    "SET_LED_TEMPLATE": ("neopixel", "dotstar", "pca9533", "pca9632", "led"),
+    "SET_PIN": ("output_pin", "pwm_cycle_time", "pwm_tool"),
+    "SET_SERVO": ("servo",),
+    "SET_HEATER_TEMPERATURE": ("extruder", "heater_bed", "heater_generic"),
+    "SET_TEMPERATURE_FAN_TARGET": ("temperature_fan",),
+    "TEMPERATURE_PROBE_CALIBRATE": ("temperature_probe",),
+    "TEMPERATURE_PROBE_ENABLE": ("temperature_probe",),
+    "QUERY_BUTTON": ("button",),
+    "UPDATE_DELAYED_GCODE": ("delayed_gcode",),
+    "LOAD_CELL_CALIBRATE": ("load_cell",),
+    "LOAD_CELL_DIAGNOSTIC": ("load_cell",),
+    "LOAD_CELL_READ": ("load_cell",),
+    "LOAD_CELL_TARE": ("load_cell",),
+    "SET_FILAMENT_SENSOR": ("filament_switch_sensor",
+                            "filament_motion_sensor"),
+    "QUERY_FILAMENT_SENSOR": ("filament_switch_sensor",
+                              "filament_motion_sensor"),
+    "SET_DIGIPOT": ("mcp4018",),
+}
+
+# Section types that register themselves under a bare name (the value is
+# the section name) and, for extruders, also under a numbered name.
+_MUX_NUMBERED_FAMILIES = ("extruder",)
+
+
+def _mux_target_names(sections: "frozenset[str] | None",
+                      families: tuple[str, ...]) -> set[str]:
+    """Every legal mux value for `families` given the project's section
+    headers (lowercased, e.g. 'fan_generic aux_fan').
+
+    Klipper registers a heater under the LAST token of its section name
+    (heaters.py setup_heater: config.get_name().split()[-1]), so
+    [heater_generic chamber] -> 'chamber' and bare [heater_bed] ->
+    'heater_bed'. Numbered extruders ([extruder1]) register as
+    'extruder1'.
+    """
+    names: set[str] = set()
+    numbered = any(f in _MUX_NUMBERED_FAMILIES for f in families)
+    for raw in sections or ():
+        head, _, rest = str(raw).strip().lower().partition(" ")
+        if head in families:
+            names.add(rest.split()[-1] if rest else head)
+        elif numbered and re.fullmatch(r"extruder\d*", head):
+            names.add(head)
+    return names
+
+
+def _mux_target_findings(token: str, entry: dict, present: dict[str, str],
+                         sections: "frozenset[str] | None", variant: int,
+                         source_line: int | None) -> list[RenderFinding]:
+    """Warn when a mux command names hardware the project does not define.
+
+    `sections is None` means the loaded files cannot decide absence (an
+    include we cannot read, no project at all): silence, never a guess —
+    the same decidable-absence law the variable checks follow.
+    """
+    families = _MUX_TARGET_FAMILIES.get(token)
+    key = str(entry.get("mux_key") or "").upper()
+    if not families or not key or sections is None:
+        return []
+    value = present.get(key)
+    if not value or _looks_unknown(value):
+        return []          # empty is an ERROR above; unknown is undeclared
+    legal = _mux_target_names(sections, families)
+    if value.strip().lower() in legal:
+        return []
+    label = "/".join(f"[{f}]" for f in families)
+    guess = ""
+    matches = sorted(n for n in legal if value.strip().lower() in n)
+    if matches:
+        guess = " Did you mean '%s'?" % matches[0]
+    elif legal:
+        shown = sorted(legal)[:8]
+        more = "" if len(legal) <= 8 else ", …"
+        guess = " Options: %s%s." % (
+            ", ".join("'%s'" % n for n in shown), more)
+    else:
+        guess = f" No {label} section exists in the loaded project."
+    return [RenderFinding(
+        "warning", "macro_mux_target_unknown",
+        f"The value '{value}' is not valid for {key}.{guess} Klipper "
+        f"resolves {key} against the {label} objects the config "
+        "registers, so this call errors at run time (the config itself "
+        "still boots).",
+        variant=variant, source_line=source_line)]
 
 
 def _scan_set_variables(rendered_texts: list[tuple[str, int]]) -> list[tuple[str, str]]:
@@ -1077,7 +1216,8 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
                             variables: dict[str, str] | None = None,
                             printer_state: dict | None = None,
                             declared_defaults: dict[str, str] | None = None,
-                            invocation_given: bool = True
+                            invocation_given: bool = True,
+                            sections: "frozenset[str] | None" = None
                             ) -> MacroRenderResult:
     from parser.validator import _MACRO_JINJA_ENV, _strip_inline_comments
 
@@ -1210,7 +1350,7 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
                             "line is param-dependent — pass params to "
                             "simulate_macro for a full verdict.",
                             variant=vi, source_line=src_line))
-            for f in _check_rendered_line(text, registry, vi):
+            for f in _check_rendered_line(text, registry, vi, sections=sections):
                 # Round-2 D1: suppress per FINDING, never per line —
                 # a literal defect sharing the line with a
                 # param-dependent read stays a real verdict.
@@ -1256,13 +1396,17 @@ def _simulate_cached(body: str, params_items: tuple[tuple[str, str], ...],
                      variables_items: tuple[tuple[str, str], ...],
                      state_items: tuple[tuple[str, str], ...],
                      defaults_items: tuple[tuple[str, str], ...],
-                     invocation_given: bool
+                     invocation_given: bool,
+                     sections_items: tuple[str, ...] | None = None
                      ) -> MacroRenderResult:
     # Scenario state values crossed the cache boundary as repr(): the
     # cache key must stay hashable while keeping value TYPE visible
     # (1 vs '1' must not share an entry). invocation_given is part of
     # the key: an explicit empty invocation ({}) and NO invocation
-    # (None) are different epistemic states (3.1).
+    # (None) are different epistemic states (3.1). The project's section
+    # headers join the key too (None vs () distinct): mux-target verdicts
+    # depend on which hardware the loaded project declares, so two
+    # projects must never share a cached result.
     import json
     state = {}
     for path, raw in state_items:
@@ -1270,11 +1414,13 @@ def _simulate_cached(body: str, params_items: tuple[tuple[str, str], ...],
             state[path] = json.loads(raw)
         except ValueError:
             state[path] = raw
+    sections = None if sections_items is None else frozenset(sections_items)
     return simulate_macro_uncached(body, dict(params_items),
                                    frozenset(), max_variants,
                                    dict(variables_items), state,
                                    declared_defaults=dict(defaults_items),
-                                   invocation_given=invocation_given)
+                                   invocation_given=invocation_given,
+                                   sections=sections)
 
 
 def simulate_macro(body: str, params: dict[str, str] | None = None,
@@ -1282,7 +1428,8 @@ def simulate_macro(body: str, params: dict[str, str] | None = None,
                    max_variants: int = MAX_RENDER_VARIANTS,
                    variables: dict[str, str] | None = None,
                    printer_state: dict | None = None,
-                   declared_defaults: dict[str, str] | None = None
+                   declared_defaults: dict[str, str] | None = None,
+                   sections: "frozenset[str] | None" = None
                    ) -> MacroRenderResult:
     """Simulate one macro body on an invocation.
 
@@ -1307,7 +1454,12 @@ def simulate_macro(body: str, params: dict[str, str] | None = None,
     tuple IS the full cache key (cross-context isolation pinned by
     test). ``known_macros`` only documents that macro tokens are
     recognized (never flagged) — v1 does not use it to change
-    behavior."""
+    behavior. ``sections`` are the loaded project's section headers
+    (lowercased, e.g. 'fan_generic aux_fan'): pass them and mux commands
+    are checked against the hardware the project actually declares;
+    leave None when the loaded files cannot decide absence (unresolved
+    include, no project) and no availability verdict is produced.
+    """
     invocation_given = params is not None
     # Boundary coercion (review L8): callers range from config strings to
     # tool JSON. Coerce invocation maps to str->str (Klipper params are
@@ -1332,9 +1484,11 @@ def simulate_macro(body: str, params: dict[str, str] | None = None,
         except (TypeError, ValueError):
             raw = repr(v)
         state_serial.append((path, raw))
+    sections_items = None if sections is None else tuple(sorted(
+        str(s).strip().lower() for s in sections if str(s).strip()))
     return _simulate_cached(body, key_items, max_variants, var_items,
                             tuple(state_serial), defaults_items,
-                            invocation_given)
+                            invocation_given, sections_items)
 
 
 # ── W3: runtime-error traceback (paste → Jinja source line) ────────────────

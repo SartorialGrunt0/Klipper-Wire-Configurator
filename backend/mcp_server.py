@@ -1262,7 +1262,13 @@ class McpServer:
                     "'Expected effect (commanded, not observed)': fan "
                     "percent, LED colours, temperature TARGETS, console "
                     "text — so you can check the outcome matches the "
-                    "intent, not merely that it renders. With no scenarios "
+                    "intent, not merely that it renders. Hardware names "
+                    "(FAN=, LED=, PIN=, SERVO=, HEATER=) are resolved "
+                    "against the sections THIS project declares: FAN= "
+                    "only takes [fan_generic] names (FAN=fan is refused at "
+                    "run time even when [fan] exists), and an unknown name "
+                    "returns Klipper's own 'not valid for' warning with a "
+                    "near-miss. With no scenarios "
                     "the DEFAULT invocation renders (params_* defaults, "
                     "printer state unknown; branches on undeclared "
                     "state render BOTH ways). Limits it states on every "
@@ -3316,8 +3322,9 @@ class McpServer:
                 elif stripped_raw.lower().startswith("variable_"):
                     key, _, value = stripped_raw.partition(":")
                     sim_variables[key.strip()[len("variable_"):]] = value.strip()
-            simulation = simulate_macro(gcode_body, sim_params,
-                                        variables=sim_variables)
+            simulation = simulate_macro(
+                gcode_body, sim_params, variables=sim_variables,
+                sections=self._sim_project_sections())
             for finding in simulation.findings:
                 where = f"Line {finding.source_line}: " if finding.source_line else ""
                 issues.append({
@@ -3710,6 +3717,75 @@ class McpServer:
                     return path
         return None
 
+    def _sim_project_sections(self) -> "frozenset[str] | None":
+        """Lowercased section headers of the project as chat sees it.
+
+        Working state first (staged/draft wins — the same precedence the
+        macro lookup uses), then this host's config files. Returns None
+        when absence is NOT decidable: an include we cannot resolve means
+        the hardware list may be incomplete, and an incomplete list must
+        never produce a "this hardware does not exist" verdict.
+        """
+        _HDR = re.compile(r"^\[([^\]\n]+)\]\s*(?:#.*)?$", re.M)
+        _INC = re.compile(r"^\[include\s+([^\]\n]+)\]\s*(?:#.*)?$", re.M)
+        texts: list[tuple[str, str]] = []
+        names: set[str] = set()
+        overlay = _working_scan_items()
+        if overlay:
+            for path, content in overlay:
+                texts.append((path, content))
+                names.add(str(path).replace("\\", "/").rsplit("/", 1)[-1].lower())
+            disk_names = self._sim_disk_config_names()
+            names |= disk_names
+        else:
+            for scan_dir in (LOCAL_CONFIGS_DIR, _system_config_path()):
+                if not scan_dir.is_dir():
+                    continue
+                try:
+                    files = sorted(p for p in scan_dir.rglob("*.cfg")
+                                   if not is_backup_config_file(p.name))
+                except OSError:
+                    continue
+                for path in files:
+                    try:
+                        texts.append((path.name, path.read_text(
+                            encoding="utf-8", errors="replace")))
+                    except OSError:
+                        return None
+                    names.add(path.name.lower())
+        if not texts:
+            return None
+        sections: set[str] = set()
+        for _name, text in texts:
+            for target in _INC.findall(text):
+                for piece in re.split(r"[\s,]+", target.strip()):
+                    base = piece.replace("\\", "/").rsplit("/", 1)[-1].lower()
+                    if base and base not in names:
+                        return None   # include we cannot see → undecidable
+            for header in _HDR.findall(text):
+                header = header.strip()
+                if header.lower().startswith("include "):
+                    continue
+                if header:
+                    sections.add(" ".join(header.lower().split()))
+        return frozenset(sections)
+
+    @staticmethod
+    def _sim_disk_config_names() -> set[str]:
+        """Bare filenames of this host's config files, for include
+        resolution when the working state is the project of record."""
+        names: set[str] = set()
+        for scan_dir in (LOCAL_CONFIGS_DIR, _system_config_path()):
+            if not scan_dir.is_dir():
+                continue
+            try:
+                for path in scan_dir.rglob("*.cfg"):
+                    if not is_backup_config_file(path.name):
+                        names.add(path.name.lower())
+            except OSError:
+                continue
+        return names
+
     def _handle_simulate_macro(self, args: dict[str, Any]) -> str:
         """Render a macro on declared invocations and report what
         Klipper would execute (W4R pivot: warnings/info live HERE, not
@@ -3835,6 +3911,10 @@ class McpServer:
             f"Source: {origin}. Body renders per scenario; line numbers "
             "are gcode-body lines.",
         ]
+        # Hardware the loaded project declares, for mux-target verdicts:
+        # None = the files cannot decide absence (unresolved include) and
+        # the engine stays silent rather than inventing a missing fan.
+        sections = self._sim_project_sections()
         if truncated:
             out.append(f"(scenario list truncated to the cap of "
                        f"{self._SIM_SCENARIO_CAP})")
@@ -3892,7 +3972,8 @@ class McpServer:
             for run_no in range(1, runs + 1):
                 label = name if runs == 1 else f"call {run_no}"
                 result = simulate_macro(body, params, variables=seq_vars,
-                                        printer_state=state)
+                                        printer_state=state,
+                                        sections=sections)
                 self._sim_emit_call(
                     out, label, result, params,
                     state if runs == 1 else None,
