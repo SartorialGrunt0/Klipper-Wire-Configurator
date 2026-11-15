@@ -52,6 +52,12 @@ _PARAM_GETTER_TYPES = {
 # templates, so they share the same command set).
 # ---------------------------------------------------------------------------
 GATE_TABLE: dict[str, list[str]] = {
+    # Display: display.py lives in extras/display/ (a subpackage) and
+    # registers SET_DISPLAY_GROUP per [display <name>] instance. The
+    # non-recursive extras glob missed it, so the command read as
+    # UNKNOWN and the save gate told users "not a Klipper command. Did
+    # you mean SET_DISPLAY_TEXT?" on a line Klipper accepts.
+    "display": ["display"],
     # LED family (led.py registers SET_LED/SET_LED_TEMPLATE per led instance)
     "led": ["led", "neopixel", "dotstar", "pca9533"],
     "neopixel": ["led", "neopixel", "dotstar", "pca9533"],
@@ -356,7 +362,7 @@ class _FileVisitor(ast.NodeVisitor):
     """
 
     def __init__(self) -> None:
-        self.registrations: list[tuple[str, str | None, int, str | None]] = []
+        self.registrations: list[tuple[str, str | None, bool, int, str | None]] = []
         self.list_bindings: dict[str, list[str]] = {}
         self.functions: dict[str, ast.FunctionDef] = {}
 
@@ -391,7 +397,8 @@ class _FileVisitor(ast.NodeVisitor):
                                 mux_key = _literal_str(sub.args[1])
                             for name in loop_names:
                                 self.registrations.append(
-                                    (name.upper(), mux_key, sub.lineno, None))
+                                    (name.upper(), mux_key, False, sub.lineno,
+                                     None))
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -402,10 +409,22 @@ class _FileVisitor(ast.NodeVisitor):
                 # Deregistration calls pass func=None: skip (a name with ANY
                 # real-func registration is kept via the other call site).
                 mux_key = None
+                key_optional = False
                 if fname == "register_mux_command":
                     func_idx = 3
                     if len(node.args) > 1:
                         mux_key = _literal_str(node.args[1])
+                    # The mux VALUE may be literally None: gcode.py's
+                    # _cmd_mux then reads the key with a default, so the
+                    # key is OPTIONAL for that command (a single-extruder
+                    # printer's `SET_PRESSURE_ADVANCE ADVANCE=.05`, or the
+                    # bare `[display]` registering DISPLAY=None). Without
+                    # this, the registry demanded the key and the sim
+                    # false-ERRORed the canonical single-extruder line.
+                    if (len(node.args) > 2
+                            and isinstance(node.args[2], ast.Constant)
+                            and node.args[2].value is None):
+                        key_optional = True
                 else:
                     func_idx = 1
                 real_func = (len(node.args) > func_idx
@@ -420,7 +439,8 @@ class _FileVisitor(ast.NodeVisitor):
                     elif isinstance(ref, ast.Attribute):
                         handler = ref.attr
                     self.registrations.append(
-                        (name.upper(), mux_key, node.lineno, handler))
+                        (name.upper(), mux_key, key_optional, node.lineno,
+                         handler))
         self.generic_visit(node)
 
 
@@ -453,7 +473,12 @@ def extract_registry(klipper_root: Path) -> dict:
         files.append((p.stem, p))
     extras = klippy / "extras"
     if extras.is_dir():
-        for p in sorted(extras.glob("*.py")):
+        # RECURSIVE: extras/display/ is a subpackage and display.py
+        # registers SET_DISPLAY_GROUP there. A non-recursive glob made
+        # every display-group macro read as an unknown command.
+        for p in sorted(extras.rglob("*.py")):
+            if p.stem.startswith("_"):
+                continue
             files.append((p.stem, p))
     # kinematics/ hosts extruder commands (M104/M109 live in
     # kinematics/extruder.py, not extras/).
@@ -464,7 +489,8 @@ def extract_registry(klipper_root: Path) -> dict:
 
     commands: dict[str, dict] = {}
 
-    def record(name: str, module: str, mux_key: str | None, line: int,
+    def record(name: str, module: str, mux_key: str | None,
+               key_optional: bool, line: int,
                functions: dict[str, ast.FunctionDef],
                handler: str | None) -> None:
         if not _is_command_name(name):
@@ -477,7 +503,8 @@ def extract_registry(klipper_root: Path) -> dict:
                 "extra": module,
                 "requires_sections": sections,
                 "requires_mode": mode,
-                "params": ({mux_key: {"required": True}} if mux_key else {}),
+                "params": ({mux_key: {"required": not key_optional}}
+                           if mux_key else {}),
                 "mux_key": mux_key,
                 "simulated": name in SIMULATED,
                 "source_line": line,
@@ -495,6 +522,11 @@ def extract_registry(klipper_root: Path) -> dict:
                     entry["requires_sections"] = []
             if mux_key and not entry.get("mux_key"):
                 entry["mux_key"] = mux_key
+            if mux_key and key_optional:
+                # A None registration anywhere makes the key omittable
+                # for that command (Klipper reads it with a default).
+                entry.setdefault("params", {}).setdefault(mux_key, {})[
+                    "required"] = False
         # Handler-derived typed params. A mux key is already required=True
         # from the gate key; parsing must never downgrade it (mux commands
         # never read the key via gcmd.get).
@@ -506,6 +538,12 @@ def extract_registry(klipper_root: Path) -> dict:
                 for field, value in pdef.items():
                     if field == "required" and existing.get("required") is True:
                         continue
+                    if (field == "required" and pname.upper()
+                            == str(entry.get("mux_key") or "").upper()):
+                        # The mux key's optionality is decided by its
+                        # register_mux_command VALUE (None ⇒ optional),
+                        # never by a gcmd read inside the handler.
+                        continue
                     existing[field] = value
 
     for module, path in files:
@@ -516,8 +554,9 @@ def extract_registry(klipper_root: Path) -> dict:
             continue
         v = _FileVisitor()
         v.visit(tree)
-        for name, mux_key, line, handler in v.registrations:
-            record(name, module, mux_key, line, v.functions, handler)
+        for name, mux_key, key_optional, line, handler in v.registrations:
+            record(name, module, mux_key, key_optional, line, v.functions,
+                   handler)
 
     # Manual extras are applied by main(), NOT inside extract_registry:
     # fixture trees must extract exactly what their source says.

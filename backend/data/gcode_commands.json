@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "source_rev": "2d7717e3b62ea2fe3401b27f54f8681f80451c69",
-  "generated_at": "2026-11-14T23:16:25+00:00",
+  "generated_at": "2026-11-15T15:01:40+00:00",
   "commands": {
     "ABORT": {
       "extra": "bed_screws",
@@ -1902,6 +1902,25 @@
       "simulated": false,
       "source_line": 20
     },
+    "SET_DISPLAY_GROUP": {
+      "extra": "display",
+      "requires_sections": [
+        "display"
+      ],
+      "requires_mode": "any",
+      "params": {
+        "DISPLAY": {
+          "required": false
+        },
+        "GROUP": {
+          "type": "str",
+          "required": true
+        }
+      },
+      "mux_key": "DISPLAY",
+      "simulated": false,
+      "source_line": 209
+    },
     "SET_DISPLAY_TEXT": {
       "extra": "display_status",
       "requires_sections": [],
@@ -2228,7 +2247,7 @@
       "requires_mode": "any",
       "params": {
         "EXTRUDER": {
-          "required": true
+          "required": false
         },
         "ADVANCE": {
           "type": "float",

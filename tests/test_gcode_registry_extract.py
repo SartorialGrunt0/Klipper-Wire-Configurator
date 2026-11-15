@@ -210,6 +210,40 @@ def test_real_tree_count_band():
     not (REAL_KLIPPY / "klippy").is_dir(),
     reason="reference/klipper tree not present",
 )
+def test_real_tree_optional_mux_key_when_registered_with_none():
+    """A mux key registered with a literal None VALUE is optional: gcode.py
+    _cmd_mux then reads it with a default. Missing it made the registry
+    demand EXTRUDER/DISPLAY and the simulator false-ERROR the canonical
+    single-extruder `SET_PRESSURE_ADVANCE ADVANCE=.05` and
+    `SET_DISPLAY_GROUP GROUP=printing`."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(REAL_KLIPPY)["commands"]
+    assert cmds["SET_PRESSURE_ADVANCE"]["params"]["EXTRUDER"]["required"] is False
+    assert cmds["SET_DISPLAY_GROUP"]["params"]["DISPLAY"]["required"] is False
+    # ...while a key only ever registered with a NAME stays required.
+    assert cmds["SET_FAN_SPEED"]["params"]["FAN"]["required"] is True
+    assert cmds["SYNC_EXTRUDER_MOTION"]["params"]["EXTRUDER"]["required"] is True
+
+
+@pytest.mark.skipif(
+    not (REAL_KLIPPY / "klippy").is_dir(),
+    reason="reference/klipper tree not present",
+)
+def test_real_tree_scans_extras_subpackages():
+    """extras/display/ is a subpackage; a non-recursive glob missed
+    SET_DISPLAY_GROUP and the save gate told users it "is not a Klipper
+    command"."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(REAL_KLIPPY)["commands"]
+    assert "SET_DISPLAY_GROUP" in cmds
+    assert cmds["SET_DISPLAY_GROUP"]["extra"] == "display"
+    assert cmds["SET_DISPLAY_GROUP"]["requires_sections"] == ["display"]
+
+
+@pytest.mark.skipif(
+    not (REAL_KLIPPY / "klippy").is_dir(),
+    reason="reference/klipper tree not present",
+)
 def test_real_tree_source_rev_recorded():
     mod = _load_extractor()
     registry = mod.extract_registry(REAL_KLIPPY)
