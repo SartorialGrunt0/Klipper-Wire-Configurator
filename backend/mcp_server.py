@@ -17,9 +17,11 @@ reference directory.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
+import shlex
 import sys
 from collections import Counter
 from contextvars import ContextVar
@@ -1244,7 +1246,19 @@ class McpServer:
                     "variable_fan_on as fan_on, so {'fan_on': 'True'} is "
                     "the state, never {'variable_fan_on': ...}; a name "
                     "the section does not declare is refused with a "
-                    "warning and NOT injected. With no scenarios "
+                    "warning and NOT injected. runs=N models N CONSECUTIVE "
+                    "calls from one starting state, threading the macro's "
+                    "own SET_GCODE_VARIABLE writes between calls (Klipper "
+                    "renders a body before executing it, so a write shows "
+                    "up on the NEXT call) and printing a "
+                    "'Sequence: ... commands differ: YES/NO' verdict — use "
+                    "runs=2 for any 'does this toggle / does it remember' "
+                    "question, never two independent scenarios (they "
+                    "prove branches, not state). Every call also reports "
+                    "'Expected effect (commanded, not observed)': fan "
+                    "percent, LED colours, temperature TARGETS, console "
+                    "text — so you can check the outcome matches the "
+                    "intent, not merely that it renders. With no scenarios "
                     "the DEFAULT invocation renders (params_* defaults, "
                     "printer state unknown; branches on undeclared "
                     "state render BOTH ways). Limits it states on every "
@@ -1268,6 +1282,12 @@ class McpServer:
                             "maxItems": 8,
                             "description": "Invocations to simulate, each rendered independently: {name?: 'hotend-only home', params?: {'S': '215'}, printer_state?: {'toolhead.homed_axes': 'xyz'}, variables?: {'speed': '50'}}. Omit for one default-invocation render.",
                             "items": {"type": "object"},
+                        },
+                        "runs": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 6,
+                            "description": "Consecutive calls from ONE starting state (max 6), threading this macro's own SET_GCODE_VARIABLE writes between them. Use runs=2 for toggle / remember-state / 'call it twice' questions: the result then reports each call and a 'commands differ: YES/NO' verdict, which independent scenarios cannot give you.",
                         },
                     },
                 },
@@ -3607,6 +3627,7 @@ class McpServer:
     # ── W4R.3: on-demand macro simulation (W4R decision D3) ──────────────
 
     _SIM_SCENARIO_CAP = 8
+    _SIM_RUN_CAP = 6
     _SIM_LIMITS = (
         "Limits: this renders the TEMPLATE only — CALL macros are not "
         "recursed, and motion, waits, and side effects do not execute. "
@@ -3749,6 +3770,29 @@ class McpServer:
             scenarios_raw = scenarios_raw[:self._SIM_SCENARIO_CAP]
             truncated = True
 
+        # ── sequence mode (runs) ─────────────────────────────────────
+        # `runs: N` = N CONSECUTIVE invocations from one starting state,
+        # threading the macro's own SET_GCODE_VARIABLE writes between
+        # them. Klipper renders a body completely BEFORE executing any of
+        # its lines, so a write can only affect the NEXT call — exactly
+        # what this models. State is discarded when the call returns: the
+        # tool models a config, not a live printer, and every result must
+        # be reproducible from its own declared assumptions.
+        runs = 1
+        runs_raw = args.get("runs")
+        if runs_raw not in (None, ""):
+            try:
+                runs = int(runs_raw)
+            except (TypeError, ValueError):
+                return (f"runs must be an integer 1..{self._SIM_RUN_CAP} — "
+                        "how many times in a row the macro is called.\n\n"
+                        + self._SIM_LIMITS)
+            runs = max(1, min(runs, self._SIM_RUN_CAP))
+        if runs > 1 and len(scenarios_raw) > 1:
+            return ("runs models CONSECUTIVE calls from ONE starting state — "
+                    "pass a single scenario (or none) with runs=N. Use "
+                    "scenarios for independent states.\n\n" + self._SIM_LIMITS)
+
         out: list[str] = [
             f"# simulate_macro {sec_header}",
             f"Source: {origin}. Body renders per scenario; line numbers "
@@ -3806,63 +3850,266 @@ class McpServer:
                 variables[key] = str(v)
             state = {str(k): v for k, v in (sc.get("printer_state") or {}).items()}
 
-            result = simulate_macro(body, params, variables=variables,
-                                    printer_state=state)
-
-            out.append("")
-            out.append(f"## {name}")
-            declared = [f"params: {params or '{}'}"]
-            if state:
-                declared.append(f"printer_state: {state}")
-            if variables:
-                declared.append(f"variables: {variables}")
-            out.append("Declared: " + "; ".join(declared))
-
-            out.append(f"Rendered ({result.variants_rendered} path(s)):")
-            if result.rendered:
-                for line in result.rendered:
-                    ln = f"  L{line.source_line}" if line.source_line \
-                        else "  L?"
-                    tag = f" [path {line.variant}]" \
-                        if result.variants_rendered > 1 else ""
-                    out.append(f"{ln}: {line.text}{tag}")
-            else:
-                out.append("  (nothing rendered — the body aborted or was "
-                           "empty on this invocation)")
-
-            scenario_warnings = [
-                (f"  - WARNING: scenario variable '{k}' is not declared by "
-                 f"{sec_header} — Klipper publishes variable_<name> to the "
-                 f"template as <name>"
-                 + (f" (declared here: {', '.join(sorted(declared_vars))})"
-                    if declared_vars
-                    else " (this macro declares no variable_* entries)")
-                 + f", so '{k}' is undefined at run time and was NOT "
-                   "injected. Declare the stripped name (no 'variable_' "
-                   "prefix) to simulate that state.")
-                for k in undeclared_vars
-            ]
-            if result.findings or scenario_warnings:
-                out.append("Findings:")
-                out.extend(scenario_warnings)
-                for f in sorted(result.findings,
-                                key=lambda x: (x.severity != "error",
-                                               x.severity != "warning")):
-                    loc = f" (L{f.source_line})" if f.source_line else ""
-                    out.append(f"  - {f.severity.upper()}: {f.message}{loc}")
-            else:
-                out.append("Findings: none — every rendered command "
-                           "matched the registry shape on this "
-                           "invocation.")
-            if result.unknown_accesses:
-                out.append("Still <unknown> (NOT simulated, never "
-                           "guessed): "
-                           + ", ".join(sorted(set(result.unknown_accesses))))
+            seq_vars = dict(variables)
+            cmd_sets: list[tuple[str, ...]] = []
+            for run_no in range(1, runs + 1):
+                label = name if runs == 1 else f"call {run_no}"
+                result = simulate_macro(body, params, variables=seq_vars,
+                                        printer_state=state)
+                self._sim_emit_call(
+                    out, label, result, params,
+                    state if runs == 1 else None,
+                    seq_vars if runs > 1 else None,
+                    undeclared_vars, declared_vars)
+                if runs == 1:
+                    continue
+                cmd_sets.append(self._sim_command_set(result))
+                if run_no == runs:
+                    break
+                # Thread this call's own variable writes into the next one.
+                if result.variants_rendered > 1:
+                    out.append(f"  → state NOT threaded: call {run_no} "
+                               f"rendered {result.variants_rendered} paths "
+                               "(state ambiguous) — later calls start from "
+                               "the same state.")
+                    break
+                changes, notes = self._sim_thread_variables(
+                    result, sec_header, declared_vars, seq_vars)
+                for note in notes:
+                    out.append(f"  - INFO: {note}")
+                if changes:
+                    out.append(f"  → state after call {run_no}: "
+                               + ", ".join(changes))
+                else:
+                    out.append(f"  → state after call {run_no}: unchanged — "
+                               "no SET_GCODE_VARIABLE for this macro "
+                               "rendered, so a repeat call takes the same "
+                               "branch.")
+            if len(cmd_sets) >= 2:
+                out.append("")
+                if cmd_sets[0] != cmd_sets[1]:
+                    changed = max(len(set(cmd_sets[1]) - set(cmd_sets[0])),
+                                  len(set(cmd_sets[0]) - set(cmd_sets[1])), 1)
+                    out.append("Sequence: call 2 vs call 1 -> commands "
+                               f"differ: YES ({changed} line(s) changed)")
+                else:
+                    out.append("Sequence: call 2 vs call 1 -> commands "
+                               "differ: NO (identical command set — the "
+                               "macro does not persist state, so every call "
+                               "takes the same branch)")
 
         out.append("")
         out.append("---")
         out.append(self._SIM_LIMITS)
         return "\n".join(out)
+
+    # ── simulate_macro: emission + sequence-state helpers ─────────
+
+    @staticmethod
+    def _sim_emit_call(out: list[str], label: str, result,
+                       params: dict, printer_state: dict | None,
+                       variables: dict | None,
+                       undeclared_vars: list[str],
+                       declared_vars: set[str]) -> None:
+        """One invocation's block: declared assumption → rendered lines →
+        expected effect → findings."""
+        out.append("")
+        out.append(f"## {label}")
+        declared = [f"params: {params or '{}'}"]
+        if printer_state:
+            declared.append(f"printer_state: {printer_state}")
+        if variables:
+            declared.append(f"variables: {variables}")
+        out.append("Declared: " + "; ".join(declared))
+
+        out.append(f"Rendered ({result.variants_rendered} path(s)):")
+        if result.rendered:
+            for line in result.rendered:
+                ln = f"  L{line.source_line}" if line.source_line else "  L?"
+                tag = f" [path {line.variant}]" \
+                    if result.variants_rendered > 1 else ""
+                out.append(f"{ln}: {line.text}{tag}")
+        else:
+            out.append("  (nothing rendered — the body aborted or was "
+                       "empty on this invocation)")
+
+        effects = McpServer._sim_effect_lines(
+            [line.text for line in result.rendered])
+        if effects:
+            out.append("Expected effect (commanded, not observed):")
+            for eff in effects[:8]:
+                out.append(f"  - {eff}")
+            if len(effects) > 8:
+                out.append(f"  - … {len(effects) - 8} more")
+
+        scenario_warnings = [
+            (f"  - WARNING: scenario variable '{k}' is not declared by "
+             "this macro — "
+             "Klipper publishes variable_<name> to the "
+             "template as <name>"
+             + (f" (declared here: {', '.join(sorted(declared_vars))})"
+                if declared_vars
+                else " (this macro declares no variable_* entries)")
+             + f", so '{k}' is undefined at run time and was NOT "
+               "injected. Declare the stripped name (no 'variable_' "
+               "prefix) to simulate that state.")
+            for k in undeclared_vars
+        ]
+        if result.findings or scenario_warnings:
+            out.append("Findings:")
+            out.extend(scenario_warnings)
+            for f in sorted(result.findings,
+                            key=lambda x: (x.severity != "error",
+                                           x.severity != "warning")):
+                loc = f" (L{f.source_line})" if f.source_line else ""
+                out.append(f"  - {f.severity.upper()}: {f.message}{loc}")
+        else:
+            out.append("Findings: none — every rendered command "
+                       "matched the registry shape on this "
+                       "invocation.")
+        if result.unknown_accesses:
+            out.append("Still <unknown> (NOT simulated, never "
+                       "guessed): "
+                       + ", ".join(sorted(set(result.unknown_accesses))))
+
+    @staticmethod
+    def _sim_command_set(result) -> tuple[str, ...]:
+        """Identity of one invocation for the sequence verdict: source
+        line + whitespace-collapsed command. Line numbers count — the
+        same command from a different branch is a different path."""
+        return tuple(
+            f"L{line.source_line}:" + " ".join(line.text.split())
+            for line in result.rendered)
+
+    @staticmethod
+    def _sim_thread_variables(result, sec_header: str,
+                              declared_vars: set[str],
+                              state: dict) -> tuple[list[str], list[str]]:
+        """Apply this call's own SET_GCODE_VARIABLE writes to `state`.
+
+        Klipper mutates the section's variable dict at RUN time
+        (gcode_macro.py cmd_SET_GCODE_VARIABLE) and the body is fully
+        rendered first, so a write visible here only affects the NEXT
+        invocation. Only writes that Klipper would actually accept are
+        followed: MACRO names this section, VARIABLE is one it declares,
+        VALUE parses as a Python literal. Everything else is reported,
+        never guessed."""
+        names = sec_header.split()
+        macro = (names[-1] if names else "").strip("[]").lower()
+        changes: list[str] = []
+        notes: list[str] = []
+        for line in result.rendered:
+            text = line.text.split(";")[0].strip()
+            if not text.upper().startswith("SET_GCODE_VARIABLE"):
+                continue
+            params: dict[str, str] = {}
+            try:
+                lexer = shlex.shlex(text.split(None, 1)[1], posix=True)
+                lexer.whitespace_split = True
+                for arg in lexer:
+                    key, sep, val = arg.partition("=")
+                    if sep:
+                        params[key.upper()] = val
+            except (ValueError, IndexError):
+                notes.append("a rendered SET_GCODE_VARIABLE could not be "
+                             "parsed — state not followed")
+                continue
+            target = (params.get("MACRO") or "").strip().strip('"').lower()
+            var = (params.get("VARIABLE") or "").strip().strip('"')
+            val = params.get("VALUE")
+            if target != macro:
+                continue
+            if var.lower() not in declared_vars:
+                notes.append(f"SET_GCODE_VARIABLE writes undeclared "
+                             f"variable '{var}' — Klipper rejects that "
+                             "name; state not followed")
+                continue
+            if val is None:
+                notes.append(f"SET_GCODE_VARIABLE {var} rendered without "
+                             "VALUE — state not followed")
+                continue
+            try:
+                ast.literal_eval(val)
+            except (ValueError, SyntaxError):
+                notes.append(f"SET_GCODE_VARIABLE {var} VALUE={val} is not "
+                             "a literal — state not followed")
+                continue
+            state[var.lower()] = val
+            changes.append(f"{var} := {val}")
+        return changes, notes
+
+    @staticmethod
+    def _sim_effect_lines(lines: list[str]) -> list[str]:
+        """What the rendered commands ASK the printer to do.
+
+        Not an execution model: no clamps (max_power / off_below /
+        kick_start), no motion, no heating. It exists so the caller can
+        check "did I get what I wanted" (fan 100%, LED red, hotend
+        target 200C) instead of only "did it render without errors"."""
+        out: list[str] = []
+
+        def as_pct_of_255(raw: str) -> str:
+            try:
+                return f"{float(raw) / 2.55:.0f}%"
+            except ValueError:
+                return "an unknown speed"
+
+        def as_pct_of_one(raw: str) -> str:
+            try:
+                return f"{float(raw) * 100:.0f}%"
+            except ValueError:
+                return "an unknown speed"
+
+        for raw in lines:
+            text = raw.split(";")[0].strip()
+            if not text:
+                continue
+            token = text.split()[0].upper()
+            params: dict[str, str] = {}
+            try:
+                lexer = shlex.shlex(text[len(token):], posix=True)
+                lexer.whitespace_split = True
+                for arg in lexer:
+                    key, sep, val = arg.partition("=")
+                    if sep:
+                        params[key.upper()] = val
+                    elif len(key) > 1 and key[0].isalpha():
+                        # Traditional letter params: M104 S200, M106 S255.
+                        params[key[0].upper()] = key[1:]
+            except ValueError:
+                continue
+            if token == "M106":
+                out.append("part-cooling fan ([fan]) commanded to "
+                           + as_pct_of_255(params.get("S", "255")))
+            elif token == "M107":
+                out.append("part-cooling fan ([fan]) commanded to 0%")
+            elif token == "SET_FAN_SPEED" and params.get("FAN"):
+                out.append(f"fan '{params['FAN']}' commanded to "
+                           + as_pct_of_one(params.get("SPEED", "0")))
+            elif token in ("M104", "M109"):
+                out.append(f"hotend target {params.get('S', '?')}C "
+                           "(heating not simulated)")
+            elif token in ("M140", "M190"):
+                out.append(f"bed target {params.get('S', '?')}C "
+                           "(heating not simulated)")
+            elif token == "SET_LED" and params.get("LED"):
+                cols = " ".join(f"{c}={params[c]}"
+                                for c in ("RED", "GREEN", "BLUE", "WHITE")
+                                if c in params)
+                out.append(f"LED '{params['LED']}' set to "
+                           f"{cols or '(no colour params)'}")
+            elif token == "SET_GCODE_VARIABLE" and params.get("VARIABLE"):
+                out.append(f"per-macro state {params['VARIABLE']} := "
+                           f"{params.get('VALUE', '?')} (applies to the "
+                           "NEXT call)")
+            elif token == "M117":
+                rest = text.split(None, 1)
+                if len(rest) > 1:
+                    out.append(f"console message: {rest[1]}")
+            elif token == "RESPOND" and params.get("MSG"):
+                out.append("console message: "
+                           + params["MSG"].strip('"'))
+        return out
 
     # ── Printer Memory ────────────────────────────────────────────
 

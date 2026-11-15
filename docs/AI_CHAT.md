@@ -238,7 +238,7 @@ guesses parameters:
 | `validate_klipper_config` | Validate a draft snippet you haven't staged. |
 | `validate_config_project` | Validate your whole loaded project (the save-gate engine). |
 | `validate_macro` | Check a `gcode_macro` against Klipper's Jinja rules — unbalanced blocks, unknown commands, missing homing. |
-| `simulate_macro` | Run a macro on invocations **you declare** (params, printer-state, variables — up to 8 scenarios) and read the exact commands Klipper would execute, with each line's provenance. The grounding tool for runtime-behavior questions: it renders the template only — called macros are not recursed, and motion, waits, and delays execute but produce no observable output — so a scenario run is never a printer fact. |
+| `simulate_macro` | Run a macro on invocations **you declare** (params, printer-state, variables — up to 8 scenarios) and read the exact commands Klipper would execute, with each line's provenance. `runs=N` renders N **consecutive** calls from one starting state, threading the macro's own `SET_GCODE_VARIABLE` writes from one call to the next and printing a `commands differ: YES/NO` verdict — the only way to check that a toggle actually toggles. Each call also reports `Expected effect (commanded, not observed)`: fan percent, LED colours, temperature **targets**, console text. The grounding tool for runtime-behavior questions: it renders the template only — called macros are not recursed, and motion, waits, and heating produce no observable output — so a scenario run is never a printer fact. |
 | `generate_macro_template` | Structured templates (PAUSE/PRINT_START/etc.) with include-flags. |
 | `detect_board` | Identify the likely board from a config snippet or pin layout. |
 | `calculate_rotation_distance` | Steps/mm math for belts and leadscrews. |
@@ -421,7 +421,7 @@ Design laws earned the hard way:
 | :--- | :--- |
 | Core Tools (Q01–Q20, minus retired Q09) | Docs lookups, example configs, validation, calculations, edit routing. |
 | Macro Authoring (MACRO-01..07, 09–14, minus retired MACRO-08) | Authoring, editing, fixing, templates, `validate_macro` checks; 12–14 add the runtime render class (a macro that compiles but renders a broken command). |
-| Sim Tool (SIMTOOL-01..05) | `simulate_macro` tool-use compliance: runtime claims grounded in declared scenario runs, both-state toggle simulation, guarded-param regression pin, review-only negative control. Graded on tool-trace artifacts. |
+| Sim Tool (SIMTOOL-01..05) | `simulate_macro` tool-use compliance: runtime claims grounded in declared runs; SIMTOOL-02 grades tool-trace artifacts for a state-persisting toggle (`SET_GCODE_VARIABLE MACRO=…` in the staged body) plus a `runs` sequence whose second call renders differently — independent scenarios prove branches, never the transition; guarded-param regression pin; review-only negative control. |
 | Trident Configs (TRIDENT-01..16) | Real Trident configs (read/edit/delete/manage, cross-file edits, the `idle_timeout` multi-LED case). Read-only context. |
 | Harness (HARNESS-01, 03, minus retired HARNESS-02) | Self-checks: criteria that must reject a wrong staged artifact. |
 | Edit Cases (MINIDIFF-01..04) | Staged-edit cases: `level_bed` adaptive mode, `max_accel`, pin edits, `pressure_advance`. |

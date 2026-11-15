@@ -175,6 +175,120 @@ def test_unknown_macro_name_offers_the_text_escape():
     assert "macro_text" in out
 
 
+# ── sequence mode (runs): state threading ─────────────────────────────────
+
+_TOGGLE_PERSISTENT = (
+    "[gcode_macro TOGGLE_FAN]\n"
+    "variable_fan_on: False\n"
+    "gcode:\n"
+    "  {% if fan_on %}\n"
+    "    M107\n"
+    "    SET_GCODE_VARIABLE MACRO=TOGGLE_FAN VARIABLE=fan_on VALUE=False\n"
+    "  {% else %}\n"
+    "    M106 S255\n"
+    "    SET_GCODE_VARIABLE MACRO=TOGGLE_FAN VARIABLE=fan_on VALUE=True\n"
+    "  {% endif %}\n"
+)
+
+_TOGGLE_DEAD = (
+    "[gcode_macro TOGGLE_FAN]\n"
+    "variable_fan_on: False\n"
+    "gcode:\n"
+    "  {% set fan_on = not fan_on %}\n"
+    "  {% if fan_on %}\n"
+    "    SET_FAN_SPEED FAN=fan SPEED=1\n"
+    "  {% else %}\n"
+    "    SET_FAN_SPEED FAN=fan SPEED=0\n"
+    "  {% endif %}\n"
+)
+
+
+def test_runs_threads_state_through_set_gcode_variable():
+    """The toggle question the tool could not answer before: call 1's
+    own SET_GCODE_VARIABLE is the state call 2 starts from."""
+    out = _call(macro_text=_TOGGLE_PERSISTENT, runs=2)
+    assert "## call 1" in out and "## call 2" in out
+    assert "→ state after call 1: fan_on := True" in out
+    assert "variables: {'fan_on': 'True'}" in out      # call 2 inherits it
+    assert "M107" in out                                 # fan actually turns off
+    assert "Sequence: call 2 vs call 1 -> commands differ: YES" in out
+
+
+def test_runs_exposes_a_toggle_that_never_persists():
+    """The r7/r8 SIMTOOL-02 artifact: {% set %} is template-local, so no
+    state changes and every call takes the same branch. Two independent
+    scenarios made this look like a working toggle."""
+    out = _call(macro_text=_TOGGLE_DEAD, runs=2)
+    assert "→ state after call 1: unchanged" in out
+    assert "commands differ: NO" in out
+    assert "M107" not in out
+
+
+def test_runs_alone_refuses_multiple_scenarios():
+    out = _call(macro_text=_TOGGLE_PERSISTENT, runs=2,
+                scenarios=[{"name": "a"}, {"name": "b"}])
+    assert "CONSECUTIVE calls from ONE starting state" in out
+
+
+def test_runs_is_capped_and_validated():
+    out = _call(macro_text=_TOGGLE_PERSISTENT, runs=99)
+    assert out.count("## call ") == 6
+    bad = _call(macro_text=_TOGGLE_PERSISTENT, runs="lots")
+    assert "runs must be an integer" in bad
+
+
+def test_threading_ignores_foreign_and_undeclared_writes():
+    text = ("[gcode_macro TOGGLE_FAN]\n"
+            "variable_fan_on: False\n"
+            "gcode:\n"
+            "  SET_GCODE_VARIABLE MACRO=OTHER_MACRO VARIABLE=fan_on "
+            "VALUE=True\n"
+            "  SET_GCODE_VARIABLE MACRO=TOGGLE_FAN VARIABLE=nope "
+            "VALUE=True\n"
+            "  M106 S255\n")
+    out = _call(macro_text=text, runs=2)
+    # The foreign write is not ours to follow; the undeclared name is
+    # rejected by Klipper and reported, never followed.
+    assert "undeclared variable 'nope'" in out
+    assert "→ state after call 1: unchanged" in out
+
+
+def test_threading_refuses_non_literal_value():
+    text = ("[gcode_macro TOGGLE_FAN]\n"
+            "variable_fan_on: False\n"
+            "gcode:\n"
+            "  SET_GCODE_VARIABLE MACRO=TOGGLE_FAN VARIABLE=fan_on "
+            "VALUE=on\n")
+    out = _call(macro_text=text, runs=2)
+    assert "is not a literal" in out
+    assert "→ state after call 1: unchanged" in out
+
+
+# ── expected effect (commanded, not observed) ─────────────────────────────
+
+def test_expected_effect_reports_commanded_outcomes():
+    text = ("[gcode_macro PARTY]\n"
+            "gcode:\n"
+            "  M106 S255\n"
+            "  M104 S200\n"
+            "  SET_LED LED=stealthburner RED=1 GREEN=0 BLUE=0.2\n"
+            "  M117 party on\n")
+    out = _call(macro_text=text)
+    assert "Expected effect (commanded, not observed):" in out
+    assert "part-cooling fan ([fan]) commanded to 100%" in out
+    assert "hotend target 200C" in out
+    assert "LED 'stealthburner' set to RED=1 GREEN=0 BLUE=0.2" in out
+    assert "console message: party on" in out
+
+
+def test_expected_effect_maps_fan_generic_speed_to_percent():
+    text = ("[gcode_macro F]\n"
+            "gcode:\n"
+            "  SET_FAN_SPEED FAN=Aux_Fan SPEED=0.5\n")
+    out = _call(macro_text=text)
+    assert "fan 'Aux_Fan' commanded to 50%" in out
+
+
 # ── working state shadows disk (W3 scope ruling) ───────────────────────────
 
 def test_staged_content_shadows_the_macro_lookup():
