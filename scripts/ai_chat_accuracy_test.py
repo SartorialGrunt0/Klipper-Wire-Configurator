@@ -976,8 +976,6 @@ gcode:
 _SIM_PRINT_START = """
 [gcode_macro PRINT_START]
 description: home then heat bed and hotend to the given targets
-params_BED: 60
-params_EXTRUDER: 215
 gcode:
     G28
     M140 S{params.BED}
@@ -985,6 +983,13 @@ gcode:
     M190 S{params.BED}
     M109 S{params.EXTRUDER}
 """
+# NO `params_BED:`/`params_EXTRUDER:` declarations on purpose
+# (review 4.1, 2026-11-14): the shipped static validator currently
+# hard-errors params_* keys on [gcode_macro] as unknown_param (a
+# pre-existing escalation, filed separately) — the fixture would ride
+# into the question already red. Undeclared params are valid Klipper
+# (required-at-invocation); the question supplies both values as
+# explicit scenario params, which render identically.
 
 _SIM_LEVEL_FAN = """
 [gcode_macro LEVEL_FAN]
@@ -1059,7 +1064,8 @@ def build_simtool_questions() -> list[TestQuestion]:
                       "simulate_macro:scenarios:variables.{0,400}variables"],
                      ["tool_args", "simulate_macro:scenarios"]],
                     [["tool_call_count", "simulate_macro::2"],
-                     ["tool_args", "simulate_macro:scenarios"]],
+                     ["tool_args",
+                      "simulate_macro:scenarios:variables"]],
                 ])),
             ),
         ),
@@ -3794,11 +3800,15 @@ def criterion_ok(kind: str, value: str, content: str,
                                      re.IGNORECASE | re.DOTALL)
         return False
     if kind == "staged_renders_clean":
-        # W2 RUNTIME CLASS: the staged macros on the target file must not
-        # merely COMPILE — each must render to a parseable command at its
-        # default invocation (empty `params_` default + brace ref is
-        # cross-line: no single staged-text regex decides it without
-        # false-failing the correct fix). Graded by the SHARED render
+        # W2 RUNTIME CLASS (law A refined): the staged macros on the
+        # target file must not merely COMPILE — they are graded on the
+        # DECLARED state only (section params_* defaults ride every
+        # Klipper invocation; there is no single invocation of a staged
+        # macro). Static defects — empty/garbage declared defaults,
+        # broken literal lines — are ERROR findings and FAIL;
+        # param-dependent reads (no declared value) render as INFO and
+        # are NOT graded (3.1: no invocation is not a bare invocation).
+        # Graded by the SHARED render
         # simulator — the same engine as the save gate and validate_macro,
         # so the grader can never drift weaker than what ships.
         # value = escaped target filename regex (e.g. "printer\\.cfg").
@@ -3818,7 +3828,9 @@ def criterion_ok(kind: str, value: str, content: str,
         if _backend not in _sys.path:
             _sys.path.insert(0, _backend)
         from parser.config_parser import parse_config
-        from parser.validator import _TEMPLATE_SECTION_BODIES
+        from parser.validator import (_TEMPLATE_SECTION_BODIES,
+                                      _compile_macro_template,
+                                      _strip_inline_comments)
         from parser.macro_render import simulate_macro
         for e in targets:
             try:
@@ -3832,13 +3844,22 @@ def criterion_ok(kind: str, value: str, content: str,
                 sp = sec.get_param(bp)
                 if sp is None or not str(sp.value).strip():
                     continue
-                sim_params = {
+                # Broken templates: the render engine deliberately defers
+                # syntax errors to the validator's Jinja check (dedup),
+                # so their findings never appear in simulate_macro. The
+                # grader runs that SAME check here — the criterion stays
+                # a superset of the save gate.
+                if _compile_macro_template(_strip_inline_comments(
+                        str(sp.value))) is not None:
+                    return False
+                declared = {
                     q.key[len("params_"):].lower(): q.value
                     for q in sec.params
                     if q.key.startswith("params_") and not q.is_commented_out
                 }
                 try:
-                    sim = simulate_macro(str(sp.value), sim_params)
+                    sim = simulate_macro(str(sp.value),
+                                         declared_defaults=declared)
                 except Exception:
                     return False
                 # Compile failures surface HERE as error findings — the
