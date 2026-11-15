@@ -142,6 +142,9 @@ class RenderFinding:
     variant: int | None = None
 
 
+_RENDER_LINE_CAP = 5000  # bounded work: stop verifying past this many lines
+
+
 @dataclass(frozen=True)
 class MacroRenderResult:
     rendered: list[RenderedLine] = field(default_factory=list)
@@ -312,6 +315,26 @@ _PARAM_READ_RE = re.compile(
     r"|\[\s*['\"]([A-Za-z_][\w ]*)['\"]\s*\])")
 
 
+def _presence_of(name: str, defined_params: frozenset[str],
+                 authoritative: bool) -> bool | None:
+    """True/False when Klipper's answer is decidable, None when not.
+
+    ``defined_params`` holds UPPERCASE key names (Klipper's params dict is
+    uppercase-keyed and lookups are case-sensitive, review round-2 D2).
+    A spelling with any lowercase character can therefore never match any
+    invocation — that is decidable even with no invocation declared.
+    With an authoritative invocation an absent uppercase name is simply
+    absent; without one, any caller may still pass it (None: explore both
+    arms, downgrade the value-reading arm to param-dependent info)."""
+    if name in defined_params:
+        return True
+    if name != name.upper():
+        return False
+    if not authoritative:
+        return None
+    return False
+
+
 def _static_param_presence(cond: str,
                            defined_params: frozenset[str],
                            authoritative: bool = True) -> bool | None:
@@ -330,15 +353,24 @@ def _static_param_presence(cond: str,
     c = cond.strip()
     m = _PARAM_IS_DEFINED_RE.match(c)
     if m:
-        name = (m.group(1) or m.group(2)).lower()
-        present = name in defined_params
-        if not present and not authoritative:
+        # Klipper's params dict is UPPERCASE-keyed and Jinja dict
+        # attribute/key lookup is case-SENSITIVE: `params.x` is undefined
+        # even when X was passed (review round-2 D2). Compare exactly.
+        name = (m.group(1) or m.group(2))
+        present = _presence_of(name, defined_params, authoritative)
+        if present is None:
             return None
         return present if m.group(3) == "is" else not present
     m = _PARAMS_MEMBERSHIP_RE.match(c)
     if m:
-        present = m.group(1).lower() in defined_params
-        if not present and not authoritative:
+        # `'x' in params` is a case-sensitive key test; the real-world
+        # `'x' in params|upper` idiom uppercases the dict's string form,
+        # so there a lowercase spelling DOES match an uppercase key.
+        name = m.group(1)
+        if "|upper" in c.replace(" ", ""):
+            name = name.upper()
+        present = _presence_of(name, defined_params, authoritative)
+        if present is None:
             return None
         return present
     return None
@@ -358,7 +390,10 @@ def _cond_is_unknown(cond: str, defined_params: frozenset[str],
     # `'X' in params|upper` behaving identically (3.1).
     mm = _PARAMS_MEMBERSHIP_RE.match(cond.strip())
     if mm:
-        return mm.group(1).lower() not in defined_params
+        name = mm.group(1)
+        if "|upper" in cond.replace(" ", ""):
+            name = name.upper()
+        return _presence_of(name, defined_params, False) is None
     for m in _PRINTER_REF_RE.finditer(cond):
         if m.group(2):
             # Bracket access anywhere in the chain: conservative, the
@@ -375,10 +410,10 @@ def _cond_is_unknown(cond: str, defined_params: frozenset[str],
     for m in _PARAMS_REF_RE.finditer(cond):
         dotted, indexed = m.group(1), m.group(2)
         if dotted is not None:
-            if dotted.lower() not in defined_params:
+            if _presence_of(dotted, defined_params, False) is None:
                 return True
         elif indexed is not None:
-            if indexed.lower() not in defined_params:
+            if _presence_of(indexed, defined_params, False) is None:
                 return True
         else:
             return True
@@ -666,6 +701,53 @@ def _param_alias_map(src_text: str) -> dict[str, str]:
     return raw
 
 
+_FINDING_PARAM_RE = re.compile(
+    r"(?:Parameter (\w+) renders EMPTY"
+    r"|Parameter (\w+)=.*does not parse"
+    r"|missing required parameter (\w+))")
+
+
+def _expr_depends_on_missing(expr: str, alias_map: dict[str, str],
+                             param_dependent: frozenset[str]) -> bool:
+    """True when a template expression reads a param whose value is
+    undecided without an invocation (directly or through an alias)."""
+    for m in _PARAM_READ_RE.finditer(expr):
+        if (m.group(1) or m.group(2)) in param_dependent:
+            return True
+    for m in _LINE_EXPR_RE.finditer(expr):
+        nm = alias_map.get(m.group(1))
+        if nm and nm in param_dependent:
+            return True
+    return False
+
+
+def _finding_is_param_dependent(finding: RenderFinding, src_line: str,
+                                alias_map: dict[str, str],
+                                param_dependent: frozenset[str]) -> bool:
+    """Attribute ONE finding to the param-dependent read that produced it.
+
+    Round-2 review D1: suppressing the whole LINE dropped statically
+    decidable defects that share the line with a param-dependent read
+    ('SET_LED LED={params.LED} RED=' lost the literal RED=). Attribution
+    is per finding: locate that parameter's token in the SOURCE line —
+    a literal value (including a literal empty) is static and stays; a
+    template expression stays only when it resolves to a DECIDED param.
+    A token absent from the source (whole command built by Jinja) is
+    attributed to the line's missing reads (the long-standing accepted
+    shape)."""
+    m = _FINDING_PARAM_RE.search(finding.message)
+    if not m:
+        return False
+    pname = next(g for g in m.groups() if g)
+    tok = re.search(rf"(?i)\b{re.escape(pname)}\s*=\s*(\S*)", src_line)
+    if tok is not None:
+        val = tok.group(1)
+        if "{" in val:
+            return _expr_depends_on_missing(val, alias_map, param_dependent)
+        return False
+    return _expr_depends_on_missing(src_line, alias_map, param_dependent)
+
+
 def _render_one(env: jinja2.Environment, src: str, params: dict[str, str],
                 variant: int,
                 variables: dict[str, str] | None = None,
@@ -886,7 +968,18 @@ def _check_rendered_line(text: str, registry: dict, variant: int,
                 seen_unknown = True
             continue
         if value == "":
-            if pdef.get("required") or pdef.get("type") in ("float", "int"):
+            # An empty value only breaks Klipper where it must PARSE
+            # (float/int — the field repro 'RED='), or where it names a
+            # mux target (an empty mux name can never resolve: lookup of
+            # '' fails). A plain string param accepts '' — Klipper's own
+            # sample configs spell the unsync as `MOTION_QUEUE=`
+            # (kinematics/extruder.py cmd_SYNC_EXTRUDER_MOTION: gcmd.get
+            # returns '' and sync_to_extruder(None) is the documented
+            # detach), so 'required and empty' alone is NOT an error.
+            _numeric = pdef.get("type") in ("float", "int")
+            _is_mux = (pname.upper()
+                       == str(entry.get("mux_key") or "").upper())
+            if _numeric or (_is_mux and pdef.get("required")):
                 findings.append(RenderFinding(
                     "error", "macro_param_renders_empty",
                     f"Parameter {pname} renders EMPTY ('{pname}=') — "
@@ -955,6 +1048,18 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
         # class only (rare in macro bodies).
         return MacroRenderResult()
 
+    # Bounded work (round-2 D6): a body looping over a huge constant
+    # range hangs the render (range(10**9) neither raises nor gets
+    # contained — unlike range(...)|list, which trips the S2 guard).
+    # Refuse up front with an info finding: validation must never stall.
+    _big_range = re.search(r"\brange\s*\(\s*(\d[\d_]{5,})", stripped)
+    if _big_range:
+        return MacroRenderResult(findings=[RenderFinding(
+            "info", "macro_render_blocked",
+            f"Template loops over range({_big_range.group(1)}) — too "
+            "large to simulate; this body's rendered commands were not "
+            "verified.")])
+
     # Param-presence guards consult PARAMS ONLY (review L6): Klipper's
     # params dict never contains the macro's variables. Bare `x is
     # defined` (where x IS a variable/template name) is not one of these
@@ -969,8 +1074,9 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
     # fabricated error (the Hotkey.cfg FP class).
     declared_lower = frozenset(k.lower() for k in declared_defaults)
     render_params = {**declared_defaults, **params}
-    defined = (frozenset(k.lower() for k in render_params)
-               if invocation_given else declared_lower)
+    defined = (frozenset(k.upper() for k in render_params)
+               if invocation_given
+               else frozenset(k.upper() for k in declared_lower))
     # Scenario-declared dotted state paths: conditions whose printer
     # paths are covered evaluate NATIVELY (the value is known) — no arm
     # expansion for known shape.
@@ -1025,16 +1131,25 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
             # would only measure the empty-Undefined rendering.
             # (Residual: an inline single-line if-body defeats line
             # attribution and falls back to full checks — rare shape.)
-            if not invocation_given and match is not None:
-                missing = _missing_param_reads(src_lines[match],
-                                               declared_lower)
+            line_src = src_lines[match] if match is not None else None
+            if len(rendered) >= _RENDER_LINE_CAP:
+                if not any(f.code == "macro_render_unexplored"
+                           for f in findings):
+                    findings.append(RenderFinding(
+                        "info", "macro_render_unexplored",
+                        f"Stopped after {_RENDER_LINE_CAP} rendered lines — "
+                        "the body expands to an unusually large command "
+                        "set; later lines were not verified."))
+                break
+            if not invocation_given and line_src is not None:
+                missing = _missing_param_reads(line_src, declared_lower)
                 # Reads hidden behind Jinja aliases (`{% set led =
                 # params.LED|string %}`, a for-loop over a stringified
                 # param) resolve through the alias map and intersect
                 # with the body-wide missing set — the |default
                 # exemption and declared check already live there.
                 if alias_map:
-                    for em in _LINE_EXPR_RE.finditer(src_lines[match]):
+                    for em in _LINE_EXPR_RE.finditer(line_src):
                         pname = alias_map.get(em.group(1))
                         if pname and pname in param_dependent:
                             missing.add(pname)
@@ -1050,8 +1165,14 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
                             "line is param-dependent — pass params to "
                             "simulate_macro for a full verdict.",
                             variant=vi, source_line=src_line))
-                    continue
             for f in _check_rendered_line(text, registry, vi):
+                # Round-2 D1: suppress per FINDING, never per line —
+                # a literal defect sharing the line with a
+                # param-dependent read stays a real verdict.
+                if (not invocation_given and line_src is not None
+                        and _finding_is_param_dependent(
+                            f, line_src, alias_map, param_dependent)):
+                    continue
                 findings.append(replace(f, source_line=f.source_line or src_line))
 
     # Dedup findings that repeat across variants when the breakage is

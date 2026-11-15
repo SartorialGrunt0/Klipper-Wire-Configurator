@@ -73,6 +73,8 @@ _SUBSTR_KINDS = {"contains", "not_contains", "staged_param",
                  "staged_new_file_header", "staged_section_absent",
                  "failed_named_in_reply", "not_staged", "not_staged_any",
                  "staged_any_param"}
+# "file::substring" kinds whose filename segment is an EXACT-match target.
+_EXACT_FN_PREFIX_KINDS = {"staged_param", "staged_param_ci", "staged_header"}
 
 
 def _decode_fn(name: str) -> str:
@@ -95,6 +97,15 @@ def _regex_parts(kind: str, value: str):
         if len(parts) == 3:
             yield "staged_section_regex.body", parts[2], \
                 _decode_fn(parts[0]), None
+    elif kind in _EXACT_FN_PREFIX_KINDS:
+        filename, _, _needle = value.partition("::")
+        yield f"{kind}.file", None, _decode_fn(filename), None
+    elif kind == "memory_has":
+        # "field:regex" — profile-field regex (round-2 D5: these ARE
+        # regexes and were previously never compiled).
+        _field, _, pattern = value.partition(":")
+        if pattern:
+            yield "memory_has.regex", pattern, None, None
     elif kind == "staged_file":
         yield "staged_file", None, value, None
     elif kind == "staged_renders_clean":
@@ -110,6 +121,18 @@ def _regex_parts(kind: str, value: str):
         _, _, pattern = value.partition("::")
         if pattern:
             yield "tool_output_regex.regex", pattern, None, None
+
+
+def test_staged_section_regex_values_have_three_parts():
+    # A value with !=3 "::" parts silently makes the criterion dead
+    # (criterion_ok returns False for every artifact) — round-2 D5.
+    bad = []
+    for builder, q in _all_questions():
+        for kind, value in _pairs(q):
+            if kind == "staged_section_regex" and len(value.split("::")) != 3:
+                bad.append(f"{q.qid}: {value!r}")
+    assert not bad, "staged_section_regex values without 3 '::' parts:\n" + \
+        "\n".join(bad)
 
 
 def test_every_regex_criterion_compiles_and_has_no_literal_backslash():
@@ -149,6 +172,10 @@ def test_filename_targets_exist_in_the_questions_own_files():
             continue
         allowed = names | {v.partition("::")[0]
                            for v in new_file_kinds if v}
+        # A question that NAMES a new file in its prompt ("create
+        # park_macros.cfg") legitimately stages that file — accept any
+        # .cfg filename the prompt itself introduces (round-2 D5).
+        allowed |= set(re.findall(r"[\w.-]+\.cfg", q.text or ""))
         for kind, value in _pairs(q):
             for label, _pattern, exact, fn_rx in _regex_parts(kind, value):
                 if exact and "." in exact and allowed and exact not in allowed:

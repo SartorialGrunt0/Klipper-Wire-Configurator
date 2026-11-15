@@ -654,3 +654,25 @@ def test_trace_ambiguity_reports_all_candidates_in_caller_order():
                          params={"red": ""}, file="b.cfg")
     matches = trace_runtime_error(["SET_LED LED=c RED="], [a, b])
     assert [m.macro for m in matches] == ["FIRST", "SECOND"]
+
+
+def test_empty_string_param_is_legal_where_klipper_accepts_it():
+    # Klipper's own sample configs unsync with `MOTION_QUEUE=` (empty is
+    # the documented detach, kinematics/extruder.py). A required STRING
+    # param may legitimately render empty — only numeric parses and mux
+    # targets break on ''.
+    body = ("    SYNC_EXTRUDER_MOTION EXTRUDER={params.EXTRUDER} "
+            "MOTION_QUEUE=\n")
+    r = simulate_macro(body, {"EXTRUDER": "extruder"})
+    errs = [f for f in r.findings if f.code == "macro_param_renders_empty"]
+    assert not errs, [f.message for f in errs]
+
+
+def test_empty_mux_target_is_still_an_error():
+    # An empty mux name can never resolve (lookup of '' fails), so the
+    # required mux key stays a static error.
+    body = "    SET_LED LED= RED=0.5 GREEN=0 BLUE=0\n"
+    r = simulate_macro(body, declared_defaults={})
+    errs = [f for f in r.findings if f.code == "macro_param_renders_empty"]
+    assert len(errs) == 1 and "LED" in errs[0].message, \
+        [f.message for f in r.findings]

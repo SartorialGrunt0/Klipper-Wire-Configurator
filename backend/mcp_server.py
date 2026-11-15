@@ -3518,25 +3518,46 @@ class McpServer:
         rendered = [i for i in issues
                     if "rendered default invocation" in i["message"]]
 
+        _param_in_render = (
+            re.compile(r"Parameter (\w+) renders EMPTY"),
+            re.compile(r"Parameter (\w+)=\S* does not parse"),
+            re.compile(r"missing required parameter (\w+)"),
+        )
+
+        def _rendered_params(msg: str) -> set[str]:
+            return {g for rx in _param_in_render
+                    for m in rx.finditer(msg) for g in m.groups()}
+
+        def _quoted(msg: str) -> str:
+            q = re.search(r"'([^']*)'", msg)
+            return q.group(1) if q else ""
+
         def _static_twin(issue: dict) -> bool:
             msg = issue["message"]
-            # (a) legacy G1 no-feedrate static line check: the
-            # post-render finding covers it with the value-aware
-            # message whenever the rendered line keeps the shape.
-            if (msg.startswith("Extrusion move without feedrate:")
-                    and any("without feedrate" in r["message"]
-                            for r in rendered)):
-                return True
-            # (b) 2b required-param twin on the SAME line+command.
+            # (a) legacy G1 no-feedrate static line check: drop it only
+            # when the post-render finding names the SAME rendered
+            # command (round-2 D4: a substring 'without feedrate' test
+            # dropped genuine static findings from other lines).
+            if msg.startswith("Extrusion move without feedrate:"):
+                want = _quoted(msg)
+                return bool(want) and any(
+                    _quoted(r["message"]) == want for r in rendered)
+            # (b) 2b required-param twin on the SAME line + command, and
+            # only when the rendered finding itself names that PARAM
+            # (substring tests let 'Z' match 'TESTZ' — round-2 D4).
             m = re.match(r"Line (\d+): '(\S+)' is missing required "
                          r"parameter '([A-Za-z0-9_]+)='", msg)
             if not m:
                 return False
             line, cmd, pname = m.groups()
             for r in rendered:
-                if (r["message"].startswith(f"Line {line}: ")
-                        and cmd in r["message"]
-                        and pname.lower() in r["message"].lower()):
+                rmsg = r["message"]
+                if not rmsg.startswith(f"Line {line}: "):
+                    continue
+                first = _quoted(rmsg).split()
+                if not first or first[0].upper() != cmd.upper():
+                    continue
+                if pname in _rendered_params(rmsg):
                     return True
             return False
         issues[:] = [i for i in issues if not _static_twin(i)]
@@ -3744,6 +3765,19 @@ class McpServer:
                            "this scenario was NOT simulated.")
                 continue
             name = str(sc.get("name") or name)
+            # Members must be mappings: a stringified `params` used to
+            # raise AttributeError inside the dispatcher (round-2 D3).
+            bad = next(((f, type(sc.get(f)).__name__) for f in
+                        ("params", "printer_state", "variables")
+                        if sc.get(f) is not None
+                        and not isinstance(sc.get(f), dict)), None)
+            if bad is not None:
+                out.append("")
+                out.append(f"## {name}")
+                out.append(f"ERROR: scenario #{idx} field '{bad[0]}' is "
+                           f"{bad[1]}, expected an object of key→value — "
+                           "this scenario was NOT simulated.")
+                continue
             params = dict(default_params)
             for k, v in (sc.get("params") or {}).items():
                 params[str(k).lower()] = str(v)

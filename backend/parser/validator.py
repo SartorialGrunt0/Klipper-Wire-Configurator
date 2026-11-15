@@ -947,9 +947,21 @@ def _simulate_macro_render(section: ConfigSection, result: ValidationResult) -> 
         if param.key.lower().startswith("variable_")
         and not param.is_commented_out
     }
-    simulation = simulate_macro(gcode_param.value,
-                                declared_defaults=params,
-                                variables=variables)
+    simulation = None
+    try:
+        simulation = simulate_macro(gcode_param.value,
+                                    declared_defaults=params,
+                                    variables=variables)
+    except Exception:  # noqa: BLE001 — round-2 D7
+        # Belt-and-braces: the engine contains its own render failures,
+        # but a future non-Exception path (or a bug in splicing/alias/
+        # shape helpers) must never take down validation of every other
+        # section. Loud, never silent.
+        logging.getLogger(__name__).warning(
+            "render simulation crashed for %s — section skipped",
+            section.full_header, exc_info=True)
+    if simulation is None:
+        return
     for finding in simulation.findings:
         # The body value carries a leading newline (everything after
         # 'gcode:'), so value line 1 is the remainder of the key line:

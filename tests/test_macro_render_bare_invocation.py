@@ -233,3 +233,52 @@ def test_defaulted_alias_never_adds_dependency():
             "    SET_LED LED=x TRANSMIT={t} RED=1 GREEN=0 BLUE=0\n")
     r = simulate_macro(body, declared_defaults={})
     assert r.findings == [], [f.message for f in r.findings]
+
+
+# ── round-2 D1: suppression is PER FINDING, never per line ────────────────
+
+def test_literal_empty_survives_param_dependent_line():
+    # 'RED=' is a literal defect — true under EVERY invocation — even
+    # though the same line reads an undeclared param.
+    body = "    SET_LED LED={params.LED} RED= GREEN=0 BLUE=0\n"
+    r = simulate_macro(body, declared_defaults={})
+    errs = [f for f in r.findings
+            if f.severity == "error" and f.code == "macro_param_renders_empty"]
+    assert len(errs) == 1 and "RED" in errs[0].message, \
+        [f.message for f in r.findings]
+    assert any(f.code == "macro_param_undefined" for f in r.findings)
+
+
+def test_declared_empty_default_survives_other_param_dependency():
+    # params_RED declared empty = static ERROR; GREEN reads an undeclared
+    # param on the same line = param-dependent. Both verdicts coexist.
+    body = "    SET_LED LED=x RED={params.RED} GREEN={params.OTHER}\n"
+    r = simulate_macro(body, declared_defaults={"red": ""})
+    errs = [f for f in r.findings
+            if f.severity == "error" and f.code == "macro_param_renders_empty"]
+    assert len(errs) == 1 and "RED" in errs[0].message, \
+        [f.message for f in r.findings]
+
+
+def test_alias_form_keeps_static_defect_next_to_dependency():
+    body = ("    {% set r = params.RED %}\n"
+            "    {% set o = params.OTHER %}\n"
+            "    SET_LED LED=x RED={r} GREEN={o} BLUE=0\n")
+    r = simulate_macro(body, declared_defaults={"red": ""})
+    errs = [f for f in r.findings
+            if f.severity == "error" and f.code == "macro_param_renders_empty"]
+    assert len(errs) == 1 and "RED" in errs[0].message, \
+        [f.message for f in r.findings]
+
+
+def test_mixed_line_reaches_the_human_save_gate():
+    # End-to-end: the static half must survive validate_config AND the
+    # human-facing boundary (D1 was invisible there before the fix).
+    cfg = ("[gcode_macro MIX]\n"
+           "gcode:\n"
+           "    SET_LED LED={params.LED} RED= GREEN=0 BLUE=0\n")
+    res = validate_config(parse_config(cfg))
+    human = res.human_to_dict()
+    errs = [e for e in (human.get("errors") or [])
+            if e.get("code") == "macro_param_renders_empty"]
+    assert errs and "RED" in errs[0]["message"], human
