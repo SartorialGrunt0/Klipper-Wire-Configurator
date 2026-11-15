@@ -45,40 +45,42 @@ Practically:
 | Required param missing / unparseable type / non-literal `SET_GCODE_VARIABLE VALUE` | simulator (both surfaces share the engine) | error | the rendered line is refused by Klipper on every call |
 | Enum param outside its membership set (`RESPOND TYPE=`) | simulator | error | same: refused on every call |
 | Mux target names hardware the project does not define (`FAN=fan`) | simulator (needs the project's section inventory) | warning | run-time refusal, but absence is only decidable from the loaded files |
-| Numeric **bounds** (`minval`/`maxval`) | simulator, literal bounds only | error | 63 sites, most config-dependent → undecidable statically; do not guess |
+| Either-of / exactly-one choice (`SET_FAN_SPEED`, `TEMPERATURE_WAIT`) | simulator | error | refused on every call, and the rule is a literal in the handler |
+| Numeric **bounds** (`minval`/`maxval`/`above`/`below`) | simulator, **literal limits only** | error | 78 bound sites in the handlers: every literal limit is recorded (70 params carry a bound), the 10 config-derived limit sides are left out — do not guess |
 | Param-dependent values, undeclared printer state, branches | `simulate_macro` only | info | an invocation question, not a text question |
 | State transitions, "does it remember", branch coverage | `simulate_macro` (`runs=N`) | info/verdict | needs consecutive calls |
 | Physical outcome (fan actually spins, hotend reaches target) | **nobody** | — | not checkable without execution; the tool reports "commanded, not observed" |
 
 ## 3. Coverage today
 
-Registry: **192 commands**; **123 documented** commands (`G-Codes.md` `####`
-headers; every one registered, **0 documented-but-unregistered**). Parameter
-metadata: **233 entries artifact-wide, 199 on documented commands** (166 typed,
-66 required). The earlier pass's "128 documented / 189 param entries" used a
-looser header match that also picked prose words out of backticks.
+Registry: **192 commands**; **127 documented** commands (`G-Codes.md` `####`
+headers, de-quoted; every one registered, **0 documented-but-unregistered**).
+Parameter metadata: **233 entries artifact-wide, 206 on documented commands**
+(173 typed, 67 required, 58 with a bound). Two earlier counts were wrong and are
+superseded: "128 documented / 189 param entries" used a looser header match that
+picked prose words out of backticks, and "123 documented" dropped the four
+backtick-quoted `EXCLUDE_OBJECT` headings (the audit in §7 reconciles both).
 
 **Mux targets** (commands that resolve a key against the config's objects):
-**37 documented** mux commands, **12 target-resolved** (v1):
-`SET_FAN_SPEED, SET_LED, SET_LED_TEMPLATE, SET_PIN, SET_SERVO,
-SET_HEATER_TEMPERATURE, SET_TEMPERATURE_FAN_TARGET, TEMPERATURE_PROBE_CALIBRATE,
-UPDATE_DELAYED_GCODE, SET_FILAMENT_SENSOR, QUERY_FILAMENT_SENSOR, SET_DIGIPOT`.
-**25 deferred**, grouped by what blocks them:
-- `STEPPER` (8): `DUMP_TMC, FORCE_MOVE, INIT_TMC, MANUAL_STEPPER,
-  SET_STEPPER_ENABLE, SET_TMC_CURRENT, SET_TMC_FIELD, STEPPER_BUZZ` — three
-  object spaces (`[manual_stepper X]`, `stepper_x/z1/extruder`, the tmc section).
-- `CHIP` (10): adxl345 / angle / ldc1612 / probe_eddy_current.
-- `EXTRUDER` (4): `kinematics/extruder.py` registers a `None` key for a single
-  extruder and enumerates `extruder1+` otherwise.
-- `SENSOR` (`TEMPERATURE_WAIT`): values are FULL section names
-  (`temperature_sensor chamber`), space included.
-- `DISPLAY` (`SET_DISPLAY_GROUP`), `MACRO` (`SET_GCODE_VARIABLE` — already
-  enforced by its own shape check).
+**43 carry a mux key, 37 target-resolved, 6 deferred.**
+- `STEPPER` (8) and `CHIP` (10) and `TEMPERATURE_WAIT SENSOR` are now resolved
+  in three different object spaces (§5, P4).
+- **`EXTRUDER` (4)** — `SET_PRESSURE_ADVANCE`, `SET_EXTRUDER_ROTATION_DISTANCE`,
+  `SYNC_EXTRUDER_MOTION`, `ACTIVATE_EXTRUDER`: `kinematics/extruder.py`
+  registers a `None` key for a single extruder and enumerates `extruder1+`
+  otherwise, so the key is *optional*, not a name to check.
+- **`DISPLAY`** (`SET_DISPLAY_GROUP`), **`MACRO`** (`SET_GCODE_VARIABLE` —
+  already enforced by its own shape check).
 
 **Enum params**: 2 covered (`RESPOND TYPE`, `SET_DUAL_CARRIAGE MODE`) — the only
 params whose membership test *raises*.
 
-**Bounds**: 0 covered, by design (see §5).
+**Either-of rules**: 2, in two modes — `SET_FAN_SPEED` exactly one of
+`SPEED`/`TEMPLATE`, `TEMPERATURE_WAIT` at least one of `MINIMUM`/`MAXIMUM`.
+
+**Bounds**: **70 params on 42 commands**, all from literal limits in the
+handler source (inclusive `minval`/`maxval`, exclusive `above`/`below`). Ten
+config-derived limit sites are deliberately unrecorded (§5, P3).
 
 ## 4. Two registry defects found and fixed by this review
 
@@ -196,27 +198,122 @@ variants. (Its names are prefix-built from an axis loop, so the P1 prefix
 pattern would cover them once the handler's `shaper.update(gcmd)` delegation is
 followed.)
 
-### P2 — either-of / at-least-one rules
+### P2 — DONE (`48d316e`): two either-of rules, not one
 
-`SET_FAN_SPEED` requires `SPEED` **or** `TEMPLATE` (fan_generic.py:34 raises
-otherwise). The registry models params one at a time, so a bare
-`SET_FAN_SPEED FAN=Aux_Fan` passes today. Fix: a small source-derived table
-like `_PARAM_ENUMS` (`_PARAM_EITHER_OF`). Risk: low.
+`SET_FAN_SPEED` is an **exactly-one** rule: fan_generic.py's test is
+`(speed is None) == (template is None)`, so it raises when *both* are missing
+**and** when *both* are present. `TEMPERATURE_WAIT` is an **at-least-one** rule:
+heaters.py raises only when neither `MINIMUM` nor `MAXIMUM` is given. They are
+different refusals, so `_PARAM_EITHER_OF` carries a mode (`"xor"` / `"or"`)
+rather than one shape — collapsing them would either pass the illegal
+`SPEED=… TEMPLATE=…` pair (false negative) or flag the legal
+`MINIMUM=… MAXIMUM=…` pair (false positive). The check is skipped when either
+member renders unknown, because supplied-ness is then undecidable.
 
-### P3 — literal-only numeric bounds
+### P3 — DONE (`48d316e`): literal ranges, 70 params, enforced from the generator
 
-`SET_LED RED/GREEN/BLUE/WHITE` are `get_float(..., minval=0., maxval=1.)` —
-literals, decidable, and a common mistake (`RED=255`). Config-dependent bounds
-(`SET_PIN VALUE` → pin scale, `SET_LED INDEX` → chain length) must stay out.
-Risk: low if restricted to literal bounds.
+Implemented in the **generator**, not a hand table: `_literal_number` records
+`minval`/`maxval`/`above`/`below` on the param entry when the limit is a numeric
+literal (including `-1` — a unary minus is still a literal). That way a Klipper
+regen keeps the bounds honest, and the renderer only compares what the artifact
+carries. gcode.py's semantics are copied exactly: `minval`/`maxval` are
+inclusive, `above`/`below` are exclusive, and the first failing check is the one
+reported.
 
-### P4 — mux families v2 (`STEPPER`, `CHIP`, `TEMPERATURE_WAIT SENSOR`)
+**70 params on 42 commands** gained bounds — `SET_LED RED/GREEN/BLUE/WHITE`
+(0–1, the `RED=255` mistake), `SET_VELOCITY_LIMIT MINIMUM_CRUISE_RATIO`
+(`below=1.`), `SET_RETRACTION`, `M204`, `CALIBRATE`, the `*_DEBUG_*` register
+ranges, and more. **Ten limit sites stay out** because the limit is not a
+literal: `SET_PIN VALUE` (`maxval=self.scale`), `SET_PIN CYCLE_TIME`,
+`SET_LED`/`SET_LED_TEMPLATE INDEX` (`self.led_count`),
+`SET_TMC_CURRENT CURRENT`/`HOLDCURRENT` (`max_cur`), `SET_DIGIPOT WIPER`,
+`TEMPERATURE_WAIT MAXIMUM` (`above=min_temp`),
+`TEMPERATURE_PROBE_CALIBRATE TARGET`. `SET_Z_THERMAL_ADJUST REF_TEMP`
+(`minval=KELVIN_TO_CELSIUS`, a module constant) is also skipped — a module
+constant is resolvable in principle, but leaving it out can only under-validate,
+never raise a false error.
 
-Each needs a per-command object map rather than a key-family rule. Lower value
-for macro authoring than P0–P3 (these commands rarely appear in user macros),
-but `SET_TMC_CURRENT STEPPER=` typos are a real class on TMC-heavy configs.
+### P4 — DONE (`48d316e`): three object spaces, not one
 
-## 6. Explicit non-goals
+The mux key name does not determine the object space; each family resolves
+differently, from source:
+
+- **CHIP** — adxl345 / angle / ldc1612 / probe_eddy_current all register
+  `"CHIP", config.get_name().split()[-1]`, so the value is the *trailing* name
+  (`[adxl345]` → `adxl345`, `[angle my_chip]` → `my_chip`). 10 commands.
+- **STEPPER rails** — force_move and stepper_enable register per
+  `mcu_stepper.get_name()` (`stepper_x`, `extruder`), tmc registers the trailing
+  name, and `MANUAL_STEPPER` resolves against `[manual_stepper NAME]`. The legal
+  set is the rails the project declares, derived from section headers.
+- **`TEMPERATURE_WAIT SENSOR`** — heaters.py `register_sensor` uses
+  `config.get_name()`, so the value is the **full section header**,
+  `"temperature_sensor chamber"`, space and all. Real configs quote it (this is
+  the canonical form in `Trident_backup`); the unquoted form is itself a Klipper
+  parse error (`Unable to parse parameter 'chamber'`), which the renderer
+  already reports as such.
+
+Every family in the sensor space is listed, including `z_thermal_adjust`, which
+also calls `register_sensor` — omitting it would report a legitimate target as
+missing.
+
+## 6. Coverage audit against G-Codes.md, and which surface owns what
+
+Every `####` heading in `reference/klipper/docs/G-Codes.md`, audited against the
+registry (2026-11-15, round 2):
+
+- **129 headings → 127 unique commands** after de-quoting the backtick-quoted
+  headings (the `EXCLUDE_OBJECT` family) and dropping one prose artifact
+  (`TEMPERATURE_PROBE_COMPLETE:`).
+- **127/127 are registered — zero documented-but-unregistered.** Conversely the
+  registry holds **192** commands, so 65 real commands (`G0`/`G1`, `M104`/`M109`,
+  the `SET_TMC_*` family) are validated even though G-Codes.md gives them no
+  `####` heading. The registry is generated from handlers, not from the docs,
+  and that is the right direction of dependency.
+- **82/127 (64.6%) carry per-command metadata** — a param set, a mux key, or
+  both. 203 params on documented commands, 60 of them with a literal bound, 38
+  commands with a mux key.
+- **45 carry none**, and they split cleanly rather than evenly:
+  - **35 are genuinely parameter-free** — `RESTART`, `FIRMWARE_RESTART`,
+    `TURN_OFF_HEATERS`, `QUERY_PROBE`, `GET_POSITION`, `BED_SCREWS_ADJUST`,
+    `SAVE_CONFIG`, `CLEAR_PAUSE`, … An empty param set is the *truth* for these;
+    there is nothing to validate per command, and inventing params to make the
+    number look better would be the defect.
+  - **10 are the P1 residue** — `PROBE`, `PROBE_CALIBRATE`, `MANUAL_PROBE`,
+    `Z_ENDSTOP_CALIBRATE`, `BED_TILT_CALIBRATE`, `DELTA_CALIBRATE`,
+    `QUAD_GANTRY_LEVEL`, `Z_TILT_ADJUST`, `BED_MESH_PROFILE`,
+    `SET_INPUT_SHAPER` — **67 params total** the registry does not know.
+
+### The residue is a `simulate_macro` gap, not a different surface
+
+All 67 params guard refusals that are decidable from the **rendered line**:
+`PROBE_CALIBRATE SPEED=fast` is a float parse error, `BED_TILT_CALIBRATE
+RETRIES=2.5` an int error, `SET_INPUT_SHAPER SHAPER_TYPE=foo` a choice error.
+They sit behind helper objects in the *source*; they sit behind nothing in the
+*rendered line*. So the fix is extractor coverage (the `(module, class, method)
+→ params` table described in §5), not a new check surface. The same holds for
+the 10 undocumented commands (`M109`, `M190`, `G0`–`G3`, `G28`, `M23`, `M117`,
+`M118`): they are gaps against G-Codes.md's headings, not against
+line-decidability.
+
+What genuinely belongs on the other surfaces:
+
+- **`simulate_macro`** — everything decidable from one rendered line plus the
+  project's section list: type, required, enum, either-of, literal bounds, mux
+  target existence. **Owns all 67 residue params.**
+- **`validate_macro`** — structure no single rendered line carries: Jinja
+  compile, `params_*`/`variable_*` declarations, `SAVE_GCODE_STATE` /
+  `RESTORE_GCODE_STATE` pairing. **Owns none of this residue.**
+- **Config validation (info/warn/error)** — needs option *values*, not just
+  section names: the ten config-derived bound sides in §5 (`SET_PIN VALUE` →
+  `scale`, `SET_TMC_CURRENT CURRENT` → `max_cur`, `SET_LED INDEX` → chain
+  length), TMC field/register names, and pin conflicts.
+
+The practical consequence: no part of the residue should be pushed onto
+`validate_macro` or the config validator as a workaround. It is one extractor
+table away from being checked, and pushing it elsewhere would move a
+line-decididable error to a surface that cannot see the line.
+
+## 7. Explicit non-goals
 
 - **Execution semantics**: heating, motion, `G4` waits, macro recursion.
 - **Stateful existence**: bed-mesh profile names, gcode-state names,
@@ -225,7 +322,7 @@ but `SET_TMC_CURRENT STEPPER=` typos are a real class on TMC-heavy configs.
   decidable in principle from the project's sections, but that is a
   config-validation job with full option parsing, not a render-time guess.
 
-## 7. Numbers used above (reproducible)
+## 8. Numbers used above (reproducible)
 
 - Corpus sweep: 871 `.cfg` files, 827 macro bodies, per-directory project
   sections. **Before P0/P1:** 0 enum errors, 3 mux warnings — all three the
@@ -241,6 +338,20 @@ but `SET_TMC_CURRENT STEPPER=` typos are a real class on TMC-heavy configs.
   `frontend/public/reference` copies). Both registry changes left the corpus
   output **byte-identical** — new metadata with no new findings, i.e. no
   false positives introduced.
+- **Round 2 (P2/P3/P4, `48d316e`)**: 872 `.cfg` files, 827 macro bodies,
+  15 project directories, sections per directory. **754 macro lines invoke a
+  command that now carries a literal bound or an either-of rule**
+  (`SET_PIN` 188, `SET_TMC_CURRENT` 168, `G4` 87, `M104` 69, `SET_FAN_SPEED` 62,
+  `SET_LED` 57, `M106` 45, `M140` 36, `SET_VELOCITY_LIMIT` 27,
+  `TEMPERATURE_WAIT` 9, `M204` 6) — and produced **0 findings**, i.e. no false
+  positives on any real config, with the either-of rule exercised 71 times.
+  The 6 mux warnings that appear once sections are supplied are the same
+  pre-existing true positive (`Hotkey.cfg` M301 → `SET_PIN PIN=beeper`, no
+  `[output_pin beeper]` in that project), now seen in three copies of the file.
+- **Artifact isolation check**: the regenerated registry differs from the
+  previous commit by `schema_version` (3 → 4), `generated_at`, and the 70 params
+  that gained bounds — **0 command-set changes, 0 non-bound param changes**.
 - Simulator tests: `tests/test_simulate_macro_tool.py`,
-  `tests/test_macro_render*.py`; registry: `tests/test_gcode_registry_extract.py`,
-  `tests/test_gcode_registry_service.py`.
+  `tests/test_macro_render*.py`, `tests/test_macro_render_ranges_choices_mux.py`;
+  registry: `tests/test_gcode_registry_extract.py`,
+  `tests/test_gcode_registry_service.py`. Suite: **4234 passed**.
