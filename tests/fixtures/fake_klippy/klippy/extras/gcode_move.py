@@ -50,3 +50,25 @@ class FakeSharedDispatch:
     def _cmd_one(self, gcmd):
         gcmd.get_int('ONLY', 1)
 
+
+class FakeAxisLoops:
+    """gcode_move.py:208 (numeric per-axis) vs homing.py:337 (presence
+    per-axis) — only the numeric read is typeable."""
+
+    def __init__(self, gcode):
+        gcode.register_command('SET_FAKE_OFFSET', self.cmd_SET_FAKE_OFFSET)
+        gcode.register_command('FAKE_HOME', self.cmd_FAKE_HOME)
+
+    def cmd_SET_FAKE_OFFSET(self, gcmd):
+        for pos, axis in enumerate('XYZ'):
+            offset = gcmd.get_float(axis, None)
+            if offset is None:
+                offset = gcmd.get_float(axis + '_ADJUST', None)
+
+    def cmd_FAKE_HOME(self, gcmd):
+        axes = []
+        for pos, axis in enumerate('XYZ'):
+            if gcmd.get(axis, None) is not None:
+                axes.append(pos)
+
+

@@ -40,6 +40,9 @@ _PARAM_GETTER_TYPES = {
     "get_int": "int", "get_float": "float", "getboolean": "bool",
 }
 
+# Comprehension scopes that can bind an axis name, like `for` statements.
+COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
+
 # ---------------------------------------------------------------------------
 # Gate table: extras module -> config section types whose presence enables the
 # module's commands at runtime (the module's load_config/load_config_prefix
@@ -366,6 +369,116 @@ def _resolve_handler(functions: dict[str, ast.FunctionDef],
     return None
 
 
+def _loop_name_set(node: ast.AST) -> list[str] | None:
+    """The literal names an iteration over axis/plane names yields.
+
+    Handles `'XYZE'` (per-character axes), `['X', 'Y']` / `('XY','XZ')`,
+    and `enumerate(<any of those>)`.
+    """
+    if isinstance(node, ast.Call) and _call_name(node.func) == "enumerate" \
+            and node.args:
+        return _loop_name_set(node.args[0])
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return list(node.value)
+    vals = _literal_str_list(node)
+    return vals or None
+
+
+def _bound_name_var(target: ast.AST) -> str | None:
+    """The variable that carries the NAME (not the index).
+
+    `for axis in 'XYZE'` binds it directly; `for pos, axis in
+    enumerate('XYZE')` binds it as the second tuple element.
+    """
+    if isinstance(target, ast.Name):
+        return target.id
+    if isinstance(target, ast.Tuple):
+        names = [e.id for e in target.elts if isinstance(e, ast.Name)]
+        return names[-1] if names else None
+    return None
+
+
+def _expand_axis_names(arg: ast.AST, var: str,
+                       names: list[str]) -> list[str]:
+    """The parameter names a per-axis read covers: `axis` -> every axis,
+    `axis + '_ADJUST'` -> every axis with that SUFFIX, `'SHAPER_FREQ_' +
+    axis` -> every axis with that PREFIX. The side matters."""
+    if isinstance(arg, ast.Name) and arg.id == var:
+        return list(names)
+    if isinstance(arg, ast.BinOp) and isinstance(arg.op, ast.Add):
+        left, right = arg.left, arg.right
+        if (isinstance(left, ast.Constant) and isinstance(left.value, str)
+                and isinstance(right, ast.Name) and right.id == var):
+            return [left.value + n for n in names]
+        if (isinstance(right, ast.Constant) and isinstance(right.value, str)
+                and isinstance(left, ast.Name) and left.id == var):
+            return [n + right.value for n in names]
+    return []
+
+
+def _all_getter_calls(node: ast.AST) -> list[ast.Call]:
+    """Every gcmd getter call in a subtree, including the ones whose
+    parameter NAME is not a literal (the ones `_gcmd_getter_calls`
+    deliberately drops)."""
+    return [c for c in ast.walk(node)
+            if isinstance(c, ast.Call) and isinstance(c.func, ast.Attribute)
+            and c.func.attr in _PARAM_GETTER_TYPES]
+
+
+def _axis_scopes(func_node: ast.FunctionDef):
+    """Yield (iter_node, target_node, subtree) for every iteration scope
+    that can bind axis names — both `for` statements and comprehensions
+    (`[gcmd.get_float(a, None) for a in 'XYZE']`, G92's shape)."""
+    for node in ast.walk(func_node):
+        if isinstance(node, ast.For):
+            yield node.iter, node.target, node
+        elif isinstance(node, COMPREHENSIONS):
+            for gen in node.generators:
+                yield gen.iter, gen.target, node
+
+
+def _loop_axis_params(func_node: ast.FunctionDef) -> dict[str, dict]:
+    """Params whose NAMES come from iterating a literal set of axis names.
+
+    Klipper reads per-axis parameters by looping a static name set::
+
+        for pos, axis in enumerate('XYZE'):
+            offset = gcmd.get_float(axis, None)
+            ...
+            offset = gcmd.get_float(axis + '_ADJUST', None)
+
+    A literal-reading extractor misses all of these (SET_GCODE_OFFSET's
+    X/Y/Z/E, BED_MESH_OFFSET's X/Y, G92's X/Y/Z/E).
+
+    Only NUMERIC getters qualify. `gcmd.get(axis)` (G28's presence-style
+    read) accepts an empty value — `G28 X Y` is canonical — so typing it
+    would fabricate 'renders EMPTY' on valid configs. A per-axis read is
+    also always individually optional: the caller passes any subset.
+    """
+    out: dict[str, dict] = {}
+    receivers = _gcmd_receivers(func_node)
+    for iter_node, target, subtree in _axis_scopes(func_node):
+        names = _loop_name_set(iter_node)
+        if not names:
+            continue
+        var = _bound_name_var(target)
+        if not var:
+            continue
+        for call in _all_getter_calls(subtree):
+            if not call.args or not isinstance(call.func, ast.Attribute):
+                continue
+            if call.func.attr not in ("get_float", "get_int"):
+                continue
+            if not isinstance(call.func.value, ast.Name) \
+                    or call.func.value.id not in receivers:
+                continue
+            ptype = _PARAM_GETTER_TYPES[call.func.attr]
+            for pname in _expand_axis_names(call.args[0], var, names):
+                out.setdefault(pname.upper(),
+                               {"type": ptype, "required": False})
+    return out
+
+
 def _extract_handler_params(func_node: ast.FunctionDef) -> dict[str, dict]:
     """Parse gcmd.get/get_int/get_float/getboolean('NAME', default…) calls
     out of a command handler into {PARAM: {type, required[, default]}}.
@@ -406,6 +519,10 @@ def _extract_handler_params(func_node: ast.FunctionDef) -> dict[str, dict]:
                     dnode.value, (str, int, float, bool)) or (
                     isinstance(dnode, ast.Constant) and dnode.value is None):
                 entry["default"] = dnode.value
+    # Per-axis names (axis loops) — merged last so a LITERAL read of the
+    # same name keeps its own default/requiredness.
+    for pname, pdef in _loop_axis_params(func_node).items():
+        params.setdefault(pname, pdef)
     return params
 
 

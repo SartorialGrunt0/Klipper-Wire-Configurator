@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "source_rev": "2d7717e3b62ea2fe3401b27f54f8681f80451c69",
-  "generated_at": "2026-11-15T15:59:03+00:00",
+  "generated_at": "2026-11-15T16:03:55+00:00",
   "commands": {
     "ABORT": {
       "extra": "bed_screws",
@@ -267,6 +267,14 @@
           "type": "float",
           "required": false,
           "default": null
+        },
+        "X": {
+          "type": "float",
+          "required": false
+        },
+        "Y": {
+          "type": "float",
+          "required": false
         }
       },
       "mux_key": null,
@@ -807,6 +815,24 @@
       "extra": "gcode_move",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "X": {
+          "type": "float",
+          "required": false
+        },
+        "Y": {
+          "type": "float",
+          "required": false
+        },
+        "Z": {
+          "type": "float",
+          "required": false
+        },
+        "E": {
+          "type": "float",
+          "required": false
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 22
@@ -2073,6 +2099,38 @@
           "default": 0
         },
         "MOVE_SPEED": {
+          "type": "float",
+          "required": false
+        },
+        "X": {
+          "type": "float",
+          "required": false
+        },
+        "Y": {
+          "type": "float",
+          "required": false
+        },
+        "Z": {
+          "type": "float",
+          "required": false
+        },
+        "E": {
+          "type": "float",
+          "required": false
+        },
+        "X_ADJUST": {
+          "type": "float",
+          "required": false
+        },
+        "Y_ADJUST": {
+          "type": "float",
+          "required": false
+        },
+        "Z_ADJUST": {
+          "type": "float",
+          "required": false
+        },
+        "E_ADJUST": {
           "type": "float",
           "required": false
         }

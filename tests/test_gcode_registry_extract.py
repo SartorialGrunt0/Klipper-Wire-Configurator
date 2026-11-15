@@ -48,6 +48,8 @@ def test_fixture_extracts_exact_name_set():
         "G1", "G20", "G21", "M82", "SET_GCODE_OFFSET", "G0",
         # convention-resolved loop handlers + shared-dispatch negative control
         "SET_GCODE_STATE", "GET_STATE", "DISPATCH_A", "DISPATCH_B",
+        # per-axis loop reads (numeric vs presence)
+        "SET_FAKE_OFFSET", "FAKE_HOME",
         # guards.py review-F1/F2 policy fixtures
         "GUARDED", "ALIASED",
     }
@@ -170,9 +172,43 @@ def test_real_tree_gcode_move_loop_params_present():
     assert offset["MOVE"] == {"type": "int", "required": False, "default": 0}
     assert offset["MOVE_SPEED"]["type"] == "float"
     assert cmds["SAVE_GCODE_STATE"]["params"]["NAME"]["default"] == "default"
-    # The per-axis reads (`gcmd.get_float(axis)`) stay out: names built by
-    # a loop variable are a separate, hand-curated layer.
-    assert "X" not in offset and "Z" not in offset
+
+
+def test_fixture_axis_loop_names_are_typed():
+    """A numeric per-axis read names its params from the loop literal:
+    `gcmd.get_float(axis)` / `get_float(axis + '_ADJUST')` over XYZE is how
+    SET_GCODE_OFFSET, BED_MESH_OFFSET and G92 read every parameter they
+    have. Each axis is independently optional — the caller passes a subset."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(FAKE_TREE)["commands"]
+    params = cmds["SET_FAKE_OFFSET"]["params"]
+    assert set(params) == {"X", "Y", "Z",
+                           "X_ADJUST", "Y_ADJUST", "Z_ADJUST"}, params
+    assert params["Y"] == {"type": "float", "required": False}
+    assert params["Z_ADJUST"] == {"type": "float", "required": False}
+
+
+def test_fixture_presence_axis_loop_is_not_typed():
+    """G28's `gcmd.get(axis)` is a PRESENCE read: `G28 X Y` is canonical and
+    carries no value, so typing X/Y/Z would fabricate 'renders EMPTY' on
+    working configs. Only numeric getters may be expanded."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(FAKE_TREE)["commands"]
+    assert "params" not in cmds["FAKE_HOME"], cmds["FAKE_HOME"]
+
+
+@pytest.mark.skipif(not REAL_KLIPPY.is_dir(), reason="reference klipper absent")
+def test_real_tree_per_axis_params_present_and_g28_safe():
+    mod = _load_extractor()
+    cmds = mod.extract_registry(REAL_KLIPPY)["commands"]
+    offset = cmds["SET_GCODE_OFFSET"]["params"]
+    for axis in ("X", "Y", "Z", "E"):
+        assert offset[axis] == {"type": "float", "required": False}, axis
+    assert offset["Z_ADJUST"]["type"] == "float"
+    assert {"X", "Y"} <= set(cmds["BED_MESH_OFFSET"]["params"])
+    assert {"X", "Y", "Z", "E"} <= set(cmds["G92"]["params"])
+    # G28 reads its axes with a presence check — must stay untyped.
+    assert not cmds["G28"].get("params"), cmds["G28"]
 
 
 @pytest.mark.skipif(not REAL_KLIPPY.is_dir(), reason="reference klipper absent")

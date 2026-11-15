@@ -741,3 +741,17 @@ def test_loop_registered_command_params_are_consumed():
     bare = simulate_macro("M26")
     assert ("error", "macro_param_renders_empty") in [
         (f.severity, f.code) for f in bare.findings]
+
+    # Per-axis loop reads (X/Y/Z/E and their _ADJUST twins) are typed, and
+    # the canonical value shapes stay silent.
+    assert not simulate_macro("G92 E0").findings
+    assert not simulate_macro("SET_GCODE_OFFSET Z=0.1 X_ADJUST=0.02").findings
+    assert not simulate_macro("BED_MESH_OFFSET X=1 Y=2").findings
+    for line in ("G92 E=abc", "SET_GCODE_OFFSET Z=abc",
+                 "BED_MESH_OFFSET X=abc"):
+        assert ("error", "macro_param_unparseable") in [
+            (f.severity, f.code) for f in simulate_macro(line).findings], line
+
+    # G28's axes are a PRESENCE read — `G28 X Y` is canonical and must
+    # never be typed (that would fabricate 'renders EMPTY').
+    assert not simulate_macro("G28 X Y").findings
