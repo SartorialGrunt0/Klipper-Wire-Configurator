@@ -1239,7 +1239,12 @@ class McpServer:
                     "as real values ({'toolhead.homed_axes': 'xyz', "
                     "'extruder.temperature': 205.0}) — everything you "
                     "do not declare is <unknown>, never guessed; "
-                    "variables override variable_*. With no scenarios "
+                    "variables set a DECLARED variable_* value and must "
+                    "use the stripped name — Klipper publishes "
+                    "variable_fan_on as fan_on, so {'fan_on': 'True'} is "
+                    "the state, never {'variable_fan_on': ...}; a name "
+                    "the section does not declare is refused with a "
+                    "warning and NOT injected. With no scenarios "
                     "the DEFAULT invocation renders (params_* defaults, "
                     "printer state unknown; branches on undeclared "
                     "state render BOTH ways). Limits it states on every "
@@ -3781,9 +3786,24 @@ class McpServer:
             params = dict(default_params)
             for k, v in (sc.get("params") or {}).items():
                 params[str(k).lower()] = str(v)
+            # A scenario variable can only exist at run time if the
+            # SECTION declares it: Klipper publishes `variable_<name>` as
+            # `<name>` (gcode_macro.py strips the prefix; option names are
+            # lowercased at config parse) and SET_GCODE_VARIABLE refuses
+            # any name outside that set. Injecting anything else renders a
+            # fiction — the SIMTOOL-02 r7 leg "passed" a dead toggle by
+            # declaring `variable_fan_on` against a macro that declared
+            # `fan_on`, and the phantom made both branches look distinct.
+            # Skip the name, keep the render Klipper-true, and say so.
+            declared_vars = {str(k).lower() for k in default_vars}
             variables = dict(default_vars)
+            undeclared_vars: list[str] = []
             for k, v in (sc.get("variables") or {}).items():
-                variables[str(k)] = str(v)
+                key = str(k)
+                if key.lower() not in declared_vars:
+                    undeclared_vars.append(key)
+                    continue
+                variables[key] = str(v)
             state = {str(k): v for k, v in (sc.get("printer_state") or {}).items()}
 
             result = simulate_macro(body, params, variables=variables,
@@ -3810,8 +3830,21 @@ class McpServer:
                 out.append("  (nothing rendered — the body aborted or was "
                            "empty on this invocation)")
 
-            if result.findings:
+            scenario_warnings = [
+                (f"  - WARNING: scenario variable '{k}' is not declared by "
+                 f"{sec_header} — Klipper publishes variable_<name> to the "
+                 f"template as <name>"
+                 + (f" (declared here: {', '.join(sorted(declared_vars))})"
+                    if declared_vars
+                    else " (this macro declares no variable_* entries)")
+                 + f", so '{k}' is undefined at run time and was NOT "
+                   "injected. Declare the stripped name (no 'variable_' "
+                   "prefix) to simulate that state.")
+                for k in undeclared_vars
+            ]
+            if result.findings or scenario_warnings:
                 out.append("Findings:")
+                out.extend(scenario_warnings)
                 for f in sorted(result.findings,
                                 key=lambda x: (x.severity != "error",
                                                x.severity != "warning")):

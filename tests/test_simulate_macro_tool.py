@@ -97,6 +97,48 @@ def test_variables_scenario_override_section_defaults():
     assert "G1 F50" in out_default
 
 
+def test_scenario_variable_matches_declared_name_case_insensitively():
+    """Klipper lowercases option names at config parse, so SPEED and
+    speed are the same declared variable — not an undeclared name."""
+    text = ("[gcode_macro VAR]\n"
+            "variable_speed: 50\n"
+            "gcode:\n"
+            "    G1 F{speed}\n")
+    out = _call(macro_text=text,
+                scenarios=[{"name": "upper", "variables":
+                            {"SPEED": "900"}}])
+    assert "G1 F900" in out
+    assert "WARNING" not in out
+
+
+def test_undeclared_scenario_variable_is_refused_not_invented():
+    """Klipper publishes only the section's own variable_* entries, with
+    the prefix stripped (klippy/extras/gcode_macro.py), and
+    SET_GCODE_VARIABLE rejects any other name. A scenario variable
+    outside that set cannot exist at run time, so injecting it renders a
+    fiction: the SIMTOOL-02 r7 leg "simulated" a dead toggle by
+    declaring `variable_fan_on` when the macro declared `fan_on`, and
+    the phantom made both branches look distinct. The name must be
+    refused, warned about, and left undefined."""
+    text = ("[gcode_macro TOGGLE]\n"
+            "variable_fan_on: False\n"
+            "gcode:\n"
+            "    {% if variable_fan_on %}\n"
+            "    M107\n"
+            "    {% else %}\n"
+            "    M106 S255\n"
+            "    {% endif %}\n")
+    out = _call(macro_text=text,
+                scenarios=[{"name": "on", "variables":
+                            {"variable_fan_on": "True"}}])
+    assert "WARNING: scenario variable 'variable_fan_on'" in out
+    assert "declared here: fan_on" in out
+    # Klipper truth kept: the undeclared read stays falsy, so this one
+    # scenario renders the single else-branch command and nothing else.
+    assert "M107" not in out
+    assert out.count("M106 S255") == 1
+
+
 # ── provenance law: the result labels what it knows ────────────────────────
 
 def test_result_echoes_assumptions_and_limits():
