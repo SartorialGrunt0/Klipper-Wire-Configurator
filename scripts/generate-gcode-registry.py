@@ -302,6 +302,70 @@ def _gcmd_getter_calls(func_node: ast.FunctionDef,
     return found
 
 
+def _concat_prefix(node: ast.AST, var: str) -> str | None:
+    """The literal prefix when ``node`` is ``'<prefix>' + var`` (either
+    operand order). Used to read Klipper's `'cmd_' + cmd` handler naming."""
+    if not isinstance(node, ast.BinOp) or not isinstance(node.op, ast.Add):
+        return None
+    left, right = _literal_str(node.left), _literal_str(node.right)
+    if left is not None and isinstance(node.right, ast.Name) \
+            and node.right.id == var:
+        return left
+    if right is not None and isinstance(node.left, ast.Name) \
+            and node.left.id == var:
+        return right
+    return None
+
+
+def _convention_handler_locals(node: ast.For, var: str) -> dict[str, str]:
+    """Locals bound inside a registration loop by the `cmd_` convention.
+
+    klippy/extras/gcode_move.py registers its whole handler table as::
+
+        for cmd in handlers:
+            func = getattr(self, 'cmd_' + cmd)
+            gcode.register_command(cmd, func, False, desc)
+
+    The registered argument is a LOCAL, and the loop docstring's "one
+    shared handler" rationale does not apply — each name resolves to its
+    own `cmd_<NAME>` method. Returns ``{local_name: prefix}`` so the
+    caller can recover the handler per command name."""
+    found: dict[str, str] = {}
+    for sub in ast.walk(node):
+        if not (isinstance(sub, ast.Assign) and len(sub.targets) == 1
+                and isinstance(sub.targets[0], ast.Name)):
+            continue
+        call = sub.value
+        if not (isinstance(call, ast.Call)
+                and _call_name(call.func) == "getattr"
+                and len(call.args) >= 2):
+            continue
+        prefix = _concat_prefix(call.args[1], var)
+        if prefix:
+            found[sub.targets[0].id] = prefix
+    return found
+
+
+def _resolve_handler(functions: dict[str, ast.FunctionDef],
+                     handler: str | None) -> ast.FunctionDef | None:
+    """Look a handler up, falling back to a case-insensitive match.
+
+    Convention-derived names follow the registration literal's case
+    (`cmd_' + cmd` for a lowercase loop name is `cmd_set_led` while
+    Klipper spells the method `cmd_SET_LED`), so the suffix case cannot
+    be assumed."""
+    if not handler:
+        return None
+    node = functions.get(handler)
+    if node is not None:
+        return node
+    lowered = handler.lower()
+    for fname, fnode in functions.items():
+        if fname.lower() == lowered:
+            return fnode
+    return None
+
+
 def _extract_handler_params(func_node: ast.FunctionDef) -> dict[str, dict]:
     """Parse gcmd.get/get_int/get_float/getboolean('NAME', default…) calls
     out of a command handler into {PARAM: {type, required[, default]}}.
@@ -356,9 +420,12 @@ class _FileVisitor(ast.NodeVisitor):
       3. for cmd in ['M20', ...]: register_command(cmd, ...)
 
     A scalar registration's handler reference (bare name or self.method) is
-    recorded so param types can be parsed from the handler body; loop
-    registrations share one handler across commands (dispatch switch), so
-    they carry no handler.
+    recorded so param types can be parsed from the handler body. A loop
+    registration carries no handler when it passes ONE shared callable
+    (a dispatch switch), but when it builds the callable from the loop
+    variable by Klipper's `'cmd_' + cmd` convention, the per-name handler
+    is recorded instead — that loop shape is how gcode_move registers
+    SAVE/RESTORE_GCODE_STATE, SET_GCODE_OFFSET and M220/M221.
     """
 
     def __init__(self) -> None:
@@ -386,6 +453,12 @@ class _FileVisitor(ast.NodeVisitor):
             loop_names = self.list_bindings.get(node.iter.id, [])
         if loop_names and isinstance(node.target, ast.Name):
             var = node.target.id
+            # Per-name handler lookup inside the loop (`func = getattr(self,
+            # 'cmd_' + cmd)`): the registered argument is a local, so without
+            # this the whole data-driven handler table (gcode_move's
+            # SAVE/RESTORE_GCODE_STATE, SET_GCODE_OFFSET, M220/M221) carried
+            # no handler and therefore no parameter metadata.
+            convention = _convention_handler_locals(node, var)
             for sub in ast.walk(node):
                 if isinstance(sub, ast.Call):
                     fname = _call_name(sub.func)
@@ -395,10 +468,22 @@ class _FileVisitor(ast.NodeVisitor):
                             mux_key = None
                             if fname == "register_mux_command" and len(sub.args) > 1:
                                 mux_key = _literal_str(sub.args[1])
+                            # The handler is per-NAME only when the loop
+                            # builds it from the loop variable; a fixed
+                            # handler argument stays a shared dispatch.
+                            prefix = None
+                            if len(sub.args) > 1:
+                                arg = sub.args[1]
+                                if isinstance(arg, ast.Name):
+                                    prefix = convention.get(arg.id)
+                                elif (isinstance(arg, ast.Call)
+                                      and _call_name(arg.func) == "getattr"
+                                      and len(arg.args) >= 2):
+                                    prefix = _concat_prefix(arg.args[1], var)
                             for name in loop_names:
                                 self.registrations.append(
                                     (name.upper(), mux_key, False, sub.lineno,
-                                     None))
+                                     (prefix + name) if prefix else None))
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -530,7 +615,7 @@ def extract_registry(klipper_root: Path) -> dict:
         # Handler-derived typed params. A mux key is already required=True
         # from the gate key; parsing must never downgrade it (mux commands
         # never read the key via gcmd.get).
-        func_node = functions.get(handler) if handler else None
+        func_node = _resolve_handler(functions, handler)
         if func_node is not None:
             params = entry.setdefault("params", {})
             for pname, pdef in _extract_handler_params(func_node).items():

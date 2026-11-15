@@ -718,3 +718,26 @@ def test_empty_mux_target_is_still_an_error():
     errs = [f for f in r.findings if f.code == "macro_param_renders_empty"]
     assert len(errs) == 1 and "LED" in errs[0].message, \
         [f.message for f in r.findings]
+
+
+def test_loop_registered_command_params_are_consumed():
+    """The gcode_move handler-table commands (M220/M221, SET_GCODE_OFFSET,
+    SAVE/RESTORE_GCODE_STATE, M26) are registered in a loop, so their param
+    metadata was missing until the registry resolved handlers by the
+    `cmd_<NAME>` convention. Stored metadata is worthless if the engine
+    does not consume it — pin the verdicts, not the JSON."""
+    bad_speed = simulate_macro("M220 S=abc")
+    assert [(f.severity, f.code) for f in bad_speed.findings] == [
+        ("error", "macro_param_unparseable")], [f.message for f in bad_speed.findings]
+
+    assert not simulate_macro("M220 S=100").findings
+
+    bad_move = simulate_macro("SET_GCODE_OFFSET Z=0.1 MOVE=half")
+    assert ("error", "macro_param_unparseable") in [
+        (f.severity, f.code) for f in bad_move.findings]
+    assert not simulate_macro("SET_GCODE_OFFSET Z=0.1 MOVE=1").findings
+
+    # M26's S is read with no default: a bare call really does raise.
+    bare = simulate_macro("M26")
+    assert ("error", "macro_param_renders_empty") in [
+        (f.severity, f.code) for f in bare.findings]

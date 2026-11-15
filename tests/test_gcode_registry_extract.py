@@ -46,6 +46,8 @@ def test_fixture_extracts_exact_name_set():
         "FAKE_ONE_SHOT",
         # gcode_move.py handlers list + literal alias
         "G1", "G20", "G21", "M82", "SET_GCODE_OFFSET", "G0",
+        # convention-resolved loop handlers + shared-dispatch negative control
+        "SET_GCODE_STATE", "GET_STATE", "DISPATCH_A", "DISPATCH_B",
         # guards.py review-F1/F2 policy fixtures
         "GUARDED", "ALIASED",
     }
@@ -123,6 +125,54 @@ def test_fixture_gcmd_alias_harvested_non_receivers_dropped():
     assert "DEBUGOUTPUT" not in params
     assert params["DELAY"] == {"type": "float", "required": False,
                                "default": 1.0}
+
+
+# ── loop registrations: the `cmd_` convention ──────────────────────────────
+
+def test_fixture_loop_getattr_resolves_handler_by_convention():
+    """klippy/extras/gcode_move.py:22-27 registers its handler table as
+    `func = getattr(self, 'cmd_' + cmd); register_command(cmd, func)`.
+    The second argument is a LOCAL, so every command in that loop carried
+    no handler and therefore no params — SAVE/RESTORE_GCODE_STATE,
+    SET_GCODE_OFFSET, M220/M221 among them. The `cmd_<NAME>` name IS the
+    convention, so the handler is derivable."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(FAKE_TREE)["commands"]
+    state = cmds["SET_GCODE_STATE"]["params"]
+    assert state["NAME"] == {"type": "str", "required": False,
+                             "default": "default"}
+    assert state["MOVE"] == {"type": "int", "required": False, "default": 0}
+    assert state["MOVE_SPEED"] == {"type": "float", "required": False}
+    assert cmds["GET_STATE"]["params"] == {
+        "INDEX": {"type": "int", "required": False, "default": 1}}
+
+
+def test_fixture_shared_dispatch_handler_not_attributed():
+    """A loop that registers ONE handler for several names (gcode.py's
+    builtin dispatch) must not hand that handler's params to each name."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(FAKE_TREE)["commands"]
+    for name in ("DISPATCH_A", "DISPATCH_B"):
+        assert "params" not in cmds[name], cmds[name]
+        assert cmds[name]["extra"] == "gcode_move"
+
+
+@pytest.mark.skipif(not REAL_KLIPPY.is_dir(), reason="reference klipper absent")
+def test_real_tree_gcode_move_loop_params_present():
+    """The real Klipper tree: the gcode_move handler table's params are the
+    ones a start macro actually writes (M220/M221 S=, SET_GCODE_OFFSET)."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(REAL_KLIPPY)["commands"]
+    for name in ("M220", "M221"):
+        assert cmds[name]["params"]["S"]["type"] == "float", name
+        assert cmds[name]["params"]["S"]["required"] is False, name
+    offset = cmds["SET_GCODE_OFFSET"]["params"]
+    assert offset["MOVE"] == {"type": "int", "required": False, "default": 0}
+    assert offset["MOVE_SPEED"]["type"] == "float"
+    assert cmds["SAVE_GCODE_STATE"]["params"]["NAME"]["default"] == "default"
+    # The per-axis reads (`gcmd.get_float(axis)`) stay out: names built by
+    # a loop variable are a separate, hand-curated layer.
+    assert "X" not in offset and "Z" not in offset
 
 
 @pytest.mark.skipif(not REAL_KLIPPY.is_dir(), reason="reference klipper absent")

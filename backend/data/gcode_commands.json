@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "source_rev": "2d7717e3b62ea2fe3401b27f54f8681f80451c69",
-  "generated_at": "2026-11-15T15:01:40+00:00",
+  "generated_at": "2026-11-15T15:59:03+00:00",
   "commands": {
     "ABORT": {
       "extra": "bed_screws",
@@ -1162,6 +1162,13 @@
       "extra": "gcode_move",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "S": {
+          "type": "float",
+          "required": false,
+          "default": 100.0
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 22
@@ -1170,6 +1177,13 @@
       "extra": "gcode_move",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "S": {
+          "type": "float",
+          "required": false,
+          "default": 100.0
+        }
+      },
       "mux_key": null,
       "simulated": true,
       "source_line": 22
@@ -1210,6 +1224,12 @@
         "virtual_sdcard"
       ],
       "requires_mode": "any",
+      "params": {
+        "S": {
+          "type": "int",
+          "required": true
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 40
@@ -1728,6 +1748,22 @@
       "extra": "gcode_move",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "NAME": {
+          "type": "str",
+          "required": false,
+          "default": "default"
+        },
+        "MOVE": {
+          "type": "int",
+          "required": false,
+          "default": 0
+        },
+        "MOVE_SPEED": {
+          "type": "float",
+          "required": false
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 22
@@ -1775,6 +1811,13 @@
       "extra": "gcode_move",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "NAME": {
+          "type": "str",
+          "required": false,
+          "default": "default"
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 22
@@ -2023,6 +2066,17 @@
       "extra": "gcode_move",
       "requires_sections": [],
       "requires_mode": "any",
+      "params": {
+        "MOVE": {
+          "type": "int",
+          "required": false,
+          "default": 0
+        },
+        "MOVE_SPEED": {
+          "type": "float",
+          "required": false
+        }
+      },
       "mux_key": null,
       "simulated": false,
       "source_line": 22
