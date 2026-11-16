@@ -355,3 +355,53 @@ describe('buildWorkLedger — detail is one bounded line', () => {
     expect(detail.endsWith('…')).toBe(true);
   });
 });
+
+// ── W6.5 enrichment: touched (read) files ────────────────────────────
+
+describe('buildWorkLedger — touched files (W6.5 enrichment)', () => {
+  it('read_user_config contributes a file-level touched row', () => {
+    const rows = buildWorkLedger([
+      user('look'),
+      assistant([call('read_user_config', { file: 'printer.cfg' }, '# printer.cfg  (User Config - whole file)\n# 120 bytes\n\n[printer]')]),
+      user('y'),
+    ], []);
+    expect(rows).toEqual([
+      { turnOffset: 1, file: 'printer.cfg', section: '', verdict: 'touched' },
+    ]);
+  });
+
+  it('touched rows are a SEPARATE key space from file-level write rows', () => {
+    const rows = buildWorkLedger([
+      user('a'),
+      assistant([
+        call('read_user_config', { file: 'fan.cfg' }, '# fan.cfg  (User Config - whole file)\n# 8 bytes\n\n[fan_generic f]'),
+        call('config_write', { file: 'fan.cfg', content: '[fan_generic f]' }, WRITE_OK),
+      ]),
+      user('y'),
+    ], []);
+    const fan = rows.filter((r) => r.file === 'fan.cfg');
+    expect(fan.map((r) => r.verdict).sort()).toEqual(['pending', 'touched']);
+  });
+
+  it('decisions never overlay touched rows (nothing to review in a read)', () => {
+    const rows = buildWorkLedger([
+      user('look'),
+      assistant([call('read_user_config', { file: 'printer.cfg' }, '# printer.cfg  (User Config - whole file)\n# 120 bytes\n\n[printer]')]),
+      user('y'),
+    ], [
+      { file: 'printer.cfg', section: '', verdict: 'kept', turnIndex: 1 },
+    ]);
+    expect(rows).toEqual([
+      { turnOffset: 1, file: 'printer.cfg', section: '', verdict: 'touched' },
+    ]);
+  });
+
+  it('failed reads produce no row (output that is not a successful read claims nothing)', () => {
+    const rows = buildWorkLedger([
+      user('look'),
+      assistant([call('read_user_config', { file: 'nope.cfg' }, '{"status": "not_found"}')]),
+      user('y'),
+    ], []);
+    expect(rows).toEqual([]);
+  });
+});

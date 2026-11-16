@@ -1635,6 +1635,15 @@ def _edit_skill_body() -> str:
         "available for this conversation.\n\n"
         f"{EDIT_PROTOCOL_PROMPT}\n\n"
         "Unlocked tools:\n" + tool_lines
+        # W6.5 enrichment (approved 2026-11-13, Claude Code post-compaction
+        # re-read bias): the work-ledger tells the model WHAT it touched;
+        # this rule is what to do about it — re-ground, never edit from
+        # remembered text (the human edits by hand between turns too).
+        + "\n\nCross-turn grounding: a Conversation work-ledger may appear "
+        "later in this prompt naming the sections you read or edited in "
+        "earlier turns ('read' = touched). Their content may have changed "
+        "since. Re-read a section with read_user_config immediately before "
+        "editing it in a later turn — never edit from remembered text."
     )
 
 
@@ -1779,7 +1788,7 @@ WORK_LEDGER_MAX_TURNS = 10
 # turning the ledger into a payload channel.
 WORK_LEDGER_MAX_ROWS = 60
 
-_LEDGER_VERDICTS = ("pending", "kept", "undone", "failed")
+_LEDGER_VERDICTS = ("pending", "kept", "undone", "failed", "touched")
 
 
 def _render_work_ledger(rows: list | None) -> str | None:
@@ -1821,6 +1830,8 @@ def _render_work_ledger(rows: list | None) -> str | None:
             return "kept"
         if verdict == "undone":
             return "undone by user"
+        if verdict == "touched":
+            return "read (content may have changed since)"
         return f"FAILED: {detail}" if detail else "FAILED"
 
     header = (
@@ -1837,10 +1848,15 @@ def _render_work_ledger(rows: list | None) -> str | None:
             when = "previous turn" if offset == 1 else f"{offset} turns ago"
             lines.append(f"- {when}:")
             current_offset = offset
-        # Created files are file-level rows (empty section): name the file.
-        label = f"[{section}]" if section else f"{file} (new file)"
-        suffix = f" in {file}" if section else ""
-        lines.append(f"    {label}{suffix} -> {_outcome(verdict, detail)}")
+        # Created files are file-level write rows; touched rows mark
+        # what earlier turns grounded on.
+        if verdict == "touched":
+            label = f"[{section}] in {file} (read)" if section else f"{file} (read)"
+        else:
+            label = f"[{section}]" if section else f"{file} (new file)"
+            suffix = f" in {file}" if section else ""
+            label += suffix
+        lines.append(f"    {label} -> {_outcome(verdict, detail)}")
     return header + "\n" + "\n".join(lines)
 
 

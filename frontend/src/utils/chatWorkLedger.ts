@@ -42,6 +42,14 @@ const DETAIL_MAX_CHARS = 120;
 
 const WRITE_TOOLS: ReadonlySet<string> = new Set(['config_edit', 'config_write']);
 
+/** W6.5 enrichment: read calls mark files/sections TOUCHED — the skill
+ *  body rule ("re-read a touched section before editing it in a later
+ *  turn") needs the model to see what it grounded on earlier. Touched
+ *  rows are a SEPARATE key space from write rows (a file can be both
+ *  read and file-level created in one turn) and are never overlaid by
+ *  review decisions — there is nothing to review in a read. */
+const READ_TOOLS: ReadonlySet<string> = new Set(['read_user_config']);
+
 /** kept/undone event recorded by workLedgerStore at a reviewEngine site. */
 export interface WorkLedgerDecision {
   file: string;
@@ -62,7 +70,7 @@ export interface WorkLedgerRow {
   file: string;
   /** Bare section name; '' = file-level. */
   section: string;
-  verdict: 'pending' | 'kept' | 'undone' | 'failed';
+  verdict: 'pending' | 'kept' | 'undone' | 'failed' | 'touched';
   /** failed only — the harness's own error line, single, bounded. */
   detail?: string;
 }
@@ -86,9 +94,62 @@ function boundedDetail(raw: string): string {
 interface StagedEvent {
   file: string;
   /** Per-section outcomes of this single call (batch mixes pending/failed). */
-  sections: Array<{ section: string; failed: boolean; detail?: string }>;
+  sections: Array<{ section: string; failed: boolean; detail?: string; touched?: boolean }>;
   /** User-message ordinal of the turn that produced the call. */
   turnOrdinal: number;
+}
+
+/** Parse one read-tool call into touched-file events (W6.5). Success in
+ *  the harness grammar always carries the `# {name}` header line for the
+ *  file (whole-file, WORKING copy, and section modes all format through
+ *  the same header); not-found / error / "please provide" never do — so
+ *  absence of the header means no row, never a false touched. */
+function parseReadCall(
+  argsJson: string,
+  output: string,
+  turnOrdinal: number,
+): StagedEvent[] {
+  let args: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(argsJson) as unknown;
+    if (typeof parsed !== 'object' || parsed === null) return [];
+    args = parsed as Record<string, unknown>;
+  } catch {
+    return [];
+  }
+  const names: string[] = [];
+  if (Array.isArray(args.files)) {
+    for (const f of args.files) {
+      const name = String(f ?? '').trim();
+      if (name) names.push(name);
+    }
+  } else {
+    const single = String(args.filename ?? args.file ?? '').trim();
+    if (single) names.push(single);
+  }
+  if (names.length === 0) return [];
+  // Section-scoped reads name the sections they grounded on; whole-file
+  // and list_sections modes are file-level.
+  const sections: string[] = [];
+  if (!args.list_sections) {
+    if (typeof args.section === 'string' && args.section.trim()) {
+      sections.push(normalizeSection(args.section));
+    }
+    if (Array.isArray(args.sections)) {
+      for (const s of args.sections) {
+        const sec = normalizeSection(s);
+        if (sec) sections.push(sec);
+      }
+    }
+  }
+  const evSections = sections.length > 0
+    ? sections.map((section) => ({ section, failed: false, touched: true }))
+    : [{ section: '', failed: false, touched: true }];
+  // Batch reads succeed per file; only files whose header is present
+  // touch (one event each — never a joined pseudo-file).
+  return names
+    .filter((name) => output.includes(`# ${name}`))
+    .map((file) => ({ file, sections: evSections, turnOrdinal }));
 }
 
 /** Parse one write-tool call's harness result into a staged event. */
@@ -191,14 +252,26 @@ export function buildWorkLedger(
       continue;
     }
     for (const call of message.toolCalls ?? []) {
-      if (!WRITE_TOOLS.has(call.name)) continue;
-      const event = parseWriteCall(call.name, call.arguments, call.output, usersSeen);
-      if (!event) continue;
-      for (const section of event.sections) {
-        events.set(`${event.file}\u0000${section.section}`, {
-          ...section,
-          turnOrdinal: event.turnOrdinal,
-        });
+      if (WRITE_TOOLS.has(call.name)) {
+        const event = parseWriteCall(call.name, call.arguments, call.output, usersSeen);
+        if (!event) continue;
+        for (const section of event.sections) {
+          // 'w' namespace: write rows and touched rows coexist per file
+          // (a created file is also a read file).
+          events.set(`w\u0000${event.file}\u0000${section.section}`, {
+            ...section,
+            turnOrdinal: event.turnOrdinal,
+          });
+        }
+      } else if (READ_TOOLS.has(call.name)) {
+        for (const event of parseReadCall(call.arguments, call.output, usersSeen)) {
+          for (const section of event.sections) {
+            events.set(`t\u0000${event.file}\u0000${section.section}`, {
+              ...section,
+              turnOrdinal: event.turnOrdinal,
+            });
+          }
+        }
       }
     }
   }
@@ -206,12 +279,14 @@ export function buildWorkLedger(
 
   const rows: WorkLedgerRow[] = [];
   for (const [key, event] of events) {
-    const [file, section] = key.split('\u0000');
+    const [, file, section] = key.split('\u0000');
     const turnOffset = totalUsers - event.turnOrdinal;
     if (turnOffset < 1 || turnOffset > WORK_LEDGER_MAX_TURNS) continue;
-    let verdict: WorkLedgerRow['verdict'] = event.failed ? 'failed' : 'pending';
+    let verdict: WorkLedgerRow['verdict'] = event.touched
+      ? 'touched'
+      : event.failed ? 'failed' : 'pending';
     let detail = event.detail;
-    if (!event.failed) {
+    if (!event.touched && !event.failed) {
       // Latest matching decision at-or-after the staging turn wins
       // (kept-then-undone reads undone). Section match: exact, or
       // file-level when either side has no section (created files).

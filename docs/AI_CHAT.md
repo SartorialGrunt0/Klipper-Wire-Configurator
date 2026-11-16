@@ -38,6 +38,7 @@ hoping the model is careful.
    - [Failed firmware restart analysis](#failed-firmware-restart-analysis)
 4. [Design](#design)
    - [Request lifecycle](#request-lifecycle)
+   - [Conversation work-ledger](#conversation-work-ledger)
    - [Tools](#tools)
    - [Edit operations](#edit-operations)
    - [Validation and kickbacks](#validation-and-kickbacks)
@@ -204,6 +205,29 @@ which replies with the minimal fix staged as a normal reviewable edit.
    and config blocks pasted in an answer are display-only, never applied.
 5. **You review after the fact.** Keep/Undo as described above; Save remains
    the only path to disk.
+
+### Conversation work-ledger
+
+Conversation replay to the model is deliberately lean prose: tool results
+evaporate at request end, and the Keep/Undo review is a silent splice — so
+on a follow-up turn the model cannot see what it staged last turn, whether
+an edit failed, or whether **you undid it**. The work-ledger closes exactly
+that gap.
+
+- **Derived on the client, sent as data.** Per section: `staged` (awaiting
+  your review), `kept`, `undone by user`, `FAILED` (with the harness's own
+  error line), plus `read` markers for sections earlier turns grounded on.
+  The kept/undone verdicts exist nowhere else — the backend never sees
+  review decisions and this record is the only channel.
+- **One trailing system message, verbatim.** The backend renders the rows
+  and re-delivers them without interpretation — decisions stay client-side
+  by the review law; the ledger is a record, never a verdict the server
+  forms. Names and verdicts only: no payloads, and the raw tool results are
+  deliberately **not** replayed (staleness poisoning + window cost — config
+  state is re-derivable live via the read tools).
+- **Bounded:** ~10 turns, oldest dropped; the edit-skill body pairs it with
+  the rule "re-read a touched section immediately before editing it in a
+  later turn."
 
 ### Tools
 

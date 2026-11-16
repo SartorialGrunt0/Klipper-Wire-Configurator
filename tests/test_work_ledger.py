@@ -29,7 +29,10 @@ from main import app  # noqa: E402
 
 client = TestClient(app)
 
-LEDGER_MARKER = 'Conversation work-ledger'
+# The rendered block's own header — deliberately more specific than
+# 'Conversation work-ledger', which the edit-skill body now also
+# mentions (the cross-turn grounding rule).
+LEDGER_MARKER = 'Conversation work-ledger (recorded by the client'
 BODY_MARKER = "Skill 'config-editing' loaded"
 
 PRINTER_CFG = """[printer]
@@ -251,3 +254,15 @@ def test_renderer_flood_capped():
             for i in range(500)]
     text = ai_routes._render_work_ledger(rows)
     assert text.count('-> kept') <= ai_routes.WORK_LEDGER_MAX_ROWS
+
+
+def test_renderer_touched_rows():
+    text = ai_routes._render_work_ledger([
+        {'turnOffset': 2, 'file': 'printer.cfg', 'section': '', 'verdict': 'touched'},
+        {'turnOffset': 1, 'file': 'leds.cfg', 'section': 'led', 'verdict': 'touched'},
+    ])
+    assert 'printer.cfg (read) -> read (content may have changed since)' in text
+    assert '[led] in leds.cfg (read) -> read (content may have changed since)' in text
+    # A read is never labelled like a created file or a review outcome.
+    assert 'new file' not in text
+    assert 'kept' not in text
