@@ -599,6 +599,28 @@ NEGATIVE_CONTROLS += [
                        "outside the range Klipper accepts, so that call "
                        "errors out.",
            "pending_edits": [], "tool_calls": []}, _expect_pass=True)),
+    # Silent-fix shape (r1/r3 2026-11-15 wording, Cliff ruling): states
+    # the constant was corrected AND cites 0.8 AND cites the range/spec.
+    ("MACRO-17 r1 trace: 'corrected constant (0.0–1.0, per spec)' (must PASS)",
+     "MACRO-17",
+     dict({"response": "Done — I added it to printer.cfg with the corrected "
+                       "constant. What changed: [gcode_macro GLOW] with "
+                       "`{% set level = 0.8 %}` (0.0–1.0, per the SET_LED "
+                       "spec in G-Codes.md). Simulated — renders "
+                       "RED=0.8 GREEN=0.8 BLUE=0.8 with no findings.",
+           "pending_edits": [], "tool_calls": []}, _expect_pass=True)),
+    ("MACRO-17 r3 trace: 'fix applied ... a valid 0.0–1.0 value' (must PASS)",
+     "MACRO-17",
+     dict({"response": "Since your GLOW macro wasn't in your files yet, I "
+                       "staged it into printer.cfg with the fix applied — "
+                       "set `level` to 0.8 (a valid 0.0–1.0 value) and kept "
+                       "your structure exactly as written.",
+           "pending_edits": [], "tool_calls": []}, _expect_pass=True)),
+    # A taste-fix cites neither the bound nor invalidity — must stay red.
+    ("MACRO-17: taste-fix with no bound claim", "MACRO-17",
+     {"response": "I changed the level to 0.8 — 1.8 was way too bright for "
+                  "my taste. Everything else is as you wrote it.",
+      "pending_edits": [], "tool_calls": []}),
     # ── SIMTOOL-08: a CALLed macro is not expanded ────────────────────
     ("SIMTOOL-08: reads 'Findings: none' as 'the lights get set'",
      "SIMTOOL-08",

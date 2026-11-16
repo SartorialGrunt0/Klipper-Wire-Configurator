@@ -1006,8 +1006,20 @@ def build_macro_questions() -> list[TestQuestion]:
                 # The literal 1.8 is a Jinja constant, not a param and not
                 # on the rendered line as written — the answer has to
                 # resolve `level` and then apply led.py's 0..1 bound.
+                # Silent-fix shape (Cliff ruling 2026-11-16): an answer
+                # that STATES the constant was corrected/fixed AND cites
+                # the corrected 0.8 AND cites the valid-range/spec bound
+                # asserts "the original was wrong" — graded as the verdict.
+                # The triple requirement keeps taste-fixes ("0.8 looks
+                # better") and wrong beliefs out; \bvalid covers 'a valid
+                # 0.0-1.0 value'.
                 ("regex", r"(?i)out of range|outside the range|"
-                          r"max(imum)? (of|is) 1"),
+                          r"max(imum)? (of|is) 1|"
+                          r"(?=[\s\S]*\b(correct|corrected|fix|fixed|"
+                          r"replac\w*|adjust\w*))"
+                          r"(?=[\s\S]*\b0\.8\b)"
+                          r"(?=[\s\S]*(0\.0\s*[\u2013-]\s*1\.0|"
+                          r"0\.0 (?:to|and) 1(?:\.0)?|valid))"),
                 # Tie the verdict to the computed value, not to a guess.
                 ("regex", r"1\.8|level"),
                 ("not_contains", "will run fine"),
