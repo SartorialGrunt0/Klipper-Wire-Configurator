@@ -1839,7 +1839,12 @@ def _render_work_ledger(rows: list | None) -> str | None:
         "of YOUR staged edits and the user's review decisions; oldest "
         "turn first, newest last). A section that no longer appears was "
         "never staged in the recorded window; config state itself is "
-        "always re-derivable via the read tools."
+        "always re-derivable via the read tools. Outcomes: 'kept' = user "
+        "accepted at review; 'undone by user' = applied successfully, "
+        "then removed by the user at review — the edit itself did NOT "
+        "fail; 'FAILED' = never applied (the failure code follows); "
+        "'staged' = awaiting review; 'read' = section re-read in a "
+        "later turn."
     )
     lines: list[str] = []
     current_offset = None

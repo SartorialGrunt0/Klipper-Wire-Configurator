@@ -244,7 +244,9 @@ def test_renderer_detail_cannot_smuggle_newlines():
         'turnOffset': 1, 'file': 'p.cfg', 'section': 'led', 'verdict': 'failed',
         'detail': 'line one\n- new bullet line\n  indented',
     }])
-    failed_lines = [l for l in text.splitlines() if 'FAILED' in l]
+    # Row-scope: the header legend legitimately names 'FAILED' too.
+    failed_lines = [l for l in text.splitlines()
+                    if 'FAILED' in l and l.startswith('    ')]
     assert len(failed_lines) == 1
     assert 'line one - new bullet line indented' in failed_lines[0]
 
@@ -264,5 +266,27 @@ def test_renderer_touched_rows():
     assert 'printer.cfg (read) -> read (content may have changed since)' in text
     assert '[led] in leds.cfg (read) -> read (content may have changed since)' in text
     # A read is never labelled like a created file or a review outcome.
-    assert 'new file' not in text
-    assert 'kept' not in text
+    # (Row-scope: 'kept'/'new file' may appear in the header legend.)
+    rows_only = "\n".join(l for l in text.splitlines() if l.startswith("    "))
+    assert "new file" not in rows_only
+    assert "kept" not in rows_only
+
+
+def test_renderer_header_legend_defines_verdict_vocabulary():
+    # Acceptance A/B r2 (2026-11-16): with the ledger ON, the model wrote
+    # "the earlier LED edit failed ('undone by user')" — it conflated the
+    # user's review undo with an edit failure because the block reported
+    # its tokens without defining them. The header must define the five
+    # outcomes, above all that an undo means the edit SUCCEEDED.
+    # Defining the record's own vocabulary is re-delivery, not
+    # interpretation (review law holds).
+    text = ai_routes._render_work_ledger([
+        {'turnOffset': 1, 'file': 'printer.cfg', 'section': 'x',
+         'verdict': 'kept'},
+    ])
+    assert "'undone by user' = applied successfully" in text
+    assert "did NOT fail" in text
+    assert "'FAILED' = never applied" in text
+    assert "'kept' = user accepted at review" in text
+    assert "'staged' = awaiting review" in text
+    assert "'read' = section re-read in a later turn" in text
