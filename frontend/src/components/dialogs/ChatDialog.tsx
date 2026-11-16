@@ -25,6 +25,7 @@ import {
 } from '../../utils/approvalDiff';
 import { buildChatRequestCredentials } from '../../utils/chatRequestBase';
 import { hasEditSkillLoad } from '../../utils/chatSkillTrace';
+import { buildWorkLedger } from '../../utils/chatWorkLedger';
 import { selectUnsavedDrafts } from '../../utils/chatContext';
 import { buildReferenceContext, mentionMatches, nodeToReference, referenceLabel, type ChatReference, type MentionSource } from '../../utils/chatReferences';
 import { isNearBottom, nextStickToBottom } from '../../utils/chatScroll';
@@ -60,6 +61,7 @@ import ChangeSetBar from './ChangeSetBar';
 import ContextPressureBar from './ContextPressureBar';
 import ContextOverflowBar from './ContextOverflowBar';
 import { useContextPressureStore } from '../../stores/contextPressureStore';
+import { useWorkLedgerStore } from '../../stores/workLedgerStore';
 import { useChangeSetStore } from '../../stores/changeSetStore';
 import {
   applyStagedEdits,
@@ -521,6 +523,16 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           // global setting. Both this call and the retry-pipeline calls
           // spread this object, so one derivation covers all.
           editSkillLoaded: hasEditSkillLoad(newMessages),
+          // Conversation work-ledger (W6): what the model staged and how
+          // each section ended (kept/undone/failed) — derived fresh from
+          // the stored tool trace + the decision store at send time,
+          // conversation-scoped. Omitted when empty; the backend renders
+          // it verbatim as the trailing ledger message and never decides
+          // anything from it (review law).
+          workLedger: (() => {
+            const rows = buildWorkLedger(newMessages, useWorkLedgerStore.getState().events);
+            return rows.length > 0 ? rows : undefined;
+          })(),
         };
 
         // No context-file picker (2026-10-03): a request carries the editor's
@@ -1051,7 +1063,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const saveCurrentConversation = useCallback(() => {
     const { settings, messages } = useAiStore.getState();
     if (messages.length > 0) {
-      useChatHistoryStore.getState().saveConversation(messages, settings);
+      // W6: the kept/undone events are the only record that cannot be
+      // re-derived from the message trail — they travel with the save.
+      useChatHistoryStore.getState().saveConversation(
+        messages,
+        settings,
+        useWorkLedgerStore.getState().events,
+      );
     }
   }, []);
 
@@ -1067,6 +1085,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     // contract (PR #36 review, claim 3). This also bumps the epoch, so an
     // in-flight reply cannot re-seed the previous conversation's review.
     useChangeSetStore.getState().clear();
+    // W6: verdicts are conversation-scoped — a new chat starts with no
+    // action record (no trace, no decisions).
+    useWorkLedgerStore.getState().clear();
   }, [clearMessages]);
 
   const handleNewChatWithSave = useCallback(() => {
@@ -1107,6 +1128,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       // W7: the loaded thread has not been sent, so any pressure telemetry
       // from the replaced conversation is stale — silent until the next reply.
       useContextPressureStore.getState().reset();
+      // W6: restore the thread's kept/undone record alongside its
+      // messages (legacy saves hydrate to empty — trace rows still work).
+      useWorkLedgerStore.getState().hydrate(conversation.workLedger ?? []);
     },
     [saveCurrentConversation, setMessages, setSettings],
   );

@@ -28,6 +28,8 @@ import {
 } from '../utils/reviewLedger';
 import { useChangeSetStore } from '../stores/changeSetStore';
 import { useConfigStore } from '../stores/configStore';
+import { useWorkLedgerStore } from '../stores/workLedgerStore';
+import { normalizeSection } from '../utils/chatWorkLedger';
 import { syncGraphForFile } from './graphSync';
 import { applyStagedEdits } from './changeSetReview';
 
@@ -354,6 +356,25 @@ export function foldExternalEdit(file: string, newLive: string): void {
 
 // ── The decisions ────────────────────────────────────────────────────
 
+/** W6: record what the human decided while it is being decided. The
+ *  ledger is the model's only cross-turn action record — the splice
+ *  itself is invisible one turn later. Section names follow the
+ *  `runSectionLabel` law (header-in-run wins, dead header, nearest
+ *  above), normalized to the bare name so trace-derived rows and
+ *  decision events key identically. */
+function recordLedgerDecisions(
+  file: string,
+  runs: readonly ReviewRun[],
+  frame: string | null,
+  live: string,
+  verdict: 'kept' | 'undone',
+): void {
+  const store = useWorkLedgerStore.getState();
+  for (const run of runs) {
+    store.recordDecision(file, normalizeSection(runSectionLabel(live, frame ?? '', run)), verdict);
+  }
+}
+
 /** KEEP one run: the frame takes the live version of it. Text does not move. */
 export function keepRun(file: string, key: string): void {
   const store = useChangeSetStore.getState();
@@ -363,6 +384,7 @@ export function keepRun(file: string, key: string): void {
   const runs = reviewRuns(frame, live);
   if (!runs.some((run) => run.key === key)) return;   // no matching run: no-op
   store.setReviewFrame(file, keepRunsInFrame(frame, live, runs, new Set([key])));
+  recordLedgerDecisions(file, runs.filter((run) => run.key === key), frame, live, 'kept');
 }
 
 /** KEEP every run of one file. */
@@ -374,6 +396,7 @@ export function keepAllIn(file: string): void {
   const runs = reviewRuns(frame, live);
   if (runs.length === 0) return;
   store.setReviewFrame(file, keepRunsInFrame(frame, live, runs, new Set(runs.map((run) => run.key))));
+  recordLedgerDecisions(file, runs, frame, live, 'kept');
 }
 
 /** UNDO one run: live takes the frame version of it. */
@@ -385,10 +408,14 @@ export async function undoRun(file: string, key: string): Promise<void> {
   const runs = reviewRuns(frame, live);
   if (!runs.some((run) => run.key === key)) return;   // no matching run: no-op
   if (frame === null) {
+    // Undoing a created file DELETES it: the event is file-level (the
+    // trace's config_write row is file-level too — they key-match).
     removeCreatedFile(file);
+    useWorkLedgerStore.getState().recordDecision(file, '', 'undone');
     return;
   }
   await applyLive(file, undoRunsInLive(frame, live, runs, new Set([key])));
+  recordLedgerDecisions(file, runs.filter((run) => run.key === key), frame, live, 'undone');
 }
 
 /** UNDO every run of one file. */
@@ -401,9 +428,11 @@ export async function undoAllIn(file: string): Promise<void> {
   if (runs.length === 0) return;
   if (frame === null) {
     removeCreatedFile(file);
+    useWorkLedgerStore.getState().recordDecision(file, '', 'undone');
     return;
   }
   await applyLive(file, undoRunsInLive(frame, live, runs, new Set(runs.map((run) => run.key))));
+  recordLedgerDecisions(file, runs, frame, live, 'undone');
 }
 
 /** KEEP every run everywhere. */

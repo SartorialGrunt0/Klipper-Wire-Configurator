@@ -17,6 +17,7 @@ import type { AiChatRole, PendingConfigEdit } from '../services/api';
 import * as api from '../services/api';
 import { rewriteConfigEqualsSeparators } from '../utils/chatUtils';
 import type { ChatReference } from '../utils/chatReferences';
+import type { WorkLedgerRow } from '../utils/chatWorkLedger';
 import { isContextOverflowErrorCode } from '../utils/contextOverflow';
 import { contextPressureWindowKey, useContextPressureStore } from '../stores/contextPressureStore';
 
@@ -47,6 +48,11 @@ interface ChatRequestBase {
    * trace via utils/chatSkillTrace. Passed through to api.aiChat verbatim.
    */
   editSkillLoaded?: boolean;
+  /**
+   * Conversation work-ledger (W6): derived at send time from the stored
+   * tool trace + decision store. Passed through to api.aiChat verbatim.
+   */
+  workLedger?: WorkLedgerRow[];
 }
 
 interface AssistantReplyAttempt {

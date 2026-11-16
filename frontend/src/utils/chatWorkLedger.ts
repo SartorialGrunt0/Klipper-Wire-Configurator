@@ -67,8 +67,10 @@ export interface WorkLedgerRow {
   detail?: string;
 }
 
-/** `[led]`, `led`, `[gcode_macro X]` → one canonical bare name. */
-function normalizeSection(raw: unknown): string {
+/** `[led]`, `led`, `[gcode_macro X]` → one canonical bare name.
+ *  Shared with the reviewEngine's decision sites so staged rows and
+ *  decision events key identically. */
+export function normalizeSection(raw: unknown): string {
   const text = String(raw ?? '').trim();
   const m = text.match(/^\[\s*([^\]]*?)\s*\]$/);
   return (m ? m[1] : text).trim();

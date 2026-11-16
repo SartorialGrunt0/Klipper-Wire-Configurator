@@ -7,6 +7,7 @@ import type {
   SectionSchema,
 } from '../types/config';
 import type { ChatReference } from '../utils/chatReferences';
+import type { WorkLedgerRow } from '../utils/chatWorkLedger';
 
 const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) || '/api';
 
@@ -918,6 +919,16 @@ export interface AiChatRequest {
    * write tools. Harness `editSkill` (backend-only field) still wins.
    */
   editSkillLoaded?: boolean;
+  /**
+   * Conversation work-ledger (W6): per-section outcomes of the model's
+   * write tools — staged rows plus kept/undone decisions plus failures
+   * with the harness's own error line (derived client-side from the
+   * stored tool trace + workLedgerStore, utils/chatWorkLedger). Names +
+   * verdicts only — no payloads. The backend renders it verbatim as one
+   * trailing system message and never interprets it (review law).
+   * Omitted when empty.
+   */
+  workLedger?: WorkLedgerRow[];
   /**
    * W8 pre-flight: the model's REAL context window already probed this
    * session via /ai/context-window (contextPressureStore). Lets the

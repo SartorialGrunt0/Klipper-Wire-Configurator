@@ -1,6 +1,8 @@
 import { create } from 'zustand';
 import { loadAiHistory, saveAiHistory } from '../services/api';
 import type { ChatMessage, AiSettings } from './aiStore';
+import { isWorkLedgerDecision } from './workLedgerStore';
+import type { WorkLedgerDecision } from '../utils/chatWorkLedger';
 
 const STORAGE_KEY = 'klipper-wire-chat-history';
 const MAX_SAVED_CONVERSATIONS = 50;
@@ -11,12 +13,20 @@ export interface SavedConversation {
   timestamp: number;
   messages: ChatMessage[];
   settings: AiSettings;
+  /** W6 work-ledger kept/undone events (the only unreplayable record).
+   *  Absent on legacy saves — a conversation without it degrades to
+   *  trace-derived rows only, never to false rows. */
+  workLedger?: WorkLedgerDecision[];
 }
 
 interface ChatHistoryState {
   conversations: SavedConversation[];
   _loaded: boolean;
-  saveConversation: (messages: ChatMessage[], settings: AiSettings) => string;
+  saveConversation: (
+    messages: ChatMessage[],
+    settings: AiSettings,
+    workLedger?: readonly WorkLedgerDecision[],
+  ) => string;
   deleteConversation: (id: string) => void;
   loadConversations: () => Promise<void>;
   clearHistory: () => void;
@@ -97,7 +107,7 @@ export const useChatHistoryStore = create<ChatHistoryState>()((set, get) => ({
     }
   },
 
-  saveConversation: (messages: ChatMessage[], settings: AiSettings): string => {
+  saveConversation: (messages, settings, workLedger): string => {
     const nonEmptyMessages = messages.filter(
       (m) => m.content.trim().length > 0 && (m.role === 'user' || m.role === 'assistant'),
     );
@@ -105,12 +115,17 @@ export const useChatHistoryStore = create<ChatHistoryState>()((set, get) => ({
 
     const id = `chat_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
     const title = generateTitle(nonEmptyMessages);
+    // Malformed entries dropped at the door (the events array may have
+    // been round-tripped through storage). Field omitted entirely when
+    // empty so legacy consumers see the legacy shape.
+    const decisions = (workLedger ?? []).filter(isWorkLedgerDecision);
     const entry: SavedConversation = {
       id,
       title,
       timestamp: Date.now(),
       messages: nonEmptyMessages,
       settings,
+      ...(decisions.length > 0 ? { workLedger: decisions } : {}),
     };
 
     const conversations = get().conversations;
