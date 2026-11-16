@@ -377,6 +377,18 @@ class ChatRequest(BaseModel):
     # message (atomic armament: tools and body always move together). The
     # harness editSkill override above still wins.
     editSkillLoaded: bool = False
+    # Conversation work-ledger (W6): per-section outcomes of the model's
+    # own write tools across earlier turns — staged rows plus the human's
+    # kept/undone review decisions plus failures with the harness's error
+    # line. Derived client-side (utils/chatWorkLedger + workLedgerStore):
+    # the review ledger splices silently and the lean replay strips tool
+    # results, so kept/undone is the ONE record that exists only on the
+    # client. Same trust class as editSkillLoaded/contextFiles (the client
+    # is ground truth for its own state). The backend renders it verbatim
+    # as one trailing system message and NEVER decides anything from it
+    # (review law: the backend re-delivers the record, decisions stay
+    # client-side); names + verdicts only, no payloads.
+    workLedger: list[dict] = []
     # Approval-gate override (harness A/B runs ONLY; the frontend never
     # sends it). INERT since the post-hoc review change (2026-10-02):
     # nothing in the edit path suspends, so there is no wait to skip and
@@ -1078,7 +1090,8 @@ def _prepare_messages(messages: list[dict],
                       native_mode: bool = False,
                       context_files: dict | None = None,
                       context_references: list | None = None,
-                      inject_edit_skill_body: bool = False) -> list[dict]:
+                      inject_edit_skill_body: bool = False,
+                      work_ledger: list | None = None) -> list[dict]:
     """Build a clean system prompt with MCP tool descriptions, printer memory,
     and user messages.
     """
@@ -1251,6 +1264,25 @@ def _prepare_messages(messages: list[dict],
     if inject_edit_skill_body and not _edit_skill_body_in_trail(messages):
         skill_body_messages = [{"role": "system", "content": _edit_skill_body()}]
 
+    # W6 conversation work-ledger: the client's action record (staged /
+    # kept / undone / failed per section) rides the same trailing seam —
+    # appended last-but-one so the turn-specific W3 observation stays
+    # closest to the user message. Trailing placement keeps the replayed
+    # prefix byte-identical for the KV cache (Invariant B rationale
+    # applies verbatim). Verbatim re-delivery only: the backend never
+    # interprets the record (review law). Fail-safe like the W3
+    # observation — the chat must not die on the ledger — but never
+    # silent (review B-L4 discipline).
+    ledger_messages: list[dict] = []
+    if not (minimal or no_system):
+        try:
+            ledger_text = _render_work_ledger(work_ledger)
+        except Exception:
+            logger.warning("work-ledger render failed", exc_info=True)
+            ledger_text = None
+        if ledger_text:
+            ledger_messages = [{"role": "system", "content": ledger_text}]
+
     # W3 runtime-error traceback (deterministic observation): rides LAST at
     # the same trailing seam. Guarded by the same ablation gates as the
     # references/body — minimal/no_system are prompt instruments and are
@@ -1275,6 +1307,7 @@ def _prepare_messages(messages: list[dict],
             *([] if (minimal or no_system) else [{"role": "system", "content": task_anchor}]),
             *([] if (minimal or no_system) else reference_messages),
             *([] if (minimal or no_system) else skill_body_messages),
+            *([] if (minimal or no_system) else ledger_messages),
             *([] if (minimal or no_system) else trace_messages),
         ]
     return ([] if no_system else [{"role": "system", "content": system_text}]) + prepared
@@ -1735,6 +1768,80 @@ def _edit_skill_body_in_trail(messages: list[dict]) -> bool:
     conversation, from whichever source arrived first."""
     return any(_EDIT_SKILL_TRAIL_RE.search(str(m.get("content", "")))
                for m in messages)
+
+
+# W6 work-ledger: the client's action-record window. Mirrors the client
+# law (utils/chatWorkLedger WORK_LEDGER_MAX_TURNS); rows outside it are
+# dropped server-side as a defensive re-cap, never a guess.
+WORK_LEDGER_MAX_TURNS = 10
+# Defensive flood cap: ~10 turns x a bounded number of sections. The
+# client caps turns and row noise; this only stops a hand-built request
+# turning the ledger into a payload channel.
+WORK_LEDGER_MAX_ROWS = 60
+
+_LEDGER_VERDICTS = ("pending", "kept", "undone", "failed")
+
+
+def _render_work_ledger(rows: list | None) -> str | None:
+    """Render client-derived work-ledger rows as ONE system message body.
+
+    Verbatim re-delivery: names + verdicts only, no interpretation — the
+    backend never concludes anything from the record (review law; the
+    human's keep/undo decisions stay client-side). Deterministic output
+    (oldest turn first, newest last; sections ordered by file then name)
+    so the rendered text stays stable for the KV cache. Malformed rows
+    drop silently — an absent line claims nothing, a garbage line would.
+    """
+    valid: list[tuple[int, str, str, str, str]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        offset = row.get("turnOffset")
+        if isinstance(offset, bool) or not isinstance(offset, int):
+            continue
+        if offset < 1 or offset > WORK_LEDGER_MAX_TURNS:
+            continue
+        file = str(row.get("file") or "").strip()
+        section = " ".join(str(row.get("section") or "").split())
+        verdict = str(row.get("verdict") or "").strip()
+        if not file or verdict not in _LEDGER_VERDICTS:
+            continue
+        detail = " ".join(str(row.get("detail") or "").split())
+        valid.append((offset, file, section, verdict, detail))
+    if not valid:
+        return None
+    # Oldest turn first, newest last; deterministic within a turn.
+    valid.sort(key=lambda r: (-r[0], r[1], r[2]))
+    del valid[WORK_LEDGER_MAX_ROWS:]
+
+    def _outcome(verdict: str, detail: str) -> str:
+        if verdict == "pending":
+            return "staged (awaiting review)"
+        if verdict == "kept":
+            return "kept"
+        if verdict == "undone":
+            return "undone by user"
+        return f"FAILED: {detail}" if detail else "FAILED"
+
+    header = (
+        "Conversation work-ledger (recorded by the client; the outcomes "
+        "of YOUR staged edits and the user's review decisions; oldest "
+        "turn first, newest last). A section that no longer appears was "
+        "never staged in the recorded window; config state itself is "
+        "always re-derivable via the read tools."
+    )
+    lines: list[str] = []
+    current_offset = None
+    for offset, file, section, verdict, detail in valid:
+        if offset != current_offset:
+            when = "previous turn" if offset == 1 else f"{offset} turns ago"
+            lines.append(f"- {when}:")
+            current_offset = offset
+        # Created files are file-level rows (empty section): name the file.
+        label = f"[{section}]" if section else f"{file} (new file)"
+        suffix = f" in {file}" if section else ""
+        lines.append(f"    {label}{suffix} -> {_outcome(verdict, detail)}")
+    return header + "\n" + "\n".join(lines)
 
 
 def _build_mcp_tool_context(edit_capable: bool = False, *,
@@ -3941,6 +4048,9 @@ async def chat_proxy(req: ChatRequest, request: Request):
                                  # active skill state AND a session.
                                  inject_edit_skill_body=(
                                      edit_capable and _skill_state['active']),
+                                 # W6: re-deliver the client's action record
+                                 # verbatim (never interpreted here).
+                                 work_ledger=req.workLedger,
                                  native_mode=_resolve_native_tools(
                                      req.apiProvider, req.apiUrl, req.toolProtocol,
                                      edit_capable=edit_capable,
