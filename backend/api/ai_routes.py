@@ -315,6 +315,11 @@ class ModelsRequest(BaseModel):
     apiProvider: AiProvider = AiProvider.chatgpt
 
 
+class ContextWindowRequest(ModelsRequest):
+    """W7 context-window probe: the same credentials plus the active model."""
+    model: str = ""
+
+
 class ChatRequest(BaseModel):
     messages: list[dict]
     apiKey: str
@@ -3520,6 +3525,10 @@ def _extract_usage_info(data: dict) -> dict | None:
     completion_tokens = usage.get("completion_tokens")
     if not isinstance(completion_tokens, int):
         return None
+    prompt_tokens = usage.get("prompt_tokens")
+    if not isinstance(prompt_tokens, int):
+        # Providers that omit it: W7 stays silent rather than guessing.
+        prompt_tokens = None
     details = usage.get("completion_tokens_details")
     reasoning_tokens = None
     if isinstance(details, dict):
@@ -3527,6 +3536,7 @@ def _extract_usage_info(data: dict) -> dict | None:
         if isinstance(rt, int):
             reasoning_tokens = rt
     return {
+        "promptTokens": prompt_tokens,
         "completionTokens": completion_tokens,
         "reasoningTokens": reasoning_tokens,
         "finishReason": choice.get("finish_reason") or "",
@@ -3630,6 +3640,124 @@ async def list_models(req: ModelsRequest):
                     ids.append(m["id"])
     logger.info("Model list | provider=%s url=%s count=%d", provider, models_url, len(ids))
     return {"models": ids}
+
+
+def _positive_int(value: object) -> int | None:
+    """True int > 0 or None — bools and floats are not context windows."""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
+def _window_from_preset_args(entry: dict) -> int | None:
+    """llama.cpp multi-model router: the preset args carry the server budget.
+
+    An UNLOADED router entry has no props/loaded_context_window, but its
+    ``status.args`` still hold the authoritative ``--ctx-size`` the server
+    will boot the model with — that is the real budget, unlike the model
+    card's advertised window (research 2026-11-12).
+    """
+    status = entry.get("status")
+    if not isinstance(status, dict):
+        return None
+    args = status.get("args")
+    if not isinstance(args, list):
+        return None
+    for i, arg in enumerate(args):
+        if not isinstance(arg, str):
+            continue
+        if arg == "--ctx-size" and i + 1 < len(args):
+            window = _positive_int(args[i + 1] if isinstance(args[i + 1], int) else _parse_int_str(args[i + 1]))
+            if window:
+                return window
+        elif arg.startswith("--ctx-size="):
+            window = _positive_int(_parse_int_str(arg.split("=", 1)[1]))
+            if window:
+                return window
+    return None
+
+
+def _parse_int_str(value: str) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_context_window(entry: dict, model: str) -> tuple[int | None, str | None]:
+    """Resolve one /v1/models entry's REAL context window for `model`.
+
+    Resolution order (llama.cpp n_ctx first — it is the budget that actually
+    truncates; cloud cards only when there is no local truth to disagree
+    with): ``props.n_ctx`` → ``loaded_context_window`` → preset ``--ctx-size``
+    args → ``max_input_tokens``. Model match is exact on ``id`` or via the
+    router's ``aliases``. Returns (None, None) rather than a guess.
+    """
+    if not isinstance(entry, dict):
+        return (None, None)
+    entry_id = entry.get("id")
+    aliases = entry.get("aliases")
+    matched = entry_id == model or (
+        isinstance(aliases, list) and model in aliases
+    )
+    if not matched:
+        return (None, None)
+    props = entry.get("props")
+    if isinstance(props, dict):
+        window = _positive_int(props.get("n_ctx"))
+        if window:
+            return (window, "props.n_ctx")
+    window = _positive_int(entry.get("loaded_context_window"))
+    if window:
+        return (window, "loaded_context_window")
+    window = _window_from_preset_args(entry)
+    if window:
+        return (window, "preset_args")
+    window = _positive_int(entry.get("max_input_tokens"))
+    if window:
+        return (window, "max_input_tokens")
+    return (None, None)
+
+
+@router.post("/ai/context-window")
+async def context_window(req: ContextWindowRequest):
+    """W7: the REAL context window for one model, server-side.
+
+    The browser can't reach the provider (CORS + key), and the router's
+    n_ctx — not the model card — is the budget that truncates. Best-effort:
+    unknown model, unreachable provider, or an entry without any window
+    field all answer ``contextWindow: null`` and the client stays silent.
+    """
+    provider = req.apiProvider.value if hasattr(req.apiProvider, "value") else req.apiProvider
+    models_url = _models_url_from_chat_url(req.apiUrl)
+    if not models_url:
+        return {"contextWindow": None, "source": None}
+
+    headers = _provider_auth_headers(provider, req.apiUrl, req.apiKey)
+    timeout = httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=30.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            res = await client.get(models_url, headers=headers)
+            res.raise_for_status()
+            data = res.json()
+    except httpx.TimeoutException:
+        logger.warning("Context window timeout | url=%s", models_url)
+        return {"contextWindow": None, "source": None, "error": "Timed out probing the context window"}
+    except httpx.HTTPError as e:
+        logger.warning("Context window probe failed | url=%s error=%s", models_url, e)
+        return {"contextWindow": None, "source": None, "error": f"Failed to probe the context window: {e}"}
+
+    entries = data.get("data") if isinstance(data, dict) else None
+    if isinstance(entries, list):
+        for entry in entries:
+            window, source = _resolve_context_window(entry, req.model)
+            if window:
+                logger.info(
+                    "Context window | provider=%s model=%s window=%d source=%s",
+                    provider, req.model, window, source,
+                )
+                return {"contextWindow": window, "source": source}
+    return {"contextWindow": None, "source": None}
 
 
 # Mirror-seed caps (Pi 3B+ memory): per-file and total content limits so a
@@ -4913,6 +5041,17 @@ async def chat_proxy(req: ChatRequest, request: Request):
                     # (expect_no_ack_stall) — a cleaned-up lie is still
                     # the weakness.
                     "ackReprompts": ack_reprompts,
+                    # W7 context-pressure: the LAST provider request of the
+                    # loop is the fullest prompt, so its size is the pressure
+                    # signal the client compares against the router window.
+                    "lastPromptTokens": next(
+                        (
+                            e.get("promptTokens")
+                            for e in reversed(usage_events)
+                            if isinstance(e.get("promptTokens"), int)
+                        ),
+                        None,
+                    ),
                     "events": usage_events,
                     "truncated": any(
                         (e.get("finishReason") or "") == "length" for e in usage_events

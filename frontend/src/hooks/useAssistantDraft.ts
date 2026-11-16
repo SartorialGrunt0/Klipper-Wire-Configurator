@@ -17,6 +17,7 @@ import type { AiChatRole, PendingConfigEdit } from '../services/api';
 import * as api from '../services/api';
 import { rewriteConfigEqualsSeparators } from '../utils/chatUtils';
 import type { ChatReference } from '../utils/chatReferences';
+import { useContextPressureStore } from '../stores/contextPressureStore';
 
 interface ChatRequestBase {
   apiKey: string;
@@ -71,6 +72,19 @@ export function useAssistantDraft() {
       const response = await api.aiChat({ ...chatRequestBase, messages: conversationMessages }, options?.signal);
 
       if (response.error) throw new Error(response.error);
+
+      // W7 context-pressure telemetry: record the latest request's prompt
+      // size and make sure the window for this provider+model has been
+      // probed (once per key, fire-and-forget — the advisory self-heals on
+      // the NEXT reply if the probe lands after this render).
+      const pressure = useContextPressureStore.getState();
+      pressure.recordUsage(response.usage?.lastPromptTokens ?? null);
+      void pressure.ensureWindow({
+        apiKey: chatRequestBase.apiKey,
+        apiUrl: chatRequestBase.apiUrl,
+        apiProvider: chatRequestBase.apiProvider,
+        model: chatRequestBase.model,
+      });
 
       let assistantMessage: ChatMessage = {
         role: 'assistant',

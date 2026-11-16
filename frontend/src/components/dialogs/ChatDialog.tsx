@@ -57,6 +57,8 @@ import type { ApprovalCard } from '../../services/api';
 import ChatInputBar, { type ChatReferenceChip } from './ChatInputBar';
 import ChatEditRows from './ChatEditRows';
 import ChangeSetBar from './ChangeSetBar';
+import ContextPressureBar from './ContextPressureBar';
+import { useContextPressureStore } from '../../stores/contextPressureStore';
 import { useChangeSetStore } from '../../stores/changeSetStore';
 import {
   applyStagedEdits,
@@ -1046,6 +1048,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const handleStartNewChat = useCallback(() => {
     clearMessages();
     useChatReferenceStore.getState().clear();
+    // W7: a new conversation starts a fresh pressure measurement — a label
+    // from the old thread must not follow the user into an empty chat.
+    useContextPressureStore.getState().reset();
     // A new conversation inherits no running change set — the store's own
     // contract (PR #36 review, claim 3). This also bumps the epoch, so an
     // in-flight reply cannot re-seed the previous conversation's review.
@@ -1087,6 +1092,9 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       saveCurrentConversation();
       setMessages(conversation.messages);
       setSettings(conversation.settings);
+      // W7: the loaded thread has not been sent, so any pressure telemetry
+      // from the replaced conversation is stale — silent until the next reply.
+      useContextPressureStore.getState().reset();
     },
     [saveCurrentConversation, setMessages, setSettings],
   );
@@ -1460,6 +1468,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       {/* Post-hoc review summary: the LEDGER — one row per run of
           diff(FRAME, LIVE). Keep or undo a run and it leaves the diff; when
           nothing is left the whole bar goes away (Sir, 2026-10-07). */}
+      {/* W7: context-pressure advisory — one label above the review bar,
+          shown only while the latest request sits at ≥70% of the model's
+          real window (both modal and docked variants). */}
+      <ContextPressureBar />
       <ChangeSetBar
         files={ledgerSections}
         onKeepAll={handleKeepAll}
