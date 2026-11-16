@@ -912,13 +912,17 @@ export interface AiChatRequest {
    */
   context_references?: ChatReference[];
   /**
-   * True once load_skill(config-editing) actually ran in this conversation
+   * Names of the skills whose load_skill actually ran in this conversation
    * (derived client-side from the stored tool trace — utils/chatSkillTrace).
-   * Conversation-scoped sticky armament: while set, the backend starts the
-   * skill gate open and re-injects the skill body in the same prompt as the
-   * write tools. Harness `editSkill` (backend-only field) still wins.
+   * Conversation-scoped sticky armament (W4-R2 generalization of the old
+   * editSkillLoaded boolean): names whose load_skill actually ran —
+   * 'config-editing' starts the backend gate open and re-injects the edit
+   * body with the write tools (atomic armament); sticky knowledge skills
+   * ('macro-authoring') re-inject their body at the trailing seam and
+   * NEVER arm write tools. Harness `editSkill` (backend-only field) still
+   * wins for the edit gate.
    */
-  editSkillLoaded?: boolean;
+  loadedSkills?: string[];
   /**
    * Conversation work-ledger (W6): per-section outcomes of the model's
    * write tools — staged rows plus kept/undone decisions plus failures

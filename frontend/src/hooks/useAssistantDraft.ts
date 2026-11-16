@@ -44,10 +44,11 @@ interface ChatRequestBase {
    */
   context_references?: ChatReference[];
   /**
-   * Sticky skill armament (W0): derived from the conversation's stored tool
-   * trace via utils/chatSkillTrace. Passed through to api.aiChat verbatim.
+   * Sticky skill armament (W0/W4-R2): names of the skills whose load_skill
+   * ran in this conversation, derived from the stored tool trace via
+   * utils/chatSkillTrace. Passed through to api.aiChat verbatim.
    */
-  editSkillLoaded?: boolean;
+  loadedSkills?: string[];
   /**
    * Conversation work-ledger (W6): derived at send time from the stored
    * tool trace + decision store. Passed through to api.aiChat verbatim.

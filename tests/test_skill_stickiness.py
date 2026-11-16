@@ -1,4 +1,4 @@
-"""W0 — Sticky per-conversation skill activation (editSkillLoaded + body re-injection).
+"""W0 — Sticky per-conversation skill activation (loadedSkills + body re-injection).
 
 Pins the two load-bearing invariants from the macro-jinja-reliability plan
 (Cliff-approved, 2026-11-12):
@@ -155,7 +155,7 @@ def test_flag_arms_write_tools_and_injects_body_once(install):
     scripted = install([_final_reply()])
     resp = client.post('/ai/chat', json=_chat_payload(
         [{'role': 'user', 'content': 'Make the LED toggle macro work.'}],
-        editSkillLoaded=True,
+        loadedSkills=["config-editing"],
     ))
     assert resp.status_code == 200
     assert len(scripted.payloads) == 1
@@ -194,7 +194,7 @@ def test_body_marker_in_trail_gets_no_duplicate_injection(install):
     ]
     scripted = install([_final_reply()])
     resp = client.post('/ai/chat', json=_chat_payload(
-        trail, editSkillLoaded=True,
+        trail, loadedSkills=["config-editing"],
     ))
     assert resp.status_code == 200
     p = scripted.payloads[0]
@@ -205,7 +205,7 @@ def test_body_marker_in_trail_gets_no_duplicate_injection(install):
 
 
 def test_harness_edit_skill_semantics_unchanged_without_flag(install):
-    """editSkill=True still forces the unlocked arm when editSkillLoaded is
+    """editSkill=True still forces the unlocked arm when loadedSkills (deleted; loadedSkills is
     unset (harness A/B untouched) — and per Invariant A the body rides too."""
     scripted = install([_final_reply()])
     resp = client.post('/ai/chat', json=_chat_payload(
@@ -228,7 +228,7 @@ def test_invariant_a_holds_for_mid_request_activation(install):
     ])
     resp = client.post('/ai/chat', json=_chat_payload(
         [{'role': 'user', 'content': 'Add a purge line to PRINT_START.'}],
-        editSkillLoaded=False,
+        loadedSkills=[],
     ))
     assert resp.status_code == 200
     assert len(scripted.payloads) >= 2

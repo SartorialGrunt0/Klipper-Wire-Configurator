@@ -365,18 +365,20 @@ class ChatRequest(BaseModel):
     # None/False = the model must call load_skill to unlock the write
     # tools.
     editSkill: bool | None = None
-    # Sticky per-conversation skill activation (W0): derived by the CLIENT
-    # from its stored tool trace (frontend/src/utils/chatSkillTrace.ts) —
-    # True means load_skill('config-editing') actually ran in THIS
-    # conversation. The frontend's lean replay strips native tool_calls, so
-    # without this flag the gate re-closes on every follow-up turn and the
-    # model continues cold (no write tools, no rulebook — the confabulation
-    # setup). Conversation-scoped (derived per send from the conversation's
-    # own trace, never a global setting); when True, the request STARTS with
-    # the skill active and the skill body re-injects as a trailing system
-    # message (atomic armament: tools and body always move together). The
-    # harness editSkill override above still wins.
-    editSkillLoaded: bool = False
+    # Names of skills whose load_skill ACTUALLY ran in THIS conversation
+    # (W4-R2 generalization of the W0 editSkillLoaded boolean — single
+    # path, the boolean is deleted). Derived by the CLIENT from its stored
+    # tool trace (frontend/src/utils/chatSkillTrace.ts): the frontend's
+    # lean replay strips native tool_calls, so without this the gate
+    # re-closes on every follow-up turn and sticky knowledge bodies are
+    # lost. Conversation-scoped (derived per send from the conversation's
+    # own trace, never a global setting). config-editing here STARTS the
+    # request armed (atomic armament: tools + body move together); STICKY
+    # non-gating skills here (macro-authoring) re-inject their body at the
+    # trailing seam. Knowledge names NEVER arm write tools by themselves —
+    # gates_write in _SKILL_REGISTRY is the only unlock. The harness
+    # editSkill override above still wins for the edit gate.
+    loadedSkills: list[str] = []
     # Conversation work-ledger (W6): per-section outcomes of the model's
     # own write tools across earlier turns — staged rows plus the human's
     # kept/undone review decisions plus failures with the harness's error
@@ -1091,6 +1093,7 @@ def _prepare_messages(messages: list[dict],
                       context_files: dict | None = None,
                       context_references: list | None = None,
                       inject_edit_skill_body: bool = False,
+                      loaded_skills: list | None = None,
                       work_ledger: list | None = None) -> list[dict]:
     """Build a clean system prompt with MCP tool descriptions, printer memory,
     and user messages.
@@ -1261,8 +1264,28 @@ def _prepare_messages(messages: list[dict],
     # only sets the flag when the effective skill state is active, so tools
     # and body always move together.
     skill_body_messages: list[dict] = []
-    if inject_edit_skill_body and not _edit_skill_body_in_trail(messages):
+    if inject_edit_skill_body and not _skill_body_in_trail(
+            messages, EDIT_SKILL_NAME):
         skill_body_messages = [{"role": "system", "content": _edit_skill_body()}]
+
+    # W4-R2 sticky knowledge bodies: a loaded sticky skill's rules must
+    # survive the lean replay exactly like the edit body — same trailing
+    # seam, same Invariant B argument (append-only, prefix byte-identical),
+    # same idempotence law (a trail already carrying the body gets no
+    # second copy). Only STICKY non-gating skills re-inject: printer-memory
+    # is one-shot (its block proposal lands in the history), and the edit
+    # body above stays tied to atomic armament (tools + rulebook move
+    # together), never to this list. Order: registry declaration order, so
+    # the rendered prompt stays deterministic for the KV cache.
+    knowledge_messages: list[dict] = []
+    for _name in loaded_skills or []:
+        _entry = _SKILL_REGISTRY.get(str(_name))
+        if not _entry or not _entry["sticky"] or _entry["gates_write"]:
+            continue
+        if _skill_body_in_trail(messages, str(_name)):
+            continue
+        knowledge_messages.append(
+            {"role": "system", "content": _entry["body"]()})
 
     # W6 conversation work-ledger: the client's action record (staged /
     # kept / undone / failed per section) rides the same trailing seam —
@@ -1307,6 +1330,7 @@ def _prepare_messages(messages: list[dict],
             *([] if (minimal or no_system) else [{"role": "system", "content": task_anchor}]),
             *([] if (minimal or no_system) else reference_messages),
             *([] if (minimal or no_system) else skill_body_messages),
+            *([] if (minimal or no_system) else knowledge_messages),
             *([] if (minimal or no_system) else ledger_messages),
             *([] if (minimal or no_system) else trace_messages),
         ]
@@ -1527,6 +1551,11 @@ _EDIT_TOOL_SNIPPETS: dict[str, str] = {
 # ChatRequest.editSkill override for A/B traces.
 EDIT_SKILL_NAME = "config-editing"
 MEMORY_SKILL_NAME = "printer-memory"
+# W4-R2 (Cliff 2026-11-16): Klipper macro AUTHORING knowledge is its own
+# skill — the edit law stays tool mechanics, injected only when editing is
+# earned; macro rules load only when macro text is in play. Knowledge-class
+# like printer-memory: never gates write tools.
+MACRO_SKILL_NAME = "macro-authoring"
 MEMORY_SKILL_DESCRIPTION = (
     "Fills in the user's printer memory with hardware facts (boards, "
     "kinematics, build volume, extruder type, probe). Use when the printer "
@@ -1542,6 +1571,13 @@ EDIT_SKILL_DESCRIPTION = (
     "questions about settings, validating pasted config text, drafting or "
     "showing config/macro text to read over or discuss without applying it, "
     "or any request that says not to change the files."
+)
+MACRO_SKILL_DESCRIPTION = (
+    "Writes, fixes, and explains [gcode_macro] gcode: Jinja rendering rules, "
+    "params defaults, the validate-and-simulate workflow, terse examples, and "
+    "common pitfalls. Use when drafting or fixing macro text, or when asked "
+    "what a macro will actually do or send to the printer. Do NOT use for "
+    "plain config-parameter changes or questions about non-macro sections."
 )
 
 LIST_HARDWARE_SPEC = {
@@ -1591,7 +1627,7 @@ LOAD_SKILL_SPEC = {
         "properties": {
             "name": {
                 "type": "string",
-                "enum": [EDIT_SKILL_NAME, MEMORY_SKILL_NAME],
+                "enum": [EDIT_SKILL_NAME, MEMORY_SKILL_NAME, MACRO_SKILL_NAME],
                 "description": "Skill name from <available_skills>",
             },
         },
@@ -1651,13 +1687,19 @@ _SKILL_INDEX_BLOCK = (
     "<available_skills>\n"
     f"- {EDIT_SKILL_NAME}: {EDIT_SKILL_DESCRIPTION}\n"
     f"- {MEMORY_SKILL_NAME}: {MEMORY_SKILL_DESCRIPTION}\n"
+    f"- {MACRO_SKILL_NAME}: {MACRO_SKILL_DESCRIPTION}\n"
     "</available_skills>\n"
     "If the user's request is about editing their config, call load_skill "
     "with the skill name FIRST — the edit tools are not available until "
-    "you do. If the printer memory has blank fields you need (or you are "
-    "about to guess a hardware fact), load_skill(name='printer-memory') "
-    "and follow its playbook instead of guessing. Questions about Klipper "
-    "that need neither never need a skill."
+    "you do. If the request is about WRITING, fixing, or explaining a "
+    "macro's gcode (Jinja, params, what it will send or do), also call "
+    "load_skill(name='macro-authoring') — the macro rules, examples, and "
+    "pitfalls live there; load config-editing on top only when the macro "
+    "must actually be saved. If the printer memory has blank fields you "
+    "need (or you are about to guess a hardware fact), "
+    "load_skill(name='printer-memory') and follow its playbook instead of "
+    "guessing. Questions about Klipper that need none of these never need "
+    "a skill."
 )
 
 
@@ -1726,25 +1768,154 @@ def _memory_skill_body() -> str:
     )
 
 
-def _load_skill_active(messages: list[dict]) -> bool:
-    """True once the model has actually invoked load_skill in this
-    conversation. Mechanical evidence only (tool-result markers / echoed
-    native tool_calls) — never keyword heuristics.
+def _macro_skill_body() -> str:
+    """The skill body returned by load_skill(name='macro-authoring'):
+    Klipper macro authoring law. No tools unlock — validate_macro and
+    simulate_macro are already advertised; what the body adds is the
+    WORKFLOW (simulate before you claim) and the rules the W2 engine
+    actually enforces (no unenforced prose drift — W4 law).
 
-    Follow-up turns from the frontend now carry the client-derived
-    editSkillLoaded flag instead (W0 sticky activation: the lean replay
-    strips native tool_calls, so this scan sees nothing on replayed
-    trails). This scan STAYS — the text protocol writes its tool-result
-    marker into content, and harness arms still rely on it."""
+    Grounding sources: reference/kwc_docs/Klipper_GCode_Macro_AI_Summary.md
+    (macro rules section), the validator/sim finding codes, and the
+    Klipper ground truth verified against klippy/extras/gcode_macro.py."""
+    return (
+        f"Skill '{MACRO_SKILL_NAME}' loaded.\n\n"
+        "You are drafting or fixing [gcode_macro] gcode. This skill is "
+        "macro KNOWLEDGE; to save a macro to the user's files also call "
+        "load_skill(name='config-editing') — staging belongs to that "
+        "skill.\n\n"
+        "Workflow — before you claim a macro works:\n"
+        "1. Read the macro (and every macro it CALLs) with "
+        "read_user_config — never reason about text you have not read.\n"
+        "2. validate_macro after every draft or patch (structure, param "
+        "types, shadowing).\n"
+        "3. simulate_macro BEFORE answering or staging: scenarios must "
+        "cover the BARE call (no params) AND every parameter branch — it "
+        "returns exactly what Klipper would send to the command parser, "
+        "with per-line findings. Answer runtime questions FROM THE "
+        "SIMULATION, never from imagination, and quote the simulation's "
+        "rendered lines when explaining — never narrate an expansion the "
+        "simulator did not show.\n"
+        "4. Stage only when the user asked to save; for review-only "
+        "requests return the corrected text in a ```cfg block and stage "
+        "nothing.\n\n"
+        "Rendering law (how Klipper evaluates your Jinja):\n"
+        "- The whole macro renders BEFORE any of its commands run. State "
+        "changed by an early command is INVISIBLE to later Jinja blocks "
+        "in the same macro — never render a value you just moved the "
+        "printer to.\n"
+        "- params keys arrive UPPERCASE and as STRINGS; rawparams is the "
+        "raw argument tail. Every param a command consumes must render "
+        "NON-EMPTY on EVERY branch: use params.NAME|float|default(10) / "
+        "|int|default(0) / |default('X'), or initialize with a {% set x "
+        "= ... %} before the branches. A bare { params.X } with no "
+        "default fails the moment the macro is called without it.\n"
+        "- An empty/None render makes the command FAIL at runtime "
+        "(e.g. 'SET_LED ... RED=' -> 'Unable to parse'). SET_LED color "
+        "args RED/GREEN/BLUE are floats 0..1.\n"
+        "- Prefer simple values (SAVE_VARIABLE, params defaults) over "
+        "deep printer.a.b.c lookups; a wrong dotted path renders blank at "
+        "runtime, and the simulator shows such values as <unknown>. "
+        "printer.* paths must come from Status_Reference.md.\n\n"
+        "G-code discipline (what the validators enforce):\n"
+        "- M109 and M190 DO block inside macros until their target is "
+        "reached — they are the built-in Set-and-Wait commands. Never "
+        "emulate them with M104 + TEMPERATURE_WAIT, and never claim M109 "
+        "'does not wait in a macro'. M104/M140 are Set-only (they wait "
+        "only when S=0). simulate_macro's 'Expected effect' shows Set vs "
+        "Set and Wait. Caveat: a user-defined [gcode_macro M109] SHADOWS "
+        "the built-in — check its body or its rename_existing name.\n"
+        "- Movement macros: SAVE_GCODE_STATE, explicit G90/G91, an "
+        "explicit F on the first G0/G1, then RESTORE_GCODE_STATE.\n"
+        "- 'params_<name>:' lines inside a [gcode_macro] are a "
+        "CONFIG LOAD ERROR (Unknown parameter) — defaults exist ONLY via "
+        "|default().\n"
+        "- Renaming a macro onto a stock command name requires "
+        "rename_existing; if the body has a '#'-commented "
+        "'#rename_existing:' line, uncomment it FIRST, then rename.\n"
+        "- G2/G3 arcs need a [gcode_arcs] section — add it in the SAME "
+        "change or the validator kicks the macro back.\n"
+        "- Commands the registry does not know come back UNSTAGED with a "
+        "suggestion: fix the command or name the plugin that provides "
+        "it.\n\n"
+        "Examples — the shapes that render on EVERY call form:\n"
+        "```\n"
+        "[gcode_macro BLINK]\n"
+        "variable_state: 0\n"
+        "gcode:\n"
+        "    {% set dur = params.DUR|float|default(0.5) %}\n"
+        "    {% set on = (state + 1) % 2 %}\n"
+        "    SET_PIN PIN=casing_light VALUE={on}\n"
+        "    G4 P{(dur * 1000)|int}\n"
+        "\n"
+        "[gcode_macro PARK]\n"
+        "gcode:\n"
+        "    {% set z = params.Z|float|default(0) %}\n"
+        "    SAVE_GCODE_STATE NAME=park_state\n"
+        "    G90\n"
+        "    G1 Z{ [z, printer.toolhead.axis_maximum.z - 1]|min } F600\n"
+        "    RESTORE_GCODE_STATE NAME=park_state\n"
+        "```\n\n"
+        "Deep reference (already-available tools — name the doc, do not "
+        "guess its content):\n"
+        "- read_klipper_doc(name='Command_Templates.md') — full Jinja "
+        "syntax, params/rawparams, action_respond_info/action_raise_error.\n"
+        "- read_klipper_doc(name='Config_Reference.md') — the "
+        "[gcode_macro] section, SAVE_VARIABLE, delayed_gcode.\n"
+        "- read_klipper_doc(name='Status_Reference.md') — the ONLY source "
+        "of valid printer.* status paths.\n"
+        "- search_klipper_docs(query='...') for anything else."
+    )
+
+
+# W4-R2 registry: the ONE source for skill facts. gates_write — only
+# config-editing earns the write surface (a knowledge load must never arm
+# edits, the r4b trap). sticky — a sticky body re-rides every follow-up
+# request (lean replay strips tool results); printer-memory is NOT sticky:
+# its playbook is one-shot and the block proposal it produces already
+# lands in the history.
+_SKILL_REGISTRY: dict[str, dict] = {
+    EDIT_SKILL_NAME: {
+        "description": EDIT_SKILL_DESCRIPTION,
+        "body": _edit_skill_body,
+        "gates_write": True,
+        "sticky": True,
+    },
+    MEMORY_SKILL_NAME: {
+        "description": MEMORY_SKILL_DESCRIPTION,
+        "body": _memory_skill_body,
+        "gates_write": False,
+        "sticky": False,
+    },
+    MACRO_SKILL_NAME: {
+        "description": MACRO_SKILL_DESCRIPTION,
+        "body": _macro_skill_body,
+        "gates_write": False,
+        "sticky": True,
+    },
+}
+
+
+def _unknown_skill_text(requested: str) -> str:
+    return (f"Unknown skill '{requested}'. Available skills: "
+            + ", ".join(f"'{name}'" for name in _SKILL_REGISTRY) + ".")
+
+
+def _skill_load_in_trail(messages: list[dict], skill_name: str) -> bool:
+    """True once load_skill(SKILL) actually ran in this conversation.
+    Mechanical evidence only (tool-result markers / echoed native
+    tool_calls) — never keyword heuristics. An empty skill name is the
+    legacy config-editing convention and counts ONLY for config-editing.
+    """
     for msg in messages:
         if str(msg.get("role", "")) not in ("user", "assistant"):
             continue
         content = str(msg.get("content", ""))
-        # Name-anchored (r4b trap): a printer-memory skill load in the
-        # history must NOT count as the edit skill being active. The
-        # tool-result marker carries `name=config-editing` verbatim.
+        # Name-anchored (r4b trap): a printer-memory load in the history
+        # must NOT count as the edit skill being active. The tool-result
+        # marker carries `name=<skill>` verbatim.
         if re.search(r"\[Tool result: load_skill\(name=?['\"]?"
-                     + re.escape(EDIT_SKILL_NAME), content):
+                     + re.escape(skill_name), content):
             return True
         for call in msg.get("tool_calls") or []:
             fn = call.get("function") if isinstance(call, dict) else None
@@ -1757,26 +1928,42 @@ def _load_skill_active(messages: list[dict]) -> bool:
                 except (json.JSONDecodeError, ValueError):
                     args = {}
             name = str((args or {}).get("name", ""))
-            if not name or name == EDIT_SKILL_NAME:
+            if name == skill_name or (not name
+                                      and skill_name == EDIT_SKILL_NAME):
                 return True
     return False
 
 
-# The skill body in text: its own first line (native echoes and re-injected
-# bodies) or the text-protocol tool-result marker (which wraps the body).
-_EDIT_SKILL_TRAIL_RE = re.compile(
-    r"Skill '" + re.escape(EDIT_SKILL_NAME) + r"' loaded"
-    r"|\[Tool result: load_skill\(name=?['\"]?" + re.escape(EDIT_SKILL_NAME)
-)
+def _load_skill_active(messages: list[dict]) -> bool:
+    """True once load_skill has actually run for the EDIT skill in this
+    conversation (delegates to the generalized per-name scan).
+
+    Follow-up turns from the frontend now carry the client-derived
+    loadedSkills flag instead (W0 sticky activation: the lean replay
+    strips native tool_calls, so this scan sees nothing on replayed
+    trails). This scan STAYS — the text protocol writes its tool-result
+    marker into content, and harness arms still rely on it."""
+    return _skill_load_in_trail(messages, EDIT_SKILL_NAME)
 
 
-def _edit_skill_body_in_trail(messages: list[dict]) -> bool:
-    """True when the trail already carries the edit-skill body — either the
-    body's own first line or the text-protocol result marker. Keeps the W0
-    re-injection idempotent: the body rides the prompt exactly once per
+# A skill body present in text: its own first line (native echoes and
+# re-injected bodies) or the text-protocol tool-result marker (which wraps
+# the body). Compiled once per skill name.
+_SKILL_TRAIL_RES: dict[str, re.Pattern] = {}
+
+
+def _skill_body_in_trail(messages: list[dict], skill_name: str) -> bool:
+    """True when the trail already carries SKILL's body. Keeps the W0/W4-R2
+    re-injection idempotent: a sticky body rides the prompt exactly once per
     conversation, from whichever source arrived first."""
-    return any(_EDIT_SKILL_TRAIL_RE.search(str(m.get("content", "")))
-               for m in messages)
+    pattern = _SKILL_TRAIL_RES.get(skill_name)
+    if pattern is None:
+        pattern = re.compile(
+            r"Skill '" + re.escape(skill_name) + r"' loaded"
+            r"|\[Tool result: load_skill\(name=?['\"]?" + re.escape(skill_name)
+        )
+        _SKILL_TRAIL_RES[skill_name] = pattern
+    return any(pattern.search(str(m.get("content", ""))) for m in messages)
 
 
 # W6 work-ledger: the client's action-record window. Mirrors the client
@@ -4041,9 +4228,9 @@ async def chat_proxy(req: ChatRequest, request: Request):
     # Phase-6 flag removal (2026-09-24); the harness can force the
     # unlocked arm per request via editSkill=True.
     _skill_state = {'active': (
-        req.editSkillLoaded or _load_skill_active(req.messages)
+        EDIT_SKILL_NAME in req.loadedSkills or _load_skill_active(req.messages)
     )}
-    # W0 sticky activation: editSkillLoaded is derived by the client from
+    # W0 sticky activation: loadedSkills is derived by the client from
     # this conversation's stored tool trace — the lean replay strips native
     # tool_calls, so the scan above alone re-closes the gate on every
     # follow-up turn. The flag only changes the STARTING state of a request;
@@ -4052,6 +4239,17 @@ async def chat_proxy(req: ChatRequest, request: Request):
     # requiring a live load_skill call (grades tool-call traces directly).
     if edit_capable and getattr(req, 'editSkill', None) is True:
         _skill_state['active'] = True
+    # W4-R2: which knowledge skills are loaded for this conversation?
+    # Client flag OR mechanical trail evidence (text protocol writes its
+    # tool-result marker into content). The seam re-injects the STICKY
+    # ones only (registry law). Knowledge loads NEVER touch _skill_state —
+    # the write gate belongs to config-editing alone.
+    _loaded_knowledge_skills = [
+        name for name in _SKILL_REGISTRY
+        if not _SKILL_REGISTRY[name]["gates_write"]
+        and (name in req.loadedSkills
+             or _skill_load_in_trail(req.messages, name))
+    ]
 
     def _skill_gate_closed() -> bool:
         """True while the session's write tools stay locked behind
@@ -4069,6 +4267,9 @@ async def chat_proxy(req: ChatRequest, request: Request):
                                  # active skill state AND a session.
                                  inject_edit_skill_body=(
                                      edit_capable and _skill_state['active']),
+                                 # W4-R2: sticky knowledge bodies re-ride the
+                                 # trailing seam while their skill is loaded.
+                                 loaded_skills=_loaded_knowledge_skills,
                                  # W6: re-deliver the client's action record
                                  # verbatim (never interpreted here).
                                  work_ledger=req.workLedger,
@@ -4660,18 +4861,14 @@ async def chat_proxy(req: ChatRequest, request: Request):
                         results.append(result_text)
                         continue
                     if edit_capable and tool_call.get('name') == 'load_skill':
-                        # Dispatch by REQUESTED skill name — loading
-                        # printer-memory must never unlock the edit tools
-                        # (only the config-editing load flips the gate).
+                        # Dispatch by REQUESTED skill name through the
+                        # registry — loading a knowledge skill must never
+                        # unlock the edit tools (only the config-editing
+                        # load flips the gate).
                         edit_details = None
                         requested = str(
                             (tool_call.get('arguments') or {}).get('name', ''))
-                        if requested == MEMORY_SKILL_NAME:
-                            result_text = _memory_skill_body()
-                            logger.info(
-                                "Printer-memory skill loaded "
-                                "| requestId=%s", req.requestId or 'none')
-                        elif requested in ('', EDIT_SKILL_NAME):
+                        if requested in ('', EDIT_SKILL_NAME):
                             # Idempotent re-load after activation: body is
                             # already in history; serve it again. First
                             # load: flip the gate and re-resolve tools.
@@ -4687,11 +4884,14 @@ async def chat_proxy(req: ChatRequest, request: Request):
                                     "unlocked mid-request requestId=%s",
                                     req.requestId or 'none')
                             result_text = _edit_skill_body()
+                        elif requested in _SKILL_REGISTRY:
+                            result_text = _SKILL_REGISTRY[requested]["body"]()
+                            logger.info(
+                                "Skill loaded (knowledge) | name=%s "
+                                "requestId=%s", requested,
+                                req.requestId or 'none')
                         else:
-                            result_text = (
-                                f"Unknown skill '{requested}'. Available "
-                                f"skills: '{EDIT_SKILL_NAME}', "
-                                f"'{MEMORY_SKILL_NAME}'.")
+                            result_text = _unknown_skill_text(requested)
                     elif edit_session is not None and tool_call.get("name") in EDIT_TOOL_NAMES:
                         if _skill_gate_closed():
                             # Write tool used WITHOUT loading the skill:
@@ -4996,20 +5196,19 @@ async def chat_proxy(req: ChatRequest, request: Request):
                             # either way; now it just works.
                             requested = str(
                                 (c.get("arguments") or {}).get("name", ""))
-                            if requested == MEMORY_SKILL_NAME:
-                                reprompt_results.append(_memory_skill_body())
-                            elif requested in ("", EDIT_SKILL_NAME):
+                            if requested in ("", EDIT_SKILL_NAME):
                                 _skill_state["active"] = True
                                 logger.info(
                                     "Edit skill activated on re-prompt path"
                                     " | write tools unlocked requestId=%s",
                                     req.requestId or 'none')
                                 reprompt_results.append(_edit_skill_body())
+                            elif requested in _SKILL_REGISTRY:
+                                reprompt_results.append(
+                                    _SKILL_REGISTRY[requested]["body"]())
                             else:
                                 reprompt_results.append(
-                                    f"Unknown skill '{requested}'. Available "
-                                    f"skills: '{EDIT_SKILL_NAME}', "
-                                    f"'{MEMORY_SKILL_NAME}'.")
+                                    _unknown_skill_text(requested))
                         elif edit_session is not None and c.get("name") in EDIT_TOOL_NAMES:
                             if _skill_gate_closed():
                                 reprompt_results.append(

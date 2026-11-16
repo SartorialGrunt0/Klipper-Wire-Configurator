@@ -332,16 +332,6 @@ Rules:
   as unknown comes back UNSTAGED the first time — fix the command (the
   finding names it and may suggest the right one), or re-send the call
   unchanged only if you are sure it comes from a plugin or custom module.
-- Write gcode by Klipper's behavior, not Marlin habits: M109 and M190 DO
-  block inside macros until their target is reached — they are the
-  built-in Set-and-Wait commands (cmd_M109 is cmd_M104 with wait=True).
-  Never emulate them with M104 + TEMPERATURE_WAIT, and never claim M109
-  "does not wait in a macro". M104/M140 are Set-only (Klipper skips the
-  wait only when S=0). simulate_macro's "Expected effect" shows this as
-  "Set" vs "Set and Wait". One real caveat: a user-defined
-  [gcode_macro M109] SHADOWS the built-in — if the printer.cfg defines
-  one, it runs instead, so check its behavior or call its
-  rename_existing name.
 - Applied changes are STAGED for the user's review, not saved. Never tell
   the user a change is saved or active until they approve and save it."""
 

@@ -159,7 +159,7 @@ def test_ledger_rides_after_skill_body_in_the_merged_prompt(install):
     scripted = install([_final_reply()])
     client.post('/ai/chat', json=_chat_payload(
         [{'role': 'user', 'content': 'keep going'}],
-        editSkillLoaded=True,
+        loadedSkills=['config-editing'],
         workLedger=ROWS,
     ))
     system_text = scripted.payloads[0]['messages'][0]['content']

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { hasEditSkillLoad } from '../chatSkillTrace';
+import { loadedSkillNames } from '../chatSkillTrace';
 import type { ChatMessage } from '../../stores/aiStore';
 
 /** Build a ChatMessage carrying an executed tool call trace. */
@@ -11,72 +11,69 @@ const msgWithCalls = (
   toolCalls: calls.map((c) => ({ ...c, output: '' })),
 });
 
-describe('hasEditSkillLoad', () => {
-  it('returns true when load_skill(config-editing) ran', () => {
+describe('loadedSkillNames', () => {
+  it('names config-editing when load_skill(config-editing) ran', () => {
     expect(
-      hasEditSkillLoad([
+      loadedSkillNames([
         msgWithCalls({ name: 'load_skill', arguments: '{"name":"config-editing"}' }),
       ]),
-    ).toBe(true);
+    ).toEqual(['config-editing']);
   });
 
-  it('returns true for an empty-name load_skill (backend parity: empty defaults to the edit skill)', () => {
-    expect(hasEditSkillLoad([msgWithCalls({ name: 'load_skill', arguments: '{}' })])).toBe(true);
+  it('maps an empty-name load_skill to config-editing (backend parity)', () => {
+    expect(loadedSkillNames([msgWithCalls({ name: 'load_skill', arguments: '{}' })])).toEqual([
+      'config-editing',
+    ]);
   });
 
-  it('returns false when only the printer-memory skill was loaded', () => {
+  it('names printer-memory alone — knowledge loads never imply the edit skill', () => {
     expect(
-      hasEditSkillLoad([
+      loadedSkillNames([
         msgWithCalls({ name: 'load_skill', arguments: '{"name":"printer-memory"}' }),
       ]),
-    ).toBe(false);
+    ).toEqual(['printer-memory']);
   });
 
-  it('returns true on a mixed trace where the edit skill loaded among other calls', () => {
+  it('names BOTH skills in a two-skill trace, without duplicates', () => {
     expect(
-      hasEditSkillLoad([
-        msgWithCalls({ name: 'read_user_config', arguments: '{"file":"printer.cfg"}' }),
-        msgWithCalls({ name: 'load_skill', arguments: '{"name":"printer-memory"}' }),
+      loadedSkillNames([
+        msgWithCalls({ name: 'load_skill', arguments: '{"name":"macro-authoring"}' }),
         msgWithCalls({ name: 'load_skill', arguments: '{"name":"config-editing"}' }),
+        msgWithCalls({ name: 'load_skill', arguments: '{"name":"macro-authoring"}' }),
       ]),
-    ).toBe(true);
+    ).toEqual(['macro-authoring', 'config-editing']);
   });
 
-  it('returns false for messages without any toolCalls', () => {
+  it('names macro-authoring alone for a pure knowledge conversation', () => {
     expect(
-      hasEditSkillLoad([
-        { role: 'user', content: 'hello' },
-        { role: 'assistant', content: 'hi' },
+      loadedSkillNames([
+        msgWithCalls({ name: 'simulate_macro', arguments: '{"macro":"BLINK"}' }),
+        msgWithCalls({ name: 'load_skill', arguments: '{"name":"macro-authoring"}' }),
       ]),
-    ).toBe(false);
+    ).toEqual(['macro-authoring']);
   });
 
-  it('returns false for an empty toolCalls array', () => {
-    expect(hasEditSkillLoad([{ role: 'assistant', content: '', toolCalls: [] }])).toBe(false);
+  it('scans mixed traces across multiple messages, not just the last one', () => {
+    const msgs: ChatMessage[] = [
+      msgWithCalls({ name: 'load_skill', arguments: '{"name":"config-editing"}' }),
+      { role: 'user', content: 'now toggle the LED' },
+      msgWithCalls({ name: 'read_user_config', arguments: '{"file":"printer.cfg"}' }),
+      msgWithCalls({ name: 'load_skill', arguments: '{"name":"macro-authoring"}' }),
+    ];
+    expect(loadedSkillNames(msgs)).toEqual(['config-editing', 'macro-authoring']);
   });
 
-  it('returns false when non-skill tools ran but load_skill never did', () => {
-    expect(
-      hasEditSkillLoad([
-        msgWithCalls({ name: 'config_edit', arguments: '{"op":"set_param"}' }),
-        msgWithCalls({ name: 'validate_klipper_config', arguments: '{}' }),
-      ]),
-    ).toBe(false);
+  it('returns [] without any load_skill call', () => {
+    const msgs: ChatMessage[] = [
+      { role: 'user', content: 'hello' },
+      msgWithCalls({ name: 'config_edit', arguments: '{"op":"set_param"}' }),
+    ];
+    expect(loadedSkillNames(msgs)).toEqual([]);
   });
 
   it('treats an unparseable arguments string on load_skill as an edit load (fail-open)', () => {
-    expect(hasEditSkillLoad([msgWithCalls({ name: 'load_skill', arguments: '{"name":"conf' })])).toBe(
-      true,
+    expect(loadedSkillNames([msgWithCalls({ name: 'load_skill', arguments: '{"name":"conf' })])).toEqual(
+      ['config-editing'],
     );
-  });
-
-  it('scans across multiple messages, not just the last one', () => {
-    expect(
-      hasEditSkillLoad([
-        msgWithCalls({ name: 'load_skill', arguments: '{"name":"config-editing"}' }),
-        { role: 'user', content: 'now toggle the LED' },
-        { role: 'assistant', content: 'done' },
-      ]),
-    ).toBe(true);
   });
 });

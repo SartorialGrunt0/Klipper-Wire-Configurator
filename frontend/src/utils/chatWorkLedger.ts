@@ -234,7 +234,7 @@ function parseWriteCall(
  * Derive the ledger rows for one outgoing request.
  *
  * `messages` is the sent trail INCLUDING the current user message (same
- * array W0's `hasEditSkillLoad` reads), so the previous turn's staging
+ * array loadedSkillNames reads), so the previous turn's staging
  * carries turnOffset 1. Returns [] for nothing worth reporting; the
  * caller sends the field only when non-empty.
  */

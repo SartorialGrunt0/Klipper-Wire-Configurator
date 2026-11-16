@@ -24,7 +24,7 @@ import {
   type ApprovalCountdownAnchor,
 } from '../../utils/approvalDiff';
 import { buildChatRequestCredentials } from '../../utils/chatRequestBase';
-import { hasEditSkillLoad } from '../../utils/chatSkillTrace';
+import { loadedSkillNames } from '../../utils/chatSkillTrace';
 import { buildWorkLedger } from '../../utils/chatWorkLedger';
 import { selectUnsavedDrafts } from '../../utils/chatContext';
 import { buildReferenceContext, mentionMatches, nodeToReference, referenceLabel, type ChatReference, type MentionSource } from '../../utils/chatReferences';
@@ -522,7 +522,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           // armament). Derived at send time, conversation-scoped, never a
           // global setting. Both this call and the retry-pipeline calls
           // spread this object, so one derivation covers all.
-          editSkillLoaded: hasEditSkillLoad(newMessages),
+          loadedSkills: loadedSkillNames(newMessages),
           // Conversation work-ledger (W6): what the model staged and how
           // each section ended (kept/undone/failed) — derived fresh from
           // the stored tool trace + the decision store at send time,
