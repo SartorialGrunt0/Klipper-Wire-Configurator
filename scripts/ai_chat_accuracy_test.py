@@ -937,10 +937,18 @@ def build_macro_questions() -> list[TestQuestion]:
                 # are given" alone is a description, and a wrong answer can
                 # phrase it too ("give both, that covers it"). Every arm
                 # below states that only one is allowed.
-                ("regex", r"(?i)(exactly|only) one of|"
+                # r2/r3 (2026-11-15) FALSE-FAILED two more correct answers:
+                # markdown bold broke the literals ("accepts **only one**
+                # of"), and "accepts **one** of ... giving both is
+                # rejected" matched no arm. [\s*] tolerance between tokens;
+                # the reject/refuse arms still keep the "give both, that
+                # covers it" wrong-belief control red.
+                ("regex", r"(?i)(exactly|only)[\s*]+one[\s*]+of|"
+                          r"accepts[\s*]+one[\s*]+of|"
                           r"can.?t (use|specify|set|have|give) both|"
                           r"either .{0,20}SPEED.{0,40}TEMPLATE|"
-                          r"(never|not) both"),
+                          r"(never|not) both|"
+                          r"both[^.\n]{0,30}(reject|refus)"),
                 # (3) it must name what is wrong, not just "there are issues".
                 ("regex", r"RED|SPEED|TEMPLATE|SET_LED|SET_FAN_SPEED"),
                 # Negative controls: the two wrong beliefs.

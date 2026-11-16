@@ -520,6 +520,23 @@ NEGATIVE_CONTROLS += [
            "- **Second, independent failure: `FAN=Chamber_Fan` doesn't exist "
            "in your config.**",
            "pending_edits": [], "tool_calls": []}, _expect_pass=True)),
+    # r2/r3 (2026-11-15) false-fails: correct exclusivity claims whose
+    # wording the arms missed — markdown bold inside the literals, and
+    # the 'accepts one of ... giving both is rejected' shape.
+    ("MACRO-15 r2 trace: bold 'only one of' (must PASS)", "MACRO-15",
+     dict({"response":
+           "Line 1 out of range: RED=2.5 — values must be 0.0 to 1.0.\n"
+           "Line 2: `SET_FAN_SPEED` accepts **only one** of `SPEED` or "
+           "`TEMPLATE` — giving both is refused at runtime.",
+           "pending_edits": [], "tool_calls": []}, _expect_pass=True)),
+    ("MACRO-15 r3 trace: 'accepts one of ... both is rejected' (must PASS)",
+     "MACRO-15",
+     dict({"response":
+           "RED=2.5 is out of range — SET_LED color values must be "
+           "between 0.0 and 1.0.\n"
+           "SET_FAN_SPEED accepts **one** of `SPEED=` or `TEMPLATE=` — "
+           "giving both is rejected by Klipper.",
+           "pending_edits": [], "tool_calls": []}, _expect_pass=True)),
     ("SIMTOOL-07 r1 trace: 'will accept it' (must PASS)", "SIMTOOL-07",
      dict({"response":
            "Yes — Klipper will accept it. I ran the invocation through the "
