@@ -287,6 +287,20 @@ protocol, op shapes, and laws for that session. The gate is model-triggered
 by design — no UI toggle, no intent classifier — and a matching
 `printer-memory` skill guards profile writes.
 
+**Skills are knowledge-class too** (W4-R2): `macro-authoring` carries Klipper
+macro authoring law — the read → `validate_macro` → `simulate_macro` workflow,
+Jinja/params rendering rules (only what the engines enforce), M109/M190
+set-and-wait semantics, enforced pitfalls, and named doc pointers. It loads
+on demand for macro drafting/fixing/explanation and NEVER unlocks write
+tools — `config-editing` is the sole gate-flipper (`_SKILL_REGISTRY` is the
+single source for skill facts). Multiple skills coexist in one conversation:
+the request carries `loadedSkills` (names whose `load_skill` actually ran,
+derived client-side from the stored tool trace), and loaded STICKY skills —
+the edit law and `macro-authoring` — re-inject their bodies at the trailing
+seam so they survive the lean replay; `printer-memory` is one-shot by
+design. Activation is bank-graded by the `SKILL-M` family: macro requests
+must load the skill, plain param edits must not pay for it.
+
 ### Edit operations
 
 `config_write` creates **new files only** (whole-file rewrites of existing
