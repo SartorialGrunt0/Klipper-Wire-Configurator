@@ -918,6 +918,15 @@ export interface AiChatRequest {
    * write tools. Harness `editSkill` (backend-only field) still wins.
    */
   editSkillLoaded?: boolean;
+  /**
+   * W8 pre-flight: the model's REAL context window already probed this
+   * session via /ai/context-window (contextPressureStore). Lets the
+   * backend refuse an obviously-over prompt without a provider round-trip
+   * (llama.cpp hangs instead of erroring there). Omitted/null when the
+   * probe hasn't settled or doesn't match this exact apiUrl+model — the
+   * backend then never blocks (W7 law: silence over guessing).
+   */
+  knownContextWindow?: number | null;
 }
 
 
@@ -953,6 +962,12 @@ export interface AiChatUsage {
 export interface AiChatResponse {
   content?: string;
   error?: string;
+  /**
+   * W8: structured error kind on the /ai/chat error payload. Currently
+   * only 'context_overflow' (pre-flight refusal or mapped provider
+   * context-length error) — the banner keys on THIS, never on the prose.
+   */
+  errorCode?: string;
   stopped?: boolean;
   mcpToolTurns?: number;
   mcpToolNames?: string[];
@@ -1072,6 +1087,19 @@ export class ChatStoppedError extends Error {
   constructor() {
     super('Chat stopped by user.');
     this.name = 'ChatStoppedError';
+  }
+}
+
+/**
+ * W8: thrown when the backend answers the structured context-overflow
+ * error (its own pre-flight refusal, or a provider context-length error it
+ * mapped). Typed so ChatDialog can show the actionable overflow banner
+ * instead of the generic red error text — the two share no prose matching.
+ */
+export class AiContextOverflowError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AiContextOverflowError';
   }
 }
 

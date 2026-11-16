@@ -58,6 +58,7 @@ import ChatInputBar, { type ChatReferenceChip } from './ChatInputBar';
 import ChatEditRows from './ChatEditRows';
 import ChangeSetBar from './ChangeSetBar';
 import ContextPressureBar from './ContextPressureBar';
+import ContextOverflowBar from './ContextOverflowBar';
 import { useContextPressureStore } from '../../stores/contextPressureStore';
 import { useChangeSetStore } from '../../stores/changeSetStore';
 import {
@@ -648,6 +649,17 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         const stopped = stopController.signal.aborted || err instanceof api.ChatStoppedError;
         if (stopped) {
           // User pressed Stop — keep the user message in history, no error banner.
+        } else if (err instanceof api.AiContextOverflowError) {
+          // W8: the conversation is over the model's window (pre-flight
+          // refusal or mapped provider error). The overflow bar carries the
+          // actionable label — the generic red error would restate it less
+          // usefully — and the bar persists until a new/loaded chat resets
+          // the store. Unrecoverable for the toolbar dot; the user message
+          // stays in history so trimming references and resending works.
+          useContextPressureStore.getState().recordOverflow(err.message);
+          if (!openRef.current) {
+            useAiStore.getState().setChatStatus('error');
+          }
         } else {
           const message = err instanceof Error ? err.message : 'Failed to get response.';
           setError(message);
@@ -1472,6 +1484,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           shown only while the latest request sits at ≥70% of the model's
           real window (both modal and docked variants). */}
       <ContextPressureBar />
+      <ContextOverflowBar />
       <ChangeSetBar
         files={ledgerSections}
         onKeepAll={handleKeepAll}

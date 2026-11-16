@@ -83,3 +83,36 @@ describe('contextPressureWindowKey', () => {
     expect(a).toBe(contextPressureWindowKey({ ...CREDENTIALS, apiKey: 'fake-key', apiProvider: 'chatgpt' }));
   });
 });
+
+describe('contextPressureStore — W8 overflow banner', () => {
+  it('starts without an overflow message', () => {
+    expect(useContextPressureStore.getState().overflowMessage).toBeNull();
+  });
+
+  it('recordOverflow sets the backend message; bare call uses the fallback label', () => {
+    useContextPressureStore.getState().recordOverflow('backend says so');
+    expect(useContextPressureStore.getState().overflowMessage).toBe('backend says so');
+    useContextPressureStore.getState().reset();
+    useContextPressureStore.getState().recordOverflow();
+    expect(useContextPressureStore.getState().overflowMessage).toBeTruthy();
+  });
+
+  it('overflow never disturbs the pressure advisory — the two bars are independent', () => {
+    useContextPressureStore.getState().setWindow(256000);
+    useContextPressureStore.getState().recordUsage(200000); // advisory on
+    useContextPressureStore.getState().recordOverflow('over');
+    expect(useContextPressureStore.getState().advisory).toBe(true);
+    expect(useContextPressureStore.getState().overflowMessage).toBe('over');
+    // A later quiet reply clears the advisory but NOT the overflow banner:
+    // overflow is an event outcome, not a rolling measurement.
+    useContextPressureStore.getState().recordUsage(1000);
+    expect(useContextPressureStore.getState().advisory).toBe(false);
+    expect(useContextPressureStore.getState().overflowMessage).toBe('over');
+  });
+
+  it('reset (new chat / loaded conversation) clears the overflow banner', () => {
+    useContextPressureStore.getState().recordOverflow('over');
+    useContextPressureStore.getState().reset();
+    expect(useContextPressureStore.getState().overflowMessage).toBeNull();
+  });
+});

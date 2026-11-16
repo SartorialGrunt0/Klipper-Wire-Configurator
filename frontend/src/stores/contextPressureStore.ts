@@ -14,6 +14,7 @@
 import { create } from 'zustand';
 import { fetchContextWindow, type ContextWindowCredentials } from '../services/api';
 import { evaluateContextPressure } from '../utils/contextPressure';
+import { CONTEXT_OVERFLOW_BANNER_FALLBACK } from '../utils/contextOverflow';
 
 /** Probe cache key: the endpoint + model decide the window; credentials don't. */
 export function contextPressureWindowKey(creds: ContextWindowCredentials): string {
@@ -31,8 +32,19 @@ interface ContextPressureState {
   probing: boolean;
   /** Derived advisory flag — recomputed on every telemetry change. */
   advisory: boolean;
+  /**
+   * W8: the overflow banner's message, set when a send lands on the
+   * backend's structured context_overflow error (pre-flight or mapped
+   * provider failure). Null = no banner. Independent of `advisory` —
+   * overflow is an event outcome, not a rolling measurement, so a later
+   * quiet reply must not clear it; only `reset` (new/loaded chat) does.
+   */
+  overflowMessage: string | null;
   recordUsage: (lastPromptTokens: number | null | undefined) => void;
   setWindow: (window: number | null) => void;
+  /** Raise the overflow banner. Empty/absent message falls back to the
+   *  canonical label (utils/contextOverflow) — the banner is never blank. */
+  recordOverflow: (message?: string | null) => void;
   /** Fetch + store the window for `creds`, at most once per key. Never throws. */
   ensureWindow: (creds: ContextWindowCredentials) => Promise<void>;
   reset: () => void;
@@ -44,6 +56,7 @@ export const useContextPressureStore = create<ContextPressureState>()((set, get)
   probedKey: null,
   probing: false,
   advisory: false,
+  overflowMessage: null,
 
   recordUsage: (lastPromptTokens) =>
     set((state) => {
@@ -69,6 +82,12 @@ export const useContextPressureStore = create<ContextPressureState>()((set, get)
           contextWindow: resolved,
         }).advisory,
       };
+    }),
+
+  recordOverflow: (message) =>
+    set({
+      overflowMessage:
+        typeof message === 'string' && message.trim() ? message : CONTEXT_OVERFLOW_BANNER_FALLBACK,
     }),
 
   ensureWindow: async (creds) => {
@@ -106,5 +125,6 @@ export const useContextPressureStore = create<ContextPressureState>()((set, get)
       probedKey: null,
       probing: false,
       advisory: false,
+      overflowMessage: null,
     }),
 }));

@@ -17,7 +17,8 @@ import type { AiChatRole, PendingConfigEdit } from '../services/api';
 import * as api from '../services/api';
 import { rewriteConfigEqualsSeparators } from '../utils/chatUtils';
 import type { ChatReference } from '../utils/chatReferences';
-import { useContextPressureStore } from '../stores/contextPressureStore';
+import { isContextOverflowErrorCode } from '../utils/contextOverflow';
+import { contextPressureWindowKey, useContextPressureStore } from '../stores/contextPressureStore';
 
 interface ChatRequestBase {
   apiKey: string;
@@ -69,15 +70,38 @@ export function useAssistantDraft() {
       options?: { signal?: AbortSignal },
     ): Promise<AssistantReplyAttempt> => {
       void onMessageUpdate;
-      const response = await api.aiChat({ ...chatRequestBase, messages: conversationMessages }, options?.signal);
+      // W8 pre-flight input: send the window this session already probed —
+      // but ONLY when the probe belongs to this exact apiUrl+model. A stale
+      // probe from a previous model must not block this request; omitting
+      // the field means the backend stays silent (its own W7 law).
+      const pressure = useContextPressureStore.getState();
+      const windowKey = contextPressureWindowKey({
+        apiKey: chatRequestBase.apiKey,
+        apiUrl: chatRequestBase.apiUrl,
+        apiProvider: chatRequestBase.apiProvider,
+        model: chatRequestBase.model,
+      });
+      const knownContextWindow =
+        pressure.probedKey === windowKey ? pressure.contextWindow : null;
+      const response = await api.aiChat(
+        { ...chatRequestBase, knownContextWindow, messages: conversationMessages },
+        options?.signal,
+      );
 
-      if (response.error) throw new Error(response.error);
+      if (response.error) {
+        // W8: the structured overflow code becomes a typed error so the
+        // dialog can show the actionable overflow banner instead of the
+        // generic red text. Prose is never matched.
+        if (isContextOverflowErrorCode(response.errorCode)) {
+          throw new api.AiContextOverflowError(response.error);
+        }
+        throw new Error(response.error);
+      }
 
       // W7 context-pressure telemetry: record the latest request's prompt
       // size and make sure the window for this provider+model has been
       // probed (once per key, fire-and-forget — the advisory self-heals on
       // the NEXT reply if the probe lands after this render).
-      const pressure = useContextPressureStore.getState();
       pressure.recordUsage(response.usage?.lastPromptTokens ?? null);
       void pressure.ensureWindow({
         apiKey: chatRequestBase.apiKey,

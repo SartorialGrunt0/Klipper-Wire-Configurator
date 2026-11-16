@@ -23,6 +23,12 @@ from api.printer_memory_routes import (  # noqa: E402
     is_printer_memory_blank,
 )
 from mcp_server import McpServer
+from services.ai_context_overflow import (
+    CONTEXT_OVERFLOW_ERROR_CODE,
+    CONTEXT_OVERFLOW_MESSAGE,
+    is_context_overflow_error,
+    preflight_overflow,
+)
 from services.ai_draft_apply import extract_config_code_blocks
 from services.ai_edit_tools import (
     APPROVAL_TIMEOUT_SECONDS,
@@ -411,6 +417,14 @@ class ChatRequest(BaseModel):
     # adds nothing at all, so an ordinary turn's prompt is byte-identical to
     # what it was before this feature existed.
     context_references: list[dict] = []
+    # W8 pre-flight: the REAL context window the CLIENT already probed via
+    # /ai/context-window (W7's store), sent per request so the backend can
+    # refuse an obviously-over prompt without spending a provider call —
+    # llama.cpp hangs rather than errors on over-long prompts, and the chat
+    # path has no response timeout by design. Null/omitted = unknown window
+    # = no block (W7 law: silence over guessing); harness and older clients
+    # never send it.
+    knownContextWindow: int | None = None
     # Prose-draft machinery (the fullRewriteGuard request field, server-side
     # draft validation/audit, and the KWC_SERVER_DRAFT_VALIDATION /
     # KWC_POST_APPLY_AUDIT env switches) was removed with the Phase-4 ratchet
@@ -3951,6 +3965,23 @@ async def chat_proxy(req: ChatRequest, request: Request):
     if not _is_local_provider(req.apiProvider, req.apiUrl) and not req.apiKey:
         return {"error": "AI settings not configured. Please configure your API key in settings."}
 
+    # ── W8 pre-flight overflow refusal ──
+    # `messages` here is the FULLY-assembled prompt (system prompt, printer
+    # memory, transcript, references, skill body) — the only place the true
+    # size is known. Refuse an obviously-over request before the provider
+    # round-trip: llama.cpp may hang rather than error (no response timeout
+    # anywhere in this path by design), and even a clean 400 is a wasted
+    # slot on a single-parallelism local router. The window comes from the
+    # client's W7 probe; unknown = silent pass-through, provider decides.
+    overflow = preflight_overflow(messages, req.knownContextWindow)
+    if overflow is not None:
+        logger.warning(
+            "Pre-flight overflow refusal | est=%d window=%d requestId=%s",
+            overflow["estimatedPromptTokens"], overflow["contextWindow"],
+            req.requestId or "none",
+        )
+        return overflow
+
     # Build headers based on provider (shared with the /ai/models proxy).
     headers = _provider_auth_headers(
         req.apiProvider.value if hasattr(req.apiProvider, "value") else req.apiProvider,
@@ -5063,12 +5094,34 @@ async def chat_proxy(req: ChatRequest, request: Request):
             return {"stopped": True}
         except ValueError as e:
             logger.error("API error | %s", str(e))
+            # W8: a provider that answers 200-with-error for a context-length
+            # failure (the _extract_api_error_message ValueError path, incl.
+            # MID-LOOP after tool results grew the prompt) gets the same
+            # structured, actionable error as the pre-flight.
+            if is_context_overflow_error(str(e)):
+                return {"error": CONTEXT_OVERFLOW_MESSAGE, "errorCode": CONTEXT_OVERFLOW_ERROR_CODE}
             return {"error": f"API error: {str(e)}"}
         except httpx.TimeoutException:
             logger.error("Request timed out")
             return {"error": "API request timed out before the model finished responding."}
+        except httpx.HTTPStatusError as e:
+            # W8: context-length 400s must read as an actionable banner,
+            # not "API request failed: request failed" — the informative
+            # text is in the response BODY, which HTTPStatusError's str()
+            # does not carry. Read it before classifying.
+            body = ""
+            try:
+                body = e.response.text if e.response is not None else ""
+            except Exception:  # noqa: BLE001 — classification is advisory only
+                body = ""
+            logger.error("HTTP status error | %s body=%.200s", str(e), body)
+            if is_context_overflow_error(body) or is_context_overflow_error(str(e)):
+                return {"error": CONTEXT_OVERFLOW_MESSAGE, "errorCode": CONTEXT_OVERFLOW_ERROR_CODE}
+            return {"error": f"API request failed: {str(e)}"}
         except httpx.HTTPError as e:
             logger.error("HTTP error | %s", str(e))
+            if is_context_overflow_error(str(e)):
+                return {"error": CONTEXT_OVERFLOW_MESSAGE, "errorCode": CONTEXT_OVERFLOW_ERROR_CODE}
             return {"error": f"API request failed: {str(e)}"}
         finally:
             if req.requestId:
