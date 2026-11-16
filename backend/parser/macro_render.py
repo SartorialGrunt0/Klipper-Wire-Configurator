@@ -272,6 +272,45 @@ class _StateNode:
     def __hash__(self): return hash("<unknown>")
 
 
+# Status paths Klipper exposes as gcode.Coord (pinned checkout):
+#   toolhead.position (toolhead.py:512); gcode_move.position /
+#   gcode_position / homing_origin (gcode_move.py:110-112);
+#   motion_report.live_position (motion_report.py:261).
+_COORD_STATE_PATHS = frozenset({
+    "toolhead.position",
+    "gcode_move.position",
+    "gcode_move.gcode_position",
+    "gcode_move.homing_origin",
+    "motion_report.live_position",
+})
+
+
+class _Coord(tuple):
+    """Mirror of Klipper's gcode.Coord (klippy/gcode.py:12-21): tuple
+    subclass; values shorter than 4 pad with 0; x/y/z/e are positional
+    properties. Normalizes declared position state so {pos.x} renders
+    exactly what real Klipper would render."""
+    __slots__ = ()
+
+    def __new__(cls, t):
+        t = tuple(t)
+        if len(t) < 4:
+            t = t + (0,) * (4 - len(t))
+        return tuple.__new__(cls, t)
+
+    @property
+    def x(self): return self[0]
+
+    @property
+    def y(self): return self[1]
+
+    @property
+    def z(self): return self[2]
+
+    @property
+    def e(self): return self[3]
+
+
 def _nest_state(printer_state: dict) -> "_StateNode":
     """Fold dotted-path scenario keys into a lookup tree
     ({'toolhead.homed_axes': 'xyz'} → toolhead → homed_axes)."""
@@ -287,6 +326,16 @@ def _nest_state(printer_state: dict) -> "_StateNode":
                 node[part] = nxt
             node = nxt
         if parts:
+            if ".".join(parts) in _COORD_STATE_PATHS and \
+                    isinstance(value, (list, tuple)) and \
+                    not isinstance(value, _Coord):
+                # Klipper serves these status paths as gcode.Coord — a
+                # tuple subclass with x/y/z/e properties (gcode.py:12-21).
+                # A declared Moonraker-shaped list must answer attribute
+                # access the same way, or the simulator manufactures a
+                # defect for {pos.x} that real Klipper does not have
+                # (MACRO-14 r3, 2026-11-15).
+                value = _Coord(value)
             node[parts[-1]] = value
     return _StateNode(root)
 
