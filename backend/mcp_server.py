@@ -3680,6 +3680,10 @@ class McpServer:
         "recursed, and motion, heating, and delays do not execute "
         "(waiting commands appear under 'Expected effect' as Set / Set "
         "and Wait / blocking waits, but nothing actually pauses). "
+        "The effect list assumes no line errors: on the real printer a "
+        "refused line — bad parameter, unhomed move, out-of-range target, "
+        "cold extrude — ABORTS the macro; later lines never run "
+        "(virtual printer, 2026-11-15). "
         "Anything not declared in a scenario stayed <unknown>: never "
         "present a rendered value as a printer fact.")
 
@@ -4337,7 +4341,10 @@ class McpServer:
             elif token == "M117":
                 rest = text.split(None, 1)
                 if len(rest) > 1:
-                    out.append(f"console message: {rest[1]}")
+                    # NOT a console line (virtual printer 2026-11-15): M117
+                    # sets display_status.message and prints nothing to
+                    # gcode_store — RESPOND below is the console one.
+                    out.append(f"display message: {rest[1]}")
             elif token == "RESPOND" and params.get("MSG"):
                 out.append("console message: "
                            + params["MSG"].strip('"'))

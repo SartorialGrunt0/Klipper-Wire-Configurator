@@ -278,7 +278,7 @@ def test_expected_effect_reports_commanded_outcomes():
     assert "part-cooling fan ([fan]) commanded to 100%" in out
     assert "hotend target 200C" in out
     assert "LED 'stealthburner' set to RED=1 GREEN=0 BLUE=0.2" in out
-    assert "console message: party on" in out
+    assert "display message: party on" in out
 
 
 def test_expected_effect_maps_fan_generic_speed_to_percent():
@@ -287,6 +287,17 @@ def test_expected_effect_maps_fan_generic_speed_to_percent():
             "  SET_FAN_SPEED FAN=Aux_Fan SPEED=0.5\n")
     out = _call(macro_text=text)
     assert "fan 'Aux_Fan' commanded to 50%" in out
+
+
+def test_limits_caveat_states_a_refused_line_aborts_the_macro():
+    """Measured on the virtual printer 2026-11-15 (rig/REPORT.md, C1-C3):
+    every refusal on the real printer — unhomed move, out-of-range target,
+    cold extrude, '=' params — ABORTS the remaining macro body; later
+    lines never run. The effect list implicitly assumes no line errors,
+    so the limits text must say so."""
+    out = _call(macro_text="[gcode_macro T]\ngcode:\n  M104 S200\n")
+    assert "refused line" in out
+    assert "ABORTS" in out
 
 
 def test_expected_effect_distinguishes_set_from_set_and_wait():
