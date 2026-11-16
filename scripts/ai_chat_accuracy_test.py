@@ -2809,6 +2809,105 @@ def _bulk_inventory(text: str) -> tuple[list[str], list[str], list[str]]:
     return headers, annotatable, macros
 
 
+def build_macro_skill_questions() -> list[TestQuestion]:
+    """SKILL-M family (W4-R2, 2026-11-16): activation detector for the
+    macro-authoring knowledge skill (Cliff: "the accuracy test should tell
+    us if the models aren't reading the skill"). Grades the executed
+    tool-call trace at NAME level (skill_loaded / skill_not_loaded take a
+    skill name):
+
+      M01 draft-a-macro question      -> macro-authoring loaded
+      M02 save-a-macro edit           -> BOTH macro-authoring and
+                                         config-editing loaded (the
+                                         two-skill flow)
+      M03 runtime-behavior question   -> macro-authoring loaded AND the
+                                         simulation consulted
+      MN01 plain param edit           -> config-editing yes, macro NOT
+                                         loaded (the new FP class: paying
+                                         macro rules on a non-macro edit)
+      MN02 non-macro question         -> no skill load at all
+    """
+    printer_cfg = _cfg_context("printer.cfg")
+    return [
+        TestQuestion(
+            qid="SKILL-M01",
+            title="Macro skill: draft-only request loads macro-authoring",
+            text=("Draft a macro LED_BLINK that toggles the casing_light "
+                  "pin for 3 seconds. Just show me the text to read over — "
+                  "do NOT change my files."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=True,
+            criteria=(("skill_loaded", "macro-authoring"),),
+            edit_criteria=(
+                ("skill_loaded", "macro-authoring"),
+                ("not_staged_any", ""),
+            ),
+        ),
+        TestQuestion(
+            qid="SKILL-M02",
+            title="Macro skill: save-a-macro loads BOTH skills",
+            text=("Create a macro FAN_PURGE in printer.cfg that runs the "
+                  "part fan at full for 10 seconds then off, and save it."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=True,
+            criteria=(
+                ("skill_loaded", "macro-authoring"),
+                ("skill_loaded", "config-editing"),
+            ),
+            edit_criteria=(
+                ("skill_loaded", "macro-authoring"),
+                ("skill_loaded", "config-editing"),
+                ("staged_header", "printer.cfg::gcode_macro FAN_PURGE"),
+            ),
+        ),
+        TestQuestion(
+            qid="SKILL-M03",
+            title="Macro skill: runtime question consults the simulation",
+            text=("Here is a macro I'm considering:\n"
+                  "[gcode_macro HOT_PARK]\n"
+                  "gcode:\n"
+                  "    G1 Z{params.Z|float} F300\n"
+                  "If I call HOT_PARK with no Z argument, what exactly "
+                  "happens?"),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=True,
+            expected_tools=("simulate_macro",),
+            require_tool=True,
+            criteria=(("skill_loaded", "macro-authoring"),),
+            edit_criteria=(
+                ("skill_loaded", "macro-authoring"),
+                ("not_staged_any", ""),
+            ),
+        ),
+        TestQuestion(
+            qid="SKILL-MN01",
+            title="Macro skill FP: plain param edit must not load macros",
+            text="In printer.cfg change the [printer] max_velocity to 250.",
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=True,  # config-editing IS expected here
+            criteria=(("skill_not_loaded", "macro-authoring"),),
+            edit_criteria=(
+                ("staged_param_ci", "printer.cfg::max_velocity: 250"),
+                ("skill_not_loaded", "macro-authoring"),
+            ),
+        ),
+        TestQuestion(
+            qid="SKILL-MN02",
+            title="Macro skill FP: non-macro question needs no skill",
+            text=("What does square_corner_velocity actually control during "
+                  "a print?"),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=False,
+            criteria=(("skill_not_loaded", ""),),
+        ),
+    ]
+
+
 def build_bulk_questions() -> list[TestQuestion]:
     """BULK family (large-edit rework plan Step 5, 2026-10-17).
 
@@ -3920,6 +4019,22 @@ def extract_printer_memory(content: str) -> tuple[str, dict | None]:
     return block, data
 
 
+def _skill_arg_name(call: dict) -> str:
+    """The skill NAME a load_skill tool call asked for ('' arg = the
+    legacy config-editing convention; unparseable args likewise fail-open
+    to config-editing, mirroring chatSkillTrace)."""
+    args = call.get("arguments")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except (json.JSONDecodeError, ValueError):
+            args = {}
+    if not isinstance(args, dict):
+        args = {}
+    name = str(args.get("name") or "")
+    return name or "config-editing"
+
+
 def _entry_created(entry: dict) -> bool:
     """Did this staged entry CREATE its file?
 
@@ -4053,14 +4168,25 @@ def criterion_ok(kind: str, value: str, content: str,
     if kind == "staged_file":
         return any(e.get("file") == value for e in pending_edits or [])
     if kind == "skill_loaded":
-        # Phase 3 trace criterion: load_skill executed (arguments ignored).
-        # Activation is ALSO covered by expected_tools for True-labelled
-        # questions; this kind exists for paired assertions.
-        return any(c.get("name") == "load_skill" for c in tool_calls or [])
+        # Phase 3 trace criterion: load_skill executed. W4-R2: when VALUE
+        # names a skill, the load_skill call's `name` argument must match
+        # ('' arg = config-editing, the legacy convention). Empty value =
+        # any load_skill (paired activation assertions keep working).
+        if not value:
+            return any(c.get("name") == "load_skill" for c in tool_calls or [])
+        return any(c.get("name") == "load_skill"
+                   and _skill_arg_name(c) == value
+                   for c in tool_calls or [])
     if kind == "skill_not_loaded":
-        # Negative control: a non-edit request must not pay for an
-        # irrelevant edit-law load (false-positive rate denominator).
-        return not any(c.get("name") == "load_skill" for c in tool_calls or [])
+        # Negative control. W4-R2: VALUE may name a skill — the new FP
+        # class is a MACRO load paid on a plain edit (config-editing IS
+        # expected there, so the any-load kind cannot express it).
+        if not value:
+            return not any(c.get("name") == "load_skill"
+                           for c in tool_calls or [])
+        return not any(c.get("name") == "load_skill"
+                       and _skill_arg_name(c) == value
+                       for c in tool_calls or [])
     if kind == "staged_new_file":
         # `created` is the engine's own word (config_write, or a
         # move_section whose to_file was new) — an op-name test misses the
@@ -5149,7 +5275,7 @@ def main() -> int:
                              "printer memory, blank it, run MEMORY-01..03, then restore it")
     args = parser.parse_args()
 
-    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions() + build_edit_tool_questions() + build_rename_questions() + build_comment_questions() + build_skill_gate_questions() + build_tool_coverage_questions() + build_ack_guard_questions() + build_bulk_questions() + build_simtool_questions()
+    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions() + build_edit_tool_questions() + build_rename_questions() + build_comment_questions() + build_skill_gate_questions() + build_tool_coverage_questions() + build_ack_guard_questions() + build_bulk_questions() + build_simtool_questions() + build_macro_skill_questions()
     if args.include_memory:
         questions += build_memory_questions()
     if args.list_questions:
