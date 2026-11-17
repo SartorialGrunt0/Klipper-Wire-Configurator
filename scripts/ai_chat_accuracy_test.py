@@ -988,7 +988,16 @@ def build_macro_questions() -> list[TestQuestion]:
         # before judging — verified against led.py:76-78 bounds.
         TestQuestion(
             qid="MACRO-17",
-            title="Macros: value computed in-template is out of range",
+            title="Macros: literal color values beyond SET_LED's bound",
+            # Cliff re-cut 2026-11-16: the original carried `{% set level =
+            # 1.8 %}` and the value proved uniquely ambiguous — 27b read it
+            # as "18%" and 'fixed' it to 0.18 while honestly believing no
+            # runtime failure existed. A literal RED=1.8 inside the command
+            # keeps the same test (resolve the rendered line, apply led.py's
+            # 0..1 bound) without the typo-reinterpretation escape hatch.
+            # Note: now MACRO-15's single-defect literal sibling (15 keeps
+            # the XOR defect); distinct answer shape still exercised — here
+            # the ONLY finding is the bound.
             text=("I wrote this GLOW macro to set my chamber lights to a "
                   "fixed level. Will it run as written? Tell me exactly "
                   "what happens when I call it:\n\n"
@@ -996,16 +1005,15 @@ def build_macro_questions() -> list[TestQuestion]:
                   "[gcode_macro GLOW]\n"
                   "description: glow at a fixed level\n"
                   "gcode:\n"
-                  "    {% set level = 1.8 %}\n"
-                  "    SET_LED LED=Chamber_LEDs RED={level} GREEN={level} "
-                  "BLUE={level}\n"
+                  "    SET_LED LED=Chamber_LEDs RED=1.8 GREEN=1.8 "
+                  "BLUE=1.8\n"
                   "```"),
             expected_tools=("validate_macro", "simulate_macro"),
             require_tool=False,
             criteria=(
-                # The literal 1.8 is a Jinja constant, not a param and not
-                # on the rendered line as written — the answer has to
-                # resolve `level` and then apply led.py's 0..1 bound.
+                # Cliff re-cut (above): the 1.8 is now a literal ON the
+                # command line — the answer must still run the tools and
+                # apply led.py's 0..1 bound to the rendered line.
                 # Silent-fix shape (Cliff ruling 2026-11-16): an answer
                 # that STATES the constant was corrected/fixed AND cites
                 # the corrected 0.8 AND cites the valid-range/spec bound
