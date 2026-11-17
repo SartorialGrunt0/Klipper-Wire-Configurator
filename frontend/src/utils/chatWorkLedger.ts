@@ -142,8 +142,18 @@ function parseReadCall(
       }
     }
   }
-  const evSections = sections.length > 0
-    ? sections.map((section) => ({ section, failed: false, touched: true }))
+  // C-03 (PR #43): a section only counts as touched when its header is
+  // actually IN THE RETURNED CONTENT. The call arguments echo a requested
+  // section that does not exist in the file ('read_user_config' answers
+  // 'section not found' style payloads WITHOUT that header), and the old
+  // code trusted the arguments — so the ledger told the model it grounded
+  // on a section that was never returned. Requested-but-absent sections
+  // drop; if none survive, fall back to the file-level row (the file WAS
+  // genuinely read, no section claimed).
+  const grounded = sections.filter((section) =>
+    new RegExp(`^\\[\\s*${section.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*(?:\\]|#)`, "im").test(output));
+  const evSections = grounded.length > 0
+    ? grounded.map((section) => ({ section, failed: false, touched: true }))
     : [{ section: '', failed: false, touched: true }];
   // Batch reads succeed per file; only files whose header is present
   // touch (one event each — never a joined pseudo-file).
