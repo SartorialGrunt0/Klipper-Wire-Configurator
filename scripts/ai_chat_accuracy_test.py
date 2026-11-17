@@ -1380,9 +1380,18 @@ def build_simtool_questions() -> list[TestQuestion]:
                  "simulate_macro::outside the range|maximum of 1"),
                 # The answer must land on the refusal, not on brightness
                 # advice. Either the simulator's wording or the human
-                # outcome counts.
+                # outcome counts. W4-R2 reruns (2026-11-16): the answer was
+                # right 4/4 but phrased "will refuse" (active), "are
+                # rejected" (bare passive), "won't work" — none matched the
+                # old "will (be )?refused" spelling. Accept natural tenses;
+                # "fail" is admitted only in the affirmative-at-runtime form
+                # because "won't fail" ASSERTS success and must never flip
+                # this check green.
                 ("regex", r"(?i)out of range|outside the range|"
-                          r"max(imum)? of 1|will (be )?(refused|rejected|error)"),
+                          r"max(imum)? of 1|won'?t (actually )?work|"
+                          r"will (not|n'?t) (actually )?work|doesn'?t work|"
+                          r"(will |would |is |are |gets? )?(be )?"
+                          r"(refus\w*|reject\w*)|fail(s|ed|ing)? at runtime"),
                 ("not_contains", "will work fine"),
             ),
         ),
@@ -2587,15 +2596,25 @@ def build_skill_gate_questions() -> list[TestQuestion]:
         ),
         TestQuestion(
             qid="SKILL-N04",
-            title="Skill: discuss-a-draft must NOT load",
+            title="Skill: discuss-a-draft must NOT load the edit skill",
             text=("Draft me a PARK_X macro gcode body I can read over. "
                   "Don't add it to my config — I just want to see it here."),
             context_files=printer_cfg,
             edit_tools=True,
-            skill_expected=False,
+            # W4-R2 (2026-11-16): the zero-skill law is dead — macro
+            # drafting is macro-authoring's home turf, and SKILL-M01
+            # asserts the opposite expectation for an isomorphic request
+            # (4/4 the model loads macro-authoring here). The graded signal
+            # moved into the named criterion; the any-load gate label would
+            # now report correct macro loads as FPs, so the label is gone.
+            skill_expected=None,
             require_tool=False,
             criteria=(
-                ("skill_not_loaded", ""),
+                # Anti-edit-mode intent survives: entering EDIT mode to
+                # "discuss a draft" is the original miss this qid was built
+                # for. W4-R2 reruns confirmed loading macro-authoring is
+                # what a correct model does; loading config-editing is not.
+                ("skill_not_loaded", "config-editing"),
                 # not_staged_any, NOT `not_staged printer.cfg`: the request
                 # says "don't add it to MY CONFIG", so staging a brand-new
                 # file is equally a miss. The file-scoped kind went green for

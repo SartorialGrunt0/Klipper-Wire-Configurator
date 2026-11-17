@@ -484,6 +484,52 @@ NEGATIVE_CONTROLS += [
            "pending_edits": [],
            "tool_calls": [{"name": "simulate_macro",
                            "output": _SIM_RED2_OUTPUT}]}, _expect_pass=True)),
+    # W4-R2 rerun phrasings (2026-11-16): the refusal lands in active voice
+    # ("will refuse"), bare passive ("are rejected"), or plain "won't
+    # work" — all must pass; the NEGATIVE discipline is that a success
+    # claim stays red even with "fail" in the sentence ("won't fail"
+    # asserts success — the widened regex must never match it).
+    ("SIMTOOL-06: active-voice refusal 'will refuse' (must PASS)",
+     "SIMTOOL-06",
+     dict({"response": "No — it won't work. Running it with R=2 renders "
+                       "SET_LED LED=Chamber_LEDs RED=2 GREEN=2 BLUE=2, and "
+                       "Klipper will refuse that command at runtime: RED, "
+                       "GREEN, and BLUE must each be <= 1.0. The maximum "
+                       "brightness is R=1.",
+           "pending_edits": [],
+           "tool_calls": [{"name": "simulate_macro",
+                           "output": _SIM_RED2_OUTPUT}]}, _expect_pass=True)),
+    ("SIMTOOL-06: bare passive 'are rejected' (must PASS)", "SIMTOOL-06",
+     dict({"response": "No — it will not work. The simulation shows "
+                       "L1: SET_LED LED=Chamber_LEDs RED=2 GREEN=2 BLUE=2. "
+                       "All three color arguments are rejected: SET_LED's "
+                       "RED/GREEN/BLUE take 0..1.",
+           "pending_edits": [],
+           "tool_calls": [{"name": "simulate_macro",
+                           "output": _SIM_RED2_OUTPUT}]}, _expect_pass=True)),
+    ("SIMTOOL-06: success claim 'it won't fail' (must FAIL)", "SIMTOOL-06",
+     {"response": "Go ahead — the run completed cleanly, it won't fail. "
+                  "The LEDs will shine at the level you asked for.",
+      "pending_edits": [],
+      "tool_calls": [{"name": "simulate_macro",
+                      "output": _SIM_RED2_OUTPUT}]}),
+    # SKILL-N04 post-W4-R2 law: macro-authoring alone is the CORRECT load
+    # for a discuss-a-draft request; entering the EDIT skill is the miss.
+    ("SKILL-N04: macro-authoring loaded, nothing staged (must PASS)",
+     "SKILL-N04",
+     dict({"response": "Here's a PARK_X body to read over: "
+                       "[gcode_macro PARK_X] gcode: G91; G1 X0 F3000; G90",
+           "pending_edits": [],
+           "tool_calls": [{"name": "load_skill",
+                           "arguments": '{"name": "macro-authoring"}'}]},
+          _expect_pass=True)),
+    ("SKILL-N04: config-editing loaded (must FAIL)", "SKILL-N04",
+     {"response": "I've drafted a PARK_X body for you to read.",
+      "pending_edits": [],
+      "tool_calls": [{"name": "load_skill",
+                      "arguments": '{"name": "macro-authoring"}'},
+                     {"name": "load_skill",
+                      "arguments": '{"name": "config-editing"}'}]}),
     # SIMTOOL-07 — cry-wolf: the hotend ceiling is config-derived, so the
     # simulator must not invent a bound and the answer must not claim one.
     ("SIMTOOL-07: invents an out-of-range refusal", "SIMTOOL-07",
