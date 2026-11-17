@@ -3396,6 +3396,105 @@ def _build_executed_tool_call(tool_call: dict, result_text: str) -> dict:
     }
 
 
+# ── Pre-edit verdict guard (2026-11-17) ───────────────────────────────
+# MACRO-17 measured the same miss through four prompt levers: the model
+# simulates the as-written text, receives the tool's ERROR findings,
+# stages a fix, re-simulates CLEAN — and the final answer reports ONLY
+# the post-fix world. The as-written verdict exists in the request's own
+# tool trace but never reaches the answer. The guard is trace-mechanical
+# (intent law clean — it parses TOOL outputs and the write trace, never
+# the model's prose for claims): pre-write simulate_macro with ERROR
+# findings + a later staged write to the SAME [gcode_macro ...] + a
+# final answer quoting NONE of the failing values the tool reported.
+_SIM_HEADER_MACRO_RE = re.compile(r"^# simulate_macro gcode_macro (\S+)", re.M)
+_SIM_ERROR_LINE_RE = re.compile(r"^\s*-\s*ERROR:\s*(.+?)\s*$", re.M)
+_FAILING_VALUE_TOKEN_RE = re.compile(r"[A-Z][A-Z_0-9]*=([0-9]+(?:\.[0-9]+)?)")
+# A failing value only counts as REPORTED when the same sentence carries a
+# refusal verb. m17guard r7/r9 proved bare token presence is too weak:
+# "now uses RED=1.0 ... instead of `1.8`" is a changelog mention — the
+# as-written failure is still never stated.
+_VERDICT_REFUSAL_RE = re.compile(
+    r"(?i)outside|out of range|reject|refus|fail|error|unable|abort|"
+    r"exceed|invalid|does not run|won'?t run|will not run")
+
+
+def _verdict_reported(final_content: str, tokens: set) -> bool:
+    """True when some failing value appears inside a refusal-worded sentence."""
+    normalized = " ".join((final_content or "").split())
+    spans = [(m.start(), m.end())
+             for m in re.finditer(r"[^.!?\n]+[.!?]?", normalized)]
+    for token in tokens:
+        for m in re.finditer(re.escape(token), normalized):
+            span = next(((a, b) for a, b in spans if a <= m.start() < b),
+                        (m.start(), m.end()))
+            if _VERDICT_REFUSAL_RE.search(normalized[span[0]:span[1]]):
+                return True
+    return False
+
+
+def _pre_write_verdict_miss(
+    executed_tool_calls: list, final_content: str
+) -> str | None:
+    """Nudge text when the answer silently replaces the as-written verdict.
+
+    Pure over the request's executed-tool-call trace. Returns None (fail
+    safe — no re-prompt) unless: (1) a simulate_macro BEFORE the first
+    write emitted ERROR findings; (2) a write at/after that point touches
+    the same [gcode_macro <name>]; (3) the answer never reports the
+    refusal — no failing value appears in any refusal-worded sentence
+    (_verdict_reported).
+    """
+    first_write_idx = next(
+        (i for i, c in enumerate(executed_tool_calls or [])
+         if c.get("name") in EDIT_TOOL_NAMES),
+        None,
+    )
+    if first_write_idx is None or not (final_content or "").strip():
+        return None
+    normalized = " ".join((final_content or "").split())
+    fails: list[tuple[str, str, set]] = []
+    for call in executed_tool_calls[:first_write_idx]:
+        if call.get("name") != "simulate_macro":
+            continue
+        output = str(call.get("output") or "")
+        header = _SIM_HEADER_MACRO_RE.search(output)
+        errors = _SIM_ERROR_LINE_RE.findall(output)
+        if not header or not errors:
+            continue
+        tokens = set()
+        for line in errors:
+            tokens.update(_FAILING_VALUE_TOKEN_RE.findall(line))
+        if tokens:
+            fails.append((header.group(1), errors[0], tokens))
+    if not fails:
+        return None
+    touched = None
+    for call in executed_tool_calls[first_write_idx:]:
+        if call.get("name") not in EDIT_TOOL_NAMES:
+            continue
+        args_text = str(call.get("arguments") or "")
+        for macro, first_error, tokens in fails:
+            if f"gcode_macro {macro}" in args_text:
+                touched = (macro, first_error, tokens)
+                break
+        if touched:
+            break
+    if touched is None:
+        return None
+    _macro, first_error, tokens = touched
+    if _verdict_reported(normalized, tokens):
+        return None
+    return (
+        "Your report describes the FIXED macro, but the question was "
+        "whether the text as written works. Your own pre-edit "
+        f"simulation found: {first_error} "
+        "Do not call any more tools and do not change anything else. "
+        "Re-answer the original question in prose — the first sentence "
+        "must be the as-written verdict quoting that simulation finding, "
+        "before any summary of the fix."
+    )
+
+
 def _build_tool_result_message(tool_call: dict, result_text: str) -> str:
     """Build a user-role message containing the tool result for re-prompting."""
     name = tool_call.get("name", "unknown")
@@ -4402,6 +4501,9 @@ async def chat_proxy(req: ChatRequest, request: Request):
             # Re-prompts issued to correct a malformed ```tool fence (see the
             # malformed tool-call guard in the loop below).
             malformed_reprompts = 0
+            # Pre-edit verdict guard re-prompts (cap 1 — ack-guard style):
+            # simulate-then-silently-fix amnesia, see _pre_write_verdict_miss.
+            verdict_reprompts = 0
             # Mid-loop steers actually injected (2026-10-02) — the count
             # keys the provider log context and the response payload.
             steers_applied = 0
@@ -4727,6 +4829,58 @@ async def chat_proxy(req: ChatRequest, request: Request):
                             nudge_usage["context"] = f"edit-nudge-{edit_nudges}"
                             usage_events.append(nudge_usage)
                         continue
+                    # ── Pre-edit verdict guard (2026-11-17) ──
+                    # simulate -> silently fix -> answer the POST-FIX world:
+                    # the trace shows the pre-write simulation REFUSED the
+                    # as-written text, a later write staged a fix to the
+                    # same macro, and the answer quotes none of the failing
+                    # values the tool reported. Re-prompt once (ack-guard
+                    # cap style) to answer the question that was asked.
+                    # Trace-mechanical: tool outputs + write trace only,
+                    # never prose-claim parsing (intent law). Placed AFTER
+                    # the edit-prose nudge — that guard owns inert drafts;
+                    # this one owns verdict amnesia in an otherwise clean
+                    # staged-success answer.
+                    if (verdict_reprompts < 1
+                            and executed_tool_calls
+                            and current_content.strip()):
+                        verdict_miss = _pre_write_verdict_miss(
+                            executed_tool_calls, current_content)
+                        if verdict_miss is not None:
+                            verdict_reprompts += 1
+                            logger.info(
+                                "Verdict guard | pre-write sim refusal + "
+                                "silently-fixed answer | nudging once | "
+                                "turn=%d preview=%s",
+                                tool_turns,
+                                current_content[:120].replace("\n", " "),
+                            )
+                            clean_prior = MCP_TOOL_BLOCK_RE.sub(
+                                "", current_content).strip()
+                            if clean_prior:
+                                current_messages.append(
+                                    {"role": "assistant", "content": clean_prior})
+                            current_messages.append(
+                                {"role": "user", "content": verdict_miss})
+                            verdict_payload = _build_provider_payload(
+                                req.apiProvider, current_messages, req.model,
+                                max_tokens=req.maxTokens,
+                                temperature=req.temperature,
+                                tools=native_tools,
+                                merge_system=req.mergeSystemMessages,
+                            )
+                            current_content, current_data = await _query_provider(
+                                client, req.apiUrl, headers, verdict_payload,
+                                req.apiProvider,
+                                logger_context=f"verdict-reprompt-{verdict_reprompts}",
+                                stop_event=stop_event,
+                            )
+                            verdict_usage = _extract_usage_info(current_data)
+                            if verdict_usage:
+                                verdict_usage["context"] = (
+                                    f"verdict-reprompt-{verdict_reprompts}")
+                                usage_events.append(verdict_usage)
+                            continue
                     # ── Ack guard (Phase 6.5.2) ──
                     # The reply ENDS on a promise to act ("I'll now apply
                     # that to your config") with NO tool call, on an edit
