@@ -123,6 +123,12 @@ SIM_FINDING_CODES = frozenset({
     "macro_jinja_syntax",
     "macro_mux_target_unknown",
     "macro_param_enum_invalid",
+    # PR #43 warning: the engine emits these too — missing from the set,
+    # a future warning/info arm would leak past the human boundary as an
+    # ordinary advisory channel member. Both are error-severity today,
+    # so this is zero-behavior hardening (consumption-split completeness).
+    "macro_param_missing_choice",
+    "macro_param_out_of_bounds",
 })
 
 
@@ -968,6 +974,11 @@ def _is_traditional_gcode(token: str) -> bool:
             and token[1:].isdigit())
 
 
+# gcode.py:198 `args_r` verbatim (GCodeCommand.args_r): the only correct
+# tokenizer for traditional letter-parameter commands.
+_KLIPPER_ARGS_R = re.compile("([A-Z_]+|[A-Z*])")
+
+
 def _check_rendered_line(text: str, registry: dict, variant: int,
                          source_line: int | None = None,
                          sections: "frozenset[str] | None" = None
@@ -1040,8 +1051,17 @@ def _check_rendered_line(text: str, registry: dict, variant: int,
         # IN the value here so the type checks below fail it exactly
         # like Klipper does. (The extended branch is the only place
         # 'KEY=value' grammar exists.)
-        for tok in text.split()[1:]:
-            present[tok[0].upper()] = tok[1:]
+        # Klipper parses the WHOLE line with args_r (gcode.py:198-215:
+        # split on '([A-Z_]+|[A-Z*])', pair letter-run -> following
+        # chunk, .strip() only whitespace). Whitespace between letter
+        # and value is legal: 'M106 S 100' runs with S='100'. A naive
+        # per-whitespace-token split recorded S='' there and flagged a
+        # save-gate error on a config Klipper executes (PR #43 review
+        # A-01). '=' stays inside the value exactly like the old shape
+        # ('M104 S=0' -> value '=0' -> float() fails, live on .164).
+        uparts = _KLIPPER_ARGS_R.split(text.upper())
+        for i in range(1, len(uparts) - 1, 2):
+            present[uparts[i]] = uparts[i + 1].strip()
     else:
         lexer = shlex.shlex(text[len(token):], posix=True)
         lexer.whitespace_split = True
@@ -1148,8 +1168,10 @@ def _check_rendered_line(text: str, registry: dict, variant: int,
                     "error", "macro_param_unparseable",
                     f"SET_GCODE_VARIABLE VALUE={stored!r} is not a Python "
                     "literal — Klipper parses VALUE with literal_eval and "
-                    "fails the call at run time (quote strings: "
-                    "VALUE='on').", variant=variant))
+                    "fails the call at run time (quote strings with nested "
+                    "quotes: VALUE=\"'on'\" — plain VALUE='on' has the "
+                    "quotes stripped by the command tokenizer and fails "
+                    "again).", variant=variant))
     findings.extend(_either_of_findings(token, present, variant, source_line))
     findings.extend(_enum_findings(token, present, variant, source_line))
     findings.extend(_mux_target_findings(token, entry, present, sections,
@@ -1562,7 +1584,8 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
                             invocation_given: bool = True,
                             sections: "frozenset[str] | None" = None
                             ) -> MacroRenderResult:
-    from parser.validator import _MACRO_JINJA_ENV, _strip_inline_comments
+    from parser.validator import (_MACRO_JINJA_ENV, _compile_macro_template,
+                                  _strip_inline_comments)
 
     params = _coerce_str_map(params)
     variables = variables or {}
@@ -1571,10 +1594,28 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
     stripped = _strip_inline_comments(body)
     if not stripped.strip():
         return MacroRenderResult()
+
+    # PR #43 A-03: the fail-open / refuse-early paths below return BEFORE
+    # the render pipeline ever compiles the body. Klipper compiles the
+    # whole body at load — so run the same compile check here first, or a
+    # genuinely non-compiling body goes silent on the tool surface
+    # ("Findings: none"), the exact mute class ec6059c killed.
+    def _syntax_findings() -> list[RenderFinding]:
+        compile_error = _compile_macro_template(stripped)
+        if compile_error is None:
+            return []
+        message, lineno = compile_error
+        return [RenderFinding(
+            "error", "macro_jinja_syntax",
+            f"Body does not compile as a Klipper template: {message} "
+            f"(line {lineno}). Nothing was rendered.",
+            source_line=lineno)]
+
     if "{% raw" in stripped:
         # Raw blocks defeat the statement scanner; fail open for this
-        # class only (rare in macro bodies).
-        return MacroRenderResult()
+        # class only (rare in macro bodies) — but never mute a syntax
+        # error (A-03).
+        return MacroRenderResult(findings=_syntax_findings())
 
     # Bounded work (round-2 D6): a body looping over a huge constant
     # range hangs the render (range(10**9) neither raises nor gets
@@ -1582,7 +1623,7 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
     # Refuse up front with an info finding: validation must never stall.
     _big_range = re.search(r"\brange\s*\(\s*(\d[\d_]{5,})", stripped)
     if _big_range:
-        return MacroRenderResult(findings=[RenderFinding(
+        return MacroRenderResult(findings=_syntax_findings() + [RenderFinding(
             "info", "macro_render_blocked",
             f"Template loops over range({_big_range.group(1)}) — too "
             "large to simulate; this body's rendered commands were not "
@@ -1724,11 +1765,25 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
                 # Round-2 D1: suppress per FINDING, never per line —
                 # a literal defect sharing the line with a
                 # param-dependent read stays a real verdict.
-                if (not invocation_given and line_src is not None
-                        and _finding_is_param_dependent(
-                            f, line_src, alias_map, param_dependent,
-                            splat_unknown=line_splat)):
-                    continue
+                if not invocation_given:
+                    if (line_src is not None
+                            and _finding_is_param_dependent(
+                                f, line_src, alias_map, param_dependent,
+                                splat_unknown=line_splat)):
+                        continue
+                    if (line_src is None
+                            and (param_dependent or splat_undecided)):
+                        # PR #43 A-02: attribution can fail on legal
+                        # shapes (one-line '{% if ... %}SET_LED ...' with
+                        # no space after '%}', a command assembled into a
+                        # variable and emitted). With no invocation and a
+                        # body that reads undeclared params somewhere, an
+                        # UNATTRIBUTED line is undecidable — 'no
+                        # invocation, no verdict' holds even when the
+                        # source line cannot be named. (The old shape
+                        # let exactly these fall through to full checks
+                        # and block the save gate.)
+                        continue
                 findings.append(replace(f, source_line=f.source_line or src_line))
 
     # Dedup findings that repeat across variants when the breakage is
