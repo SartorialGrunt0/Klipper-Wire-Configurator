@@ -28,6 +28,18 @@ interface ContextPressureState {
   contextWindow: number | null;
   /** Key whose probe last settled (a null result is cached too — no retry storm). */
   probedKey: string | null;
+  /** Key whose probe is IN FLIGHT (C-01: dedupes probes AND fences a
+   *  late answer — only the probe whose key still owns pendingKey may
+   *  claim the cache). */
+  pendingKey: string | null;
+  /**
+   * Conversation generation, bumped by reset() (C-01). Every async write
+   * captures it before its await and drops the write when it moved — a
+   * probe or usage report from before a new/loaded chat must never
+   * re-populate the cleared state (the old post-await set was
+   * unconditional while its comment promised exactly this fence).
+   */
+  epoch: number;
   /** Whether a probe is in flight (dedupes concurrent ensureWindow calls). */
   probing: boolean;
   /** Derived advisory flag — recomputed on every telemetry change. */
@@ -54,6 +66,8 @@ export const useContextPressureStore = create<ContextPressureState>()((set, get)
   lastPromptTokens: null,
   contextWindow: null,
   probedKey: null,
+  pendingKey: null,
+  epoch: 0,
   probing: false,
   advisory: false,
   overflowMessage: null,
@@ -93,21 +107,27 @@ export const useContextPressureStore = create<ContextPressureState>()((set, get)
   ensureWindow: async (creds) => {
     const key = contextPressureWindowKey(creds);
     const state = get();
-    if (state.probedKey === key || state.probing) return;
-    set({ probing: true });
+    if (state.probedKey === key || state.pendingKey !== null) return;
+    const epoch = state.epoch;
+    set({ probing: true, pendingKey: key });
     let window: number | null = null;
     try {
       window = await fetchContextWindow(creds);
     } catch {
       window = null;
     }
-    // A model/provider switch mid-probe: only the matching probe may claim
-    // the cache; a late answer for an old key still sets the window only if
-    // nothing newer has arrived.
+    // C-01 (PR #43): the fence the old comment promised but never
+    // implemented. This answer may claim the cache only while its probe
+    // still owns pendingKey AND the conversation generation is unchanged;
+    // a late answer after reset() (new/loaded chat) or after a newer
+    // probe took over is dropped, so a stale model's window can no
+    // longer overwrite the current one or re-populate cleared state.
     set((current) => {
+      if (current.epoch !== epoch || current.pendingKey !== key) return {};
       const resolved = typeof window === 'number' && Number.isFinite(window) && window > 0 ? window : null;
       return {
         probing: false,
+        pendingKey: null,
         probedKey: key,
         contextWindow: resolved,
         advisory: evaluateContextPressure({
@@ -119,12 +139,17 @@ export const useContextPressureStore = create<ContextPressureState>()((set, get)
   },
 
   reset: () =>
-    set({
+    set((state) => ({
+      // C-01: bumping the generation fences out every in-flight probe /
+      // usage report from the previous conversation; they land against
+      // a moved epoch and write nothing.
+      epoch: state.epoch + 1,
       lastPromptTokens: null,
       contextWindow: null,
       probedKey: null,
+      pendingKey: null,
       probing: false,
       advisory: false,
       overflowMessage: null,
-    }),
+    })),
 }));

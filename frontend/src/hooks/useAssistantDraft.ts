@@ -90,6 +90,10 @@ export function useAssistantDraft() {
       });
       const knownContextWindow =
         pressure.probedKey === windowKey ? pressure.contextWindow : null;
+      // C-01: generation this request belongs to. If the user starts or
+      // loads a chat while this reply is in flight, the epoch moved and
+      // this reply's telemetry must not land in the new conversation.
+      const pressureEpoch = pressure.epoch;
       const response = await api.aiChat(
         { ...chatRequestBase, knownContextWindow, messages: conversationMessages },
         options?.signal,
@@ -109,13 +113,18 @@ export function useAssistantDraft() {
       // size and make sure the window for this provider+model has been
       // probed (once per key, fire-and-forget — the advisory self-heals on
       // the NEXT reply if the probe lands after this render).
-      pressure.recordUsage(response.usage?.lastPromptTokens ?? null);
-      void pressure.ensureWindow({
-        apiKey: chatRequestBase.apiKey,
-        apiUrl: chatRequestBase.apiUrl,
-        apiProvider: chatRequestBase.apiProvider,
-        model: chatRequestBase.model,
-      });
+      // C-01: only for the conversation this request belongs to — if a
+      // new/loaded chat moved the epoch mid-flight, this reply's telemetry
+      // is stale and lands nowhere.
+      if (useContextPressureStore.getState().epoch === pressureEpoch) {
+        pressure.recordUsage(response.usage?.lastPromptTokens ?? null);
+        void pressure.ensureWindow({
+          apiKey: chatRequestBase.apiKey,
+          apiUrl: chatRequestBase.apiUrl,
+          apiProvider: chatRequestBase.apiProvider,
+          model: chatRequestBase.model,
+        });
+      }
 
       let assistantMessage: ChatMessage = {
         role: 'assistant',
