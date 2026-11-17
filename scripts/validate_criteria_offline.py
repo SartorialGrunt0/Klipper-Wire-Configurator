@@ -70,14 +70,21 @@ def rescore(q, result) -> tuple[bool, list]:
     return all(c[2] for c in checks), checks
 
 
-def run(runs: list[str]) -> int:
+def run(runs: list[str]) -> tuple[int, list[str], int]:
     qmap = bank()
     changes = 0
+    examined = 0
+    missing: list[str] = []
     unknown = set()
     for name in runs:
         hits = sorted(glob_json(name))
         if not hits:
+            # C-02 (PR #43 round 1): a requested leg that does not exist
+            # is a FAILURE, not a shrug — the flip evidence a criteria
+            # change relies on would otherwise print '0 verdict change(s)'
+            # and stay indistinguishable from zero rows examined.
             print(f"!! no run json for {name}")
+            missing.append(name)
             continue
         data = json.load(open(hits[-1]))["results"]
         for r in data:
@@ -85,6 +92,7 @@ def run(runs: list[str]) -> int:
             if q is None:
                 unknown.add(r["qid"])
                 continue
+            examined += 1
             new_ok, new_checks = rescore(q, r)
             old_ok = r["answer_ok"]
             if new_ok != old_ok:
@@ -95,8 +103,9 @@ def run(runs: list[str]) -> int:
                     print(f"      [{mark}] {kind} :: {value[:88]}")
     if unknown:
         print("qids in runs but not in the bank:", sorted(unknown))
-    print(f"\n{changes} verdict change(s) across {len(runs)} run(s).")
-    return changes
+    print(f"\n{changes} verdict change(s) across {len(runs)} run(s) "
+          f"({examined} bank rows examined, {len(missing)} leg(s) missing).")
+    return changes, missing, examined
 
 
 def glob_json(name: str):
@@ -778,13 +787,22 @@ def controls() -> int:
     return bad
 
 
-if __name__ == "__main__":
-    args = sys.argv[1:]
-    n = run(args or DEFAULT_RUNS)
+def main(argv: list[str]) -> int:
+    n, missing, examined = run(argv or DEFAULT_RUNS)
     b = controls()
-    # C-04 (round-1 review 2026-10-25): the gate's whole point is to be
-    # able to FAIL — 'intended flips + zero collateral' and 'every
-    # negative control fails' must reach the exit status. The old
-    # unconditional sys.exit(0) kept both results as decoration, so any
-    # CI/script chaining on it was structurally green.
-    sys.exit(1 if b else 0)
+    # C-04 (round-1 review 2026-10-25) extended by C-02 (PR #43 round 1):
+    # the gate's whole point is to be able to FAIL — 'intended flips +
+    # zero collateral', 'every negative control fails', and 'the legs were
+    # actually there' must ALL reach the exit status. The old
+    # unconditional sys.exit(0) kept both results as decoration, and even
+    # after C-04 the flip half plus absent legs stayed green.
+    if missing:
+        print("!! FAIL: requested report leg(s) missing:", missing)
+    if examined == 0:
+        print("!! FAIL: zero bank rows examined — 'no collateral flips' "
+              "backed by zero rows is not evidence (C-02).")
+    return 1 if (b or missing or examined == 0) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
