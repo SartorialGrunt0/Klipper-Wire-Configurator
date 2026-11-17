@@ -46,7 +46,7 @@ hoping the model is careful.
    - [Honesty guards](#honesty-guards)
 5. [Appendix](#appendix)
    - [Accuracy testing](#accuracy-testing)
-   - [Question bank](#question-bank-119-questions)
+   - [Question bank](#question-bank-130-questions)
    - [Current model results](#current-model-results)
    - [Known failure families](#known-failure-families)
    - [Running the harness](#running-the-harness)
@@ -453,13 +453,18 @@ Design laws earned the hard way:
   (`scripts/validate_criteria_offline.py`) before the bank changes, and only
   the touched qids need re-running.
 
-### Question bank (119 questions)
+### Question bank (130 questions)
+
+<!-- C-04 (PR #43): this header used to say 119 while main() concatenated
+families adding ~11 more. The count here is the qid set main() builds
+WITHOUT --include-memory (130; 133 with the 3 MEMORY rows added), re-derived
+from the builders whenever a family changes. -->
 
 | Family | Coverage |
 | :--- | :--- |
 | Core Tools (Q01–Q20, minus retired Q09) | Docs lookups, example configs, validation, calculations, edit routing. |
-| Macro Authoring (MACRO-01..07, 09–14, minus retired MACRO-08) | Authoring, editing, fixing, templates, `validate_macro` checks; 12–14 add the runtime render class (a macro that compiles but renders a broken command). |
-| Sim Tool (SIMTOOL-01..05) | `simulate_macro` tool-use compliance: runtime claims grounded in declared runs; SIMTOOL-02 grades tool-trace artifacts for a state-persisting toggle (`SET_GCODE_VARIABLE MACRO=…` in the staged body) plus a `runs` sequence whose second call renders differently — independent scenarios prove branches, never the transition; guarded-param regression pin; review-only negative control. |
+| Macro Authoring (MACRO-01..07, 09–17, minus retired MACRO-08) | Authoring, editing, fixing, templates, `validate_macro` checks; 12–14 add the runtime render class (a macro that compiles but renders a broken command); 15–17 grade the as-written verdict on out-of-range / contradictory / boundary-rule params (16 = at-least-one-bound rule, 17 = literal values beyond `SET_LED`'s bound, re-cut without the set-tag reinterpretation hatch). |
+| Sim Tool (SIMTOOL-01..08) | `simulate_macro` tool-use compliance: runtime claims grounded in declared runs; SIMTOOL-02 grades tool-trace artifacts for a state-persisting toggle (`SET_GCODE_VARIABLE MACRO=…` in the staged body) plus a `runs` sequence whose second call renders differently — independent scenarios prove branches, never the transition; guarded-param regression pin; review-only negative control; 06 = parameter out-of-range at run time (declared runs, not template reasoning); 07 = negative control, config-derived limits are not invented; 08 = honesty, a `CALL`ed macro is not expanded. |
 | Trident Configs (TRIDENT-01..16) | Real Trident configs (read/edit/delete/manage, cross-file edits, the `idle_timeout` multi-LED case). Read-only context. |
 | Harness (HARNESS-01, 03, minus retired HARNESS-02) | Self-checks: criteria that must reject a wrong staged artifact. |
 | Edit Cases (MINIDIFF-01..04) | Staged-edit cases: `level_bed` adaptive mode, `max_accel`, pin edits, `pressure_advance`. |
@@ -467,7 +472,7 @@ Design laws earned the hard way:
 | Setup (SETUP-01..05) | New sections with no existing home (firmware_retraction, idle_timeout, arcs, save_variables, respond). |
 | Live Routing (LIVE-01..07) | Routes between project validator / draft validation / devices / schema / reference / Klippy status. |
 | Edit Tools (EDIT-01..06) | `config_edit` param edit, anchored gcode edit, cross-file pin edit, new file + `add_include`, pure Q&A stages nothing, `!` polarity kept on uncomment. |
-| Skill Gate (SKILL-01..05, N01..04) | `config-editing` must load before any write path — and must NOT load on Q&A, how-to, pasted-text validation, or discuss-a-draft. |
+| Skill Gate (SKILL-01..05, N01..04, M01..M05) | `config-editing` must load before any write path — and must NOT load on Q&A, how-to, pasted-text validation, or discuss-a-draft. M01..M05 grade `macro-authoring` activation: macro drafts and macro fixes load it, macro Q&A does not. |
 | Tool Coverage (TOOL-01..08) | One case per shipped tool. |
 | Rename (RENAME-01..03) | Header keeps the `gcode_macro` family; stale callers repaired. |
 | Comment (COMMENT-01..06) | Whole-section comment/uncomment, single-line via `patch_section`, rename+uncomment combo. |
@@ -479,8 +484,9 @@ Design laws earned the hard way:
 
 All rows were measured on the **111-question** bank of that date at
 temperature 1.0, native protocol, edit tools on, against the same
-backend (the bank now stands at 119 with the SIMTOOL family added
-2026-11-14). Ranges span the full-bank
+backend (the bank now stands at 130 default / 133 with the MEMORY rows
+after the MACRO-15..17, SIMTOOL-06..08 and SKILL-M additions of
+2026-11-14..17). Ranges span the full-bank
 runs closest to the shipped build; single-run deltas inside the range are
 noise, not ranking.
 
