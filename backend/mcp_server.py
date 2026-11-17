@@ -3240,29 +3240,47 @@ class McpServer:
 
         issues: list[dict[str, str]] = []  # {severity, message}
         lines = macro_text.split("\n")
-        # Non-comment code lines used by several checks below so comments
-        # cannot trigger false positives.
-        code_lines = [ln.strip() for ln in lines
+        header_match = re.search(r"\[gcode_macro\s+(\S+)\]", macro_text)
+
+        # PR #43 B-02: every structural check below is BOUNDED to the
+        # macro's OWN section (header line to the next column-0 '[' line).
+        # Unbounded scans read a LATER section's 'gcode:' body and reported
+        # ITS lines as errors of the named macro (a false ERROR about text
+        # that macro does not contain — the model then 'fixes' the wrong
+        # section) and suppressed the named macro's true 'missing gcode:'
+        # warning. With no header at all there is no section to bound to;
+        # the header error below is the verdict and the legacy whole-text
+        # scope stays (mirrors the previous behavior for bare bodies).
+        if header_match:
+            header_line_idx = macro_text[:header_match.start()].count("\n")
+            section_lines: list[str] = []
+            for line in lines[header_line_idx + 1:]:
+                if line.startswith("["):
+                    break
+                section_lines.append(line)
+        else:
+            section_lines = list(lines)
+        # Non-comment code lines of THIS section, used by the checks below
+        # so comments cannot trigger false positives.
+        code_lines = [ln.strip() for ln in section_lines
                       if ln.strip() and not ln.strip().startswith("#")]
         code_text = "\n".join(code_lines)
 
         # ── 1. Check section header ──
-        header_match = re.search(r"\[gcode_macro\s+(\S+)\]", macro_text)
         if not header_match:
             issues.append({"severity": "error", "message": "Missing or invalid [gcode_macro <name>] header."})
         else:
             macro_name = header_match.group(1)
             # Check gcode: key — Klipper section keys sit at column 0.
-            # Collect the top-level keys after the header line and test
+            # Collect the top-level keys of THIS section and test
             # membership. The previous scan stopped at the first
             # non-description line (false "missing" warning on the
             # canonical variable_* toggle pattern — the chat model then
             # loop-validated the same macro chasing the phantom, MACRO-12
             # trace) and accepted an indented "gcode:" as a key because it
             # stripped before checking (missed the real defect).
-            header_line_idx = macro_text[:header_match.start()].count("\n")
             top_level_keys = set()
-            for line in lines[header_line_idx + 1:]:
+            for line in section_lines:
                 key_match = re.match(r"([A-Za-z_][A-Za-z0-9_-]*)\s*:", line)
                 if key_match:
                     top_level_keys.add(key_match.group(1).lower())
@@ -3276,14 +3294,9 @@ class McpServer:
             # real `description:` out of range and reported a macro that
             # HAS one as missing it (found 2026-11-15 while building the
             # MACRO-15 fixture).
-            macro_section_lines: list[str] = []
-            for line in lines[header_line_idx + 1:]:
-                if line.startswith("["):
-                    break
-                macro_section_lines.append(line)
             has_description = any(
                 re.match(r"description\s*:", ln, re.IGNORECASE)
-                for ln in macro_section_lines)
+                for ln in section_lines)
             if not has_description:
                 issues.append({"severity": "info", "message": f"Macro '{macro_name}' is missing a 'description:' field. Adding one makes the macro self-documenting."})
 
@@ -3298,7 +3311,7 @@ class McpServer:
         # message + body-relative line.
         from parser.validator import _compile_macro_template, _strip_inline_comments
 
-        gcode_body = self._extract_gcode_body(lines)
+        gcode_body = self._extract_gcode_body(section_lines)
         if gcode_body is not None and gcode_body.strip():
             compile_error = _compile_macro_template(_strip_inline_comments(gcode_body))
             if compile_error is not None:
@@ -3338,7 +3351,10 @@ class McpServer:
         sim_variables = {}
         if gcode_body is not None and gcode_body.strip():
             from parser.macro_render import simulate_macro
-            for raw in lines:
+            # PR #43 B-02 same class: params_*/variable_* defaults come
+            # from THIS section only — a sibling macro's params_* must not
+            # answer this macro's reads.
+            for raw in section_lines:
                 stripped_raw = raw.strip()
                 if stripped_raw.startswith("params_"):
                     key, _, value = stripped_raw.partition(":")
@@ -3760,11 +3776,14 @@ class McpServer:
         _INC = re.compile(r"^\[include\s+([^\]\n]+)\]\s*(?:#.*)?$", re.M)
         texts: list[tuple[str, str]] = []
         names: set[str] = set()
+        overlay_names: set[str] = set()
         overlay = _working_scan_items()
+        overlay_mode = bool(overlay)
         if overlay:
             for path, content in overlay:
                 texts.append((path, content))
                 names.add(str(path).replace("\\", "/").rsplit("/", 1)[-1].lower())
+            overlay_names = set(names)
             disk_names = self._sim_disk_config_names()
             names |= disk_names
         else:
@@ -3786,11 +3805,20 @@ class McpServer:
         if not texts:
             return None
         sections: set[str] = set()
+        # PR #43 B-05: in overlay mode the `sections` inventory is built
+        # ONLY from overlay texts, so "a file we can see" means an overlay
+        # file — NOT the disk-name union. An include resolving to a file
+        # that exists only on disk (the mirror skips files over the 512 KB
+        # per-file cap, so a big project yields exactly this partial
+        # overlay) contributes no sections; judging hardware absence from
+        # that is a verdict from an incomplete inventory, which this
+        # function's own law forbids. Disk-only include → undecidable.
+        visible_names = overlay_names if overlay_mode else names
         for _name, text in texts:
             for target in _INC.findall(text):
                 for piece in re.split(r"[\s,]+", target.strip()):
                     base = piece.replace("\\", "/").rsplit("/", 1)[-1].lower()
-                    if base and base not in names:
+                    if base and base not in visible_names:
                         return None   # include we cannot see → undecidable
             for header in _HDR.findall(text):
                 header = header.strip()
