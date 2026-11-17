@@ -998,16 +998,11 @@ def build_macro_questions() -> list[TestQuestion]:
             # Note: now MACRO-15's single-defect literal sibling (15 keeps
             # the XOR defect); distinct answer shape still exercised — here
             # the ONLY finding is the bound.
-            text=("I wrote this GLOW macro to set my chamber lights to a "
-                  "fixed level. Will it run as written? Tell me exactly "
-                  "what happens when I call it:\n\n"
-                  "```cfg\n"
-                  "[gcode_macro GLOW]\n"
-                  "description: glow at a fixed level\n"
-                  "gcode:\n"
-                  "    SET_LED LED=Chamber_LEDs RED=1.8 GREEN=1.8 "
-                  "BLUE=1.8\n"
-                  "```"),
+            text=("My printer.cfg has a GLOW macro I wrote to set my "
+                  "chamber lights to a fixed level. Will it run as "
+                  "written? Tell me exactly what happens when I call "
+                  "it."),
+            context_files=_sim_project(_SIM_CHAMBER_HW + _SIM_GLOW),
             expected_tools=("validate_macro", "simulate_macro"),
             require_tool=False,
             criteria=(
@@ -1185,14 +1180,18 @@ gcode:
     SET_LED LED=Chamber_LEDs RED=0.4 GREEN=0.4 BLUE=0.4
 """
 
-# MACRO-17: the offending value is a Jinja constant, so neither the static
-# layer nor the rendered source line shows it until `level` is resolved.
+# MACRO-17 (Cliff go 2026-11-17): lives in the SEEDED project, not pasted
+# in the question. m17law legs showed the miss is a FRAME, not phrasing:
+# a pasted macro absent from the files casts the task as
+# install-this-for-me, where "Staged/Applied —" IS the answer and the
+# as-written verdict reads as pedantry (positional law lost to the frame
+# 2/3, even with 'Applied' verbatim in its don't-open-with list). With the
+# macro genuinely in printer.cfg the install story is unavailable.
 _SIM_GLOW = """
 [gcode_macro GLOW]
 description: glow at a fixed level
 gcode:
-    {% set level = 1.8 %}
-    SET_LED LED=Chamber_LEDs RED={level} GREEN={level} BLUE={level}
+    SET_LED LED=Chamber_LEDs RED=1.8 GREEN=1.8 BLUE=1.8
 """
 
 # SIMTOOL-07: the hotend ceiling is CONFIG-derived (max_temp), never a
