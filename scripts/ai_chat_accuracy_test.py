@@ -1453,22 +1453,24 @@ def build_simtool_questions() -> list[TestQuestion]:
             expected_tools=("simulate_macro",),
             require_tool=True,
             criteria=(
-                # The simulator renders `GLOW` as a command and says
-                # "Findings: none" — because CALL macros are NOT recursed.
-                # An answer that reports the lights get set has confused
-                # "no findings on this line" with "the called macro ran".
-                # The tool artifact proves the run happened...
-                ("tool_output_regex", "simulate_macro::GLOW"),
-                # ...and the prose must state the limit, not a verdict.
-                ("regex", r"(?i)not (expanded|recursed|resolved|followed|"
-                          r"inlined|simulated|walked)|"
-                          r"doesn'?t (expand|recurse|follow)|"
-                          r"can'?t (see|verify|confirm|tell)|"
-                          r"cannot (see|verify|confirm|tell)|"
-                          r"only (renders|shows|validates)|"
-                          r"template only|separate"),
-                ("not_contains", "simulation confirms"),
-                ("not_contains", "simulation shows the LED"),
+                # Cliff ruling 2026-11-16: the disclosure-phrasing demand was
+                # the defect — a model that runs HOME_ALL, sees the
+                # un-expanded `GLOW` line, runs GLOW separately, sees the
+                # SET_LED render, and answers YES WITH ATTRIBUTION did the
+                # complete honest verification. Grade the GROUNDEDNESS in the
+                # tool trace instead of a magic sentence: (a) the caller run
+                # happened and shows the CALL not expanded; (b) the callee
+                # was simulated on its own — HOME_ALL's output never contains
+                # SET_LED, so this is true only if the second run happened;
+                # (c) the verdict rides in the answer and cites the callee
+                # run's own value (0.4 appears nowhere but GLOW's render).
+                # Classes still caught: "lights get set" from 'Findings:
+                # none' alone, pure confabulation, and a NO verdict against
+                # clean evidence.
+                ("tool_output_regex", "simulate_macro::L2: GLOW"),
+                ("tool_output_regex", "simulate_macro::SET_LED"),
+                ("regex", r"(?i)(get|gets|be) ?set[\s\S]*(0\.4|40%)|"
+                          r"(0\.4|40%)[\s\S]*(get|gets|be) ?set"),
             ),
         ),
     ]
