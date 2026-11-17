@@ -2019,7 +2019,14 @@ def _render_work_ledger(rows: list | None) -> str | None:
         return None
     # Oldest turn first, newest last; deterministic within a turn.
     valid.sort(key=lambda r: (-r[0], r[1], r[2]))
-    del valid[WORK_LEDGER_MAX_ROWS:]
+    # PR #43 B-04: the flood cap must drop the OLDEST rows — turnOffset 1
+    # is the NEWEST turn (utils/chatWorkLedger), so with the list sorted
+    # oldest-first the tail is what the model needs. The old
+    # 'del valid[MAX:]' kept the oldest 60 and threw away the recent
+    # staging the ledger is FOR, then told the model the missing recent
+    # sections 'were never staged'. Keep the newest MAX rows instead.
+    if len(valid) > WORK_LEDGER_MAX_ROWS:
+        del valid[:len(valid) - WORK_LEDGER_MAX_ROWS]
 
     def _outcome(verdict: str, detail: str) -> str:
         if verdict == "pending":
@@ -4185,6 +4192,14 @@ async def context_window(req: ContextWindowRequest):
     except httpx.HTTPError as e:
         logger.warning("Context window probe failed | url=%s error=%s", models_url, e)
         return {"contextWindow": None, "source": None, "error": f"Failed to probe the context window: {e}"}
+    except ValueError:
+        # PR #43 B-03: a 200 whose body is not JSON (a mis-pointed apiUrl
+        # hitting a proxy/landing page) must degrade like every other
+        # unknown — this route's own docstring promises graceful null,
+        # and res.json() raises json.JSONDecodeError, which is NOT an
+        # httpx.HTTPError, so it used to escape as an HTTP 500.
+        logger.warning("Context window probe got non-JSON body | url=%s", models_url)
+        return {"contextWindow": None, "source": None, "error": "Provider returned a non-JSON models listing"}
 
     entries = data.get("data") if isinstance(data, dict) else None
     if isinstance(entries, list):
