@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 from fastapi.testclient import TestClient  # noqa: E402
 
 import api.ai_routes as ai_routes  # noqa: E402
+import mcp_server  # noqa: E402
 from main import app  # noqa: E402
 from mcp_server import McpServer  # noqa: E402
 from services.ai_edit_tools import EDIT_TOOL_NAMES  # noqa: E402
@@ -342,15 +343,23 @@ def _sim(**args):
 def test_shipped_examples_render_on_the_bare_call():
     """v1's examples carried params.X|float|default(...) and ABORTED on
     the bare call the same body mandated — examples are what models copy
-    verbatim, so they run through the real engine on every CI run."""
-    out = _sim(macro_text=ai_routes.MACRO_EX_BLINK)
-    assert 'Findings: none' in out
-    assert 'SET_PIN PIN=casing_light VALUE=1' in out
-    out = _sim(macro_text=ai_routes.MACRO_EX_PARK,
-               scenarios=[{'name': 'bare',
-                           'printer_state': {'toolhead.axis_maximum.z': 250}}])
-    assert 'Findings: none' in out
-    assert 'G1 Z0.0 F600' in out
+    verbatim, so they run through the real engine on every CI run. The
+    project is SEEDED, never ambient: the SET_PIN target check resolves
+    against the working state, and CI has no dev-box context (round-1 CI
+    red: 'casing_light' warned against an empty project)."""
+    mcp_server.set_chat_working_files({'printer.cfg': PRINTER_CFG})
+    try:
+        out = _sim(macro_text=ai_routes.MACRO_EX_BLINK)
+        assert 'Findings: none' in out
+        assert 'SET_PIN PIN=casing_light VALUE=1' in out
+        out = _sim(macro_text=ai_routes.MACRO_EX_PARK,
+                   scenarios=[{'name': 'bare',
+                               'printer_state':
+                               {'toolhead.axis_maximum.z': 250}}])
+        assert 'Findings: none' in out
+        assert 'G1 Z0.0 F600' in out
+    finally:
+        mcp_server.set_chat_working_files(None)
 
 
 def test_blink_example_actually_toggles_over_two_calls():
