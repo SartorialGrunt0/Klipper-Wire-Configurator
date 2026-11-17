@@ -30,6 +30,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 import api.ai_routes as ai_routes  # noqa: E402
 from main import app  # noqa: E402
+from mcp_server import McpServer  # noqa: E402
 from services.ai_edit_tools import EDIT_TOOL_NAMES  # noqa: E402
 
 client = TestClient(app)
@@ -326,6 +327,89 @@ def test_macro_body_covers_enforced_pitfalls_and_workflow():
     # Named doc pointers — specific, not "read the docs".
     assert 'Command_Templates' in body
     assert 'read_klipper_doc' in body
+
+
+# ── v2 content law (2026-11-17 double-blind review) ──────────────────────
+# Two fresh-context reviewers converged on defects v1 taught with
+# confidence; every fix below is pinned either by an engine run of the
+# shipped string or by an anti-pattern grep. The engine pins are the W4
+# law applied to the skill itself: no unverified prose.
+
+def _sim(**args):
+    return McpServer()._handle_simulate_macro(args)
+
+
+def test_shipped_examples_render_on_the_bare_call():
+    """v1's examples carried params.X|float|default(...) and ABORTED on
+    the bare call the same body mandated — examples are what models copy
+    verbatim, so they run through the real engine on every CI run."""
+    out = _sim(macro_text=ai_routes.MACRO_EX_BLINK)
+    assert 'Findings: none' in out
+    assert 'SET_PIN PIN=casing_light VALUE=1' in out
+    out = _sim(macro_text=ai_routes.MACRO_EX_PARK,
+               scenarios=[{'name': 'bare',
+                           'printer_state': {'toolhead.axis_maximum.z': 250}}])
+    assert 'Findings: none' in out
+    assert 'G1 Z0.0 F600' in out
+
+
+def test_blink_example_actually_toggles_over_two_calls():
+    """v1's BLINK computed the flip but never wrote it back — a toggle
+    that never toggles. The pin re-derives the runs=2 proof, which only
+    holds while the SET_GCODE_VARIABLE line ships."""
+    out = _sim(macro_text=ai_routes.MACRO_EX_BLINK, runs=2)
+    first, second = out.split('## call 2')
+    assert 'SET_PIN PIN=casing_light VALUE=1' in first
+    assert 'SET_PIN PIN=casing_light VALUE=0' in second
+    assert 'commands differ: YES' in out
+
+
+def test_body_idiom_renders_on_bare_call():
+    """The prescribed order IS the proof: default-before-coerce renders;
+    v1's coerce-before-default aborts (tests/test_macro_render.py)."""
+    out = _sim(macro_text='[gcode_macro IDIOM]\ngcode:\n'
+                          '    M106 S{params.FAN|default(0)|int}\n')
+    assert 'M106 S0' in out and 'Findings: none' in out
+
+
+def test_body_prescribes_default_before_coerce_order():
+    body = ai_routes._macro_skill_body()
+    assert '|float|default(' not in body and '|int|default(' not in body
+    assert 'Default BEFORE you coerce' in body
+    # empty-string params are DEFINED: boolean-form default is the only fix
+    assert "default('10', true)" in body
+
+
+def test_m109_law_states_the_s0_skip_and_never_waiting_m104():
+    """v1 inverted the S=0 exception (heaters.py 'wait and temp') and
+    called the rename_existing load conflict a 'shadow' (gcode.py
+    'already registered')."""
+    body = ai_routes._macro_skill_body()
+    assert 'skip the wait when the target is 0' in body
+    assert 'M104/M140 are Set-only and NEVER wait' in body
+    assert 'SHADOWS' not in body
+    assert 'already registered' in body
+    # TEMPERATURE_WAIT is the cooldown / no-M109-heater wait, not forbidden
+    assert 'TEMPERATURE_WAIT SENSOR=extruder MAXIMUM=60' in body
+
+
+def test_doc_pointers_use_the_real_arg_names():
+    """v1 prescribed read_klipper_doc(name=...) while the schema requires
+    filename — unexecutable for schema-less text-protocol models."""
+    body = ai_routes._macro_skill_body()
+    assert 'read_klipper_doc(name=' not in body
+    assert "filename='Command_Templates.md'" in body
+    assert "get_config_reference_section(section_name='gcode_macro')" in body
+    assert 'list_klipper_docs' in body
+
+
+def test_verdict_answer_law_is_gone_guard_still_carries_it():
+    """Cliff 2026-11-17: four prose levers failed MACRO-17; the mechanical
+    trace guard (tests/test_sim_verdict_guard.py) enforces it instead."""
+    body = ai_routes._macro_skill_body()
+    assert 'FIRST SENTENCE' not in body
+    assert 'macros it invokes are NOT' in body  # non-recursion disclosed
+    assert "load_skill(name='config-editing') " in body  # staged at step 4
 
 
 # ── Wire: editSkillLoaded deleted (single path) ──────────────────────────
