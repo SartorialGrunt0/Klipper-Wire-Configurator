@@ -1262,7 +1262,16 @@ class McpServer:
                     "'Expected effect (commanded, not observed)': fan "
                     "percent, LED colours, temperature TARGETS, console "
                     "text — so you can check the outcome matches the "
-                    "intent, not merely that it renders. Heat lines say "
+                    "intent, not merely that it renders. Motion commands "
+                    "additionally run through the 'Execution trace': the "
+                    "rendered lines execute over a simple motion model — "
+                    "position after every move annotated against the "
+                    "geometry the project DECLARES ([stepper] bounds, "
+                    "home/endstops), un-homed and soft-limit moves shown "
+                    "as REFUSED (a refused line aborts), and a 'Final "
+                    "state' line — read it before claiming a macro "
+                    "reaches where the user asked (front centre is not "
+                    "the centre). Heat lines say "
                     "'Set' vs 'Set and Wait': M104/M140 return "
                     "immediately, while M109/M190 BLOCK the macro until "
                     "the target is reached — the wait works inside "
@@ -1283,7 +1292,10 @@ class McpServer:
                     "printer state unknown; branches on undeclared "
                     "state render BOTH ways). Limits it states on every "
                     "result: it renders the TEMPLATE only — CALL macros "
-                    "are not recursed; motion, heating, and delays do "
+                    "are not recursed; the 'Execution trace' executes a "
+                    "simple motion model only (speeds and dwell do not "
+                    "run; probing and other Z-movers make Z unresolved, "
+                    "they do not fake a position); heating and delays do "
                     "not execute (waiting commands are reported as "
                     "waiting under 'Expected effect', nothing pauses)."
                 ),
@@ -3693,13 +3705,16 @@ class McpServer:
     _SIM_RUN_CAP = 6
     _SIM_LIMITS = (
         "Limits: this renders the TEMPLATE only — CALL macros are not "
-        "recursed, and motion, heating, and delays do not execute "
+        "recursed. The 'Execution trace' runs the RENDERED lines over a "
+        "simple motion model: position, homing, and soft limits "
+        "execute; speeds, dwell, and heating do not, and probing or "
+        "other Z-movers make Z unresolved rather than fake a position "
         "(waiting commands appear under 'Expected effect' as Set / Set "
         "and Wait / blocking waits, but nothing actually pauses). "
         "The effect list assumes no line errors: on the real printer a "
         "refused line — bad parameter, unhomed move, out-of-range target, "
         "cold extrude — ABORTS the macro; later lines never run "
-        "(virtual printer, 2026-11-15). "
+        "(virtual printer, 2026-11-15; motion trace, 2026-11-18). "
         "Anything not declared in a scenario stayed <unknown>: never "
         "present a rendered value as a printer fact.")
 
@@ -3828,6 +3843,33 @@ class McpServer:
                     sections.add(" ".join(header.lower().split()))
         return frozenset(sections)
 
+    def _sim_motion_profile(self):
+        """Machine bounds/home for the Execution trace, from the same
+        working-state-first scan the sim already uses. Partial or
+        missing stepper data yields a silent profile — the trace would
+        rather stay quiet than invent geometry."""
+        from parser.macro_trace import derive_motion_profile
+        texts: list[str] = []
+        overlay = _working_scan_items()
+        if overlay:
+            texts = [content for _path, content in overlay]
+        else:
+            for scan_dir in (LOCAL_CONFIGS_DIR, _system_config_path()):
+                if not scan_dir.is_dir():
+                    continue
+                try:
+                    files = sorted(p for p in scan_dir.rglob("*.cfg")
+                                   if not is_backup_config_file(p.name))
+                except OSError:
+                    continue
+                for path in files:
+                    try:
+                        texts.append(path.read_text(encoding="utf-8",
+                                                    errors="replace"))
+                    except OSError:
+                        pass
+        return derive_motion_profile(texts)
+
     @staticmethod
     def _sim_disk_config_names() -> set[str]:
         """Bare filenames of this host's config files, for include
@@ -3849,6 +3891,7 @@ class McpServer:
         Klipper would execute (W4R pivot: warnings/info live HERE, not
         in ambient validation — decision D3)."""
         from parser.macro_render import simulate_macro
+        from parser.macro_trace import seed_state
 
         source = None
         origin = ""
@@ -3973,6 +4016,7 @@ class McpServer:
         # None = the files cannot decide absence (unresolved include) and
         # the engine stays silent rather than inventing a missing fan.
         sections = self._sim_project_sections()
+        profile = self._sim_motion_profile()
         if truncated:
             out.append(f"(scenario list truncated to the cap of "
                        f"{self._SIM_SCENARIO_CAP})")
@@ -4027,16 +4071,29 @@ class McpServer:
 
             seq_vars = dict(variables)
             cmd_sets: list[tuple[str, ...]] = []
+            motion_seed = None
             for run_no in range(1, runs + 1):
                 label = name if runs == 1 else f"call {run_no}"
                 result = simulate_macro(body, params, variables=seq_vars,
                                         printer_state=state,
                                         sections=sections)
-                self._sim_emit_call(
+                # Motion threading: consecutive calls share a printer, so
+                # a resolved trace's final position seeds the next call —
+                # same law as the SET_GCODE_VARIABLE threading below.
+                if motion_seed is not None:
+                    seed_for_call = motion_seed
+                    trace_note = f"carried from call {run_no - 1}"
+                else:
+                    seed_for_call = seed_state(state)[0]
+                    trace_note = ""
+                tr = self._sim_emit_call(
                     out, label, result, params,
                     state if runs == 1 else None,
                     seq_vars if runs > 1 else None,
-                    undeclared_vars, declared_vars)
+                    undeclared_vars, declared_vars,
+                    profile, seed_for_call, trace_note)
+                if tr is not None:
+                    motion_seed = tr.state
                 if runs == 1:
                     continue
                 cmd_sets.append(self._sim_command_set(result))
@@ -4086,9 +4143,13 @@ class McpServer:
                        params: dict, printer_state: dict | None,
                        variables: dict | None,
                        undeclared_vars: list[str],
-                       declared_vars: set[str]) -> None:
+                       declared_vars: set[str],
+                       profile=None, motion_seed=None,
+                       trace_note: str = ""):
         """One invocation's block: declared assumption → rendered lines →
-        expected effect → findings."""
+        execution trace → expected effect → findings. Returns the
+        motion-trace result (None when no trace ran) so sequence mode can
+        thread position into the next call."""
         out.append("")
         out.append(f"## {label}")
         declared = [f"params: {params or '{}'}"]
@@ -4112,6 +4173,28 @@ class McpServer:
             out.append("  (0 commands on this invocation — the body "
                        "compiled but produced no gcode: a branch reached "
                        "an empty arm, or it only assigns variables)")
+
+        tr = None
+        if result.rendered:
+            if result.variants_rendered > 1:
+                out.append(f"Execution trace skipped: "
+                           f"{result.variants_rendered} render paths — no "
+                           "single execution sequence (same law as "
+                           "sequence threading).")
+            elif profile is not None:
+                from parser.macro_trace import seed_state, trace_motion
+                tr = trace_motion(
+                    [(line.source_line, line.text)
+                     for line in result.rendered],
+                    profile,
+                    motion_seed if motion_seed is not None
+                    else seed_state({})[0],
+                    start_note=trace_note)
+                out.append("Execution trace (moves execute over the "
+                           "rendered lines against the machine geometry "
+                           "the project declares; feedrate and waiting "
+                           "are not modelled):")
+                out.extend("  " + t for t in tr.lines)
 
         effects = McpServer._sim_effect_lines(
             [line.text for line in result.rendered])
@@ -4151,6 +4234,7 @@ class McpServer:
             out.append("Still <unknown> (NOT simulated, never "
                        "guessed): "
                        + ", ".join(sorted(set(result.unknown_accesses))))
+        return tr
 
     @staticmethod
     def _sim_command_set(result) -> tuple[str, ...]:
