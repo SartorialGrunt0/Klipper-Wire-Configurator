@@ -524,7 +524,8 @@ def build_questions() -> list[TestQuestion]:
                 # paired `kinematic|…` check below still requires the model to
                 # name the facts it wants, so a bare "need more info" cannot
                 # pass on this arm alone.
-                ("regex", r"provide|need to know|need (some|your|a few)|what|which|key details|details|tell me|share it|share|send me|let me know|paste|from scratch"),
+                ("regex", r"provide|need to know|need (some|your|a few)|what|which|key details|details|tell me|share it|share|send me|let me know|paste|from scratch|"
+                          r"give (me|us)|one (key )?question|first question|need the following|clarif\w*"),
                 ("regex", r"kinematic|mainboard|probe|toolhead|bed|printer|config"),
             ),
         ),
@@ -880,10 +881,16 @@ def build_macro_questions() -> list[TestQuestion]:
                 ("regex", r"(?i)\b(fine|correct|valid|validates|"
                           r"looks good|works|ok|staged)\b|"
                           r"no (issues|problems|errors)"),
-                ("not_contains", "unable to parse"),
-                ("not_contains", "unbalanced"),
-                ("not_contains", "syntax error"),
-                ("not_contains", "renders empty"),
+                # 2026-11-17: not_contains -> not_asserted. r1 FALSE-FAILED
+                # a CORRECT answer that named the ruled-out defect to deny
+                # it ('so no "unable to parse" risk at runtime'). A clean
+                # verdict may legitimately discuss what it rules out; it may
+                # not ASSERT any of these. All four converted (systemic —
+                # each is equally nameable in prose).
+                ("not_asserted", "unable to parse"),
+                ("not_asserted", "unbalanced"),
+                ("not_asserted", "syntax error"),
+                ("not_asserted", "renders empty"),
             ),
         ),
         # ── P2/P3 runtime-class questions (2026-11-15) ────────────────
@@ -1439,8 +1446,14 @@ def build_simtool_questions() -> list[TestQuestion]:
                 # was an environment finding, not a bounds error).
                 ("regex", r"(?i)\b(valid|fine|allowed|ok)\b|"
                           r"will (be )?accept|accepts\b|"
-                          r"no (issues|problems|refusal)|"
-                          r"not (an )?out.of.range"),
+                          r"no (issues|problems|refusal|findings|range rejection|range error)|"
+                          r"not (an )?out[ -]of[ -]range|"
+                          r"not rejected|not outside (any|a) range|no bound"),
+                          # NOTE: no bare accept-STEM arm: `accept\w*` would
+                          # match "won't accept" — a fabricated refusal must
+                          # not light the affirmative arm. The three 2026-11-17
+                          # answers needed only not-rejected / not-outside /
+                          # no-range-rejection arms.
                 ("not_contains", "outside the range Klipper accepts"),
                 ("not_contains", "is outside the range"),
                 ("not_contains", "exceeds the maximum"),
@@ -4418,6 +4431,36 @@ def criterion_ok(kind: str, value: str, content: str,
         return value.lower() in content.lower()
     if kind == "not_contains":
         return value.lower() not in content.lower()
+    if kind == "not_asserted":
+        # Negation-aware not_contains (2026-11-17, MACRO-14 lesson): a
+        # cry-wolf-clean answer may LEGITIMATELY name the defect it rules
+        # out ("so no 'unable to parse' risk at runtime") — naive
+        # containment false-failed it. The phrase may appear only inside a
+        # negated sentence (sentence split on . ! ? newline); ANY
+        # unnegated occurrence fails. Conservative by design: ambiguous
+        # phrasing ("risk of unable to parse", "unable to parse is
+        # unlikely") stays RED.
+        neg = re.compile(r"\bno\b|\bnot\b|\bnever\b|neither|won'?t|"
+                         r"wouldn'?t|isn'?t|doesn'?t|aren'?t|can'?not|"
+                         r"avoid|free (?:of|from)|without", re.IGNORECASE)
+        low = content.lower()
+        phrase = value.lower()
+        idx = 0
+        while True:
+            i = low.find(phrase, idx)
+            if i < 0:
+                return True
+            start = 0
+            for t in ".!?\n":
+                start = max(start, content.rfind(t, 0, i) + 1)
+            end = len(content)
+            for t in ".!?\n":
+                e = content.find(t, i + len(phrase))
+                if e != -1:
+                    end = min(end, e)
+            if not neg.search(content[start:end]):
+                return False
+            idx = i + len(phrase)
     if kind == "reply_not_regex":
         # Prose-claim NEGATIVE (C-01, round-1 review 2026-10-25): fails
         # when the final reply MATCHES the regex. value is
