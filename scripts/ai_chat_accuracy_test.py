@@ -1951,14 +1951,20 @@ def build_trident_questions() -> list[TestQuestion]:
         TestQuestion(
             qid="HARNESS-03",
             title="Audit false-positive probe: pre-satisfied requirement = silent footer",
-            text=("Set my bed mesh probe speed to 8 in printer.cfg and keep "
-                  "the current probe_count of 3x3."),
+            text=("Set the speed parameter of the [bed_mesh] section in "
+                  "printer.cfg to 8 and keep the current probe_count of 3x3."),
+            # 2026-11-17 disambiguation (r1 FAIL): "bed mesh probe speed"
+            # let a model defensibly route to [probe] speed (the z-probing
+            # move speed) and explicitly decline [bed_mesh] speed (travel
+            # between points) — both readings are Klipper-true, so the
+            # qid graded a vocabulary coin-flip. Its PURPOSE is the audit
+            # footer on a pre-satisfied requirement, not param discovery,
+            # so the section is named outright.
             # Fixture has probe_count 3,3 PRE-SATISFIED so a correct edit
             # that keeps it must produce NO requirement-checker note. The
             # stated-value pattern ('probe_count ... 3x3') is exercised
             # live; a footer here = checker false positive = product bug.
-            # (Real stock value is 7,7 — fixture only. The real [bed_mesh]
-            # param is 'speed'; 'probe speed' is how users say it.)
+            # (Real stock value is 7,7 — fixture only.)
             context_files=_context_with(_load_probe_params_printer_cfg()),
             require_tool=False,
             criteria=(),
@@ -2259,6 +2265,53 @@ def build_rename_questions() -> list[TestQuestion]:
     ]
 
 
+def _comment06_context() -> tuple[tuple[str, str, str], ...]:
+    """COMMENT-06 fixture: real Trident project with Knomi.cfg's
+    [gcode_macro BED_MESH_CALIBRATE] wrapper shadowed away.
+
+    2026-11-17 (r1): the model REFUSED the rename and was right about the
+    project — Knomi.cfg:30 defines [gcode_macro BED_MESH_CALIBRATE]
+    (included from printer.cfg), so renaming Level_Bed to
+    bed_mesh_calibrate is a cross-file duplicate section, and
+    _BED_MESH_CALIBRATE exists nowhere. The qid rewards engineering
+    correctness, so the FIXTURE is corrected instead: attaching a modified
+    Knomi.cfg shadows the disk copy for this request only (the proven
+    _bare_project overlay mechanism), leaving the target name free and
+    `rename_existing: _BED_MESH_CALIBRATE` binding to the built-in — the
+    stock BTT pattern the commented line originally followed. Disk files
+    are never modified; the guards die loudly if the wrapper moves.
+    """
+    knomi = _load_trident_config("Knomi.cfg")
+    lines = knomi.splitlines(keepends=True)
+    out: list[str] = []
+    i = 0
+    removed = False
+    while i < len(lines):
+        if lines[i].strip() == "[gcode_macro BED_MESH_CALIBRATE]":
+            removed = True
+            i += 1
+            # Section body = everything up to the next boundary: a new
+            # section header or a col-0 comment. Params sit at col 0
+            # (rename_existing:), so indentation is NOT the boundary.
+            while i < len(lines):
+                s = lines[i].strip()
+                if s and (s.startswith("[") or s.startswith("#")):
+                    break
+                i += 1
+            continue
+        out.append(lines[i])
+        i += 1
+    stripped = "".join(out)
+    if not removed or "BTT_BED_MESH_CALIBRATE" in stripped:
+        raise RuntimeError(
+            "COMMENT-06 fixture: BED_MESH_CALIBRATE wrapper not cleanly "
+            "strippable from Knomi.cfg — re-verify the project"
+        )
+    return _cfg_context("printer.cfg") + (
+        ("Knomi.cfg", TRIDENT_FILE_LABEL, stripped),
+    )
+
+
 def build_comment_questions() -> list[TestQuestion]:
     """Comment/uncomment family (COMMENT-*), added 2026-09-28 with the
     rename patch_gcode->patch_section and the new comment_section /
@@ -2405,7 +2458,7 @@ def build_comment_questions() -> list[TestQuestion]:
             text=("Can you rename the level_bed macro to bed_mesh_calibrate "
                   "and comment back in the rename_existing: "
                   "_bed_mesh_calibrate"),
-            context_files=printer_cfg,
+            context_files=_comment06_context(),
             edit_tools=True,
             expected_tools=("config_edit",),
             require_tool=True,
