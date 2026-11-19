@@ -1023,6 +1023,18 @@ def build_macro_questions() -> list[TestQuestion]:
                 # The triple requirement keeps taste-fixes ("0.8 looks
                 # better") and wrong beliefs out; \bvalid covers 'a valid
                 # 0.0-1.0 value'.
+                #
+                # Cliff ruling (2026-11-19) — the `0.8` literal STAYS. Do not
+                # "fix" it to accept any in-range value. The question asks
+                # what happens AS WRITTEN ("tell me exactly what happens when
+                # I call it"), and the 2026-11-17 product guard (13f28af) now
+                # forces that framing in the first sentence. An answer that
+                # only reports a staged fix to 1.0 never states the as-written
+                # outcome, so it is a miss even though 1.0 is an in-range
+                # replacement — 9 historical legs fail exactly this way and
+                # are correctly red. Revisit ONLY if that guard is retired;
+                # then apply the 2026-11-16 silent-fix ruling to any in-range
+                # corrected value.
                 ("regex", r"(?i)out of range|outside the range|"
                           r"max(imum)? (of|is) 1|"
                           r"(?=[\s\S]*\b(correct|corrected|fix|fixed|"
