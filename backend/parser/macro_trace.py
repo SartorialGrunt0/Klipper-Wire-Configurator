@@ -153,10 +153,21 @@ class MotionState:
     homed: set[str]
     abs_xyz: bool = True
     abs_e: bool = True
+    # P2 (2026-11-18): commanded targets ride the same trace so runs=N
+    # threads them between calls. Laws: D2 — TARGETS only, never a current
+    # temperature or heating progress; D3 — an undeclared name is absent
+    # (renders '—'), a commanded-but-unparseable one is present as None
+    # (renders '?'). Keys: heaters name→°C, fans name→%, leds name→tuple |
+    # 'effect <n>' | 'off'.
+    heaters: dict[str, float | None] = field(default_factory=dict)
+    fans: dict[str, float | None] = field(default_factory=dict)
+    leds: dict[str, object] = field(default_factory=dict)
 
     def copy(self) -> "MotionState":
         return MotionState(dict(self.pos), set(self.homed),
-                           self.abs_xyz, self.abs_e)
+                           self.abs_xyz, self.abs_e,
+                           dict(self.heaters), dict(self.fans),
+                           dict(self.leds))
 
 
 _COORD_PATHS = ("toolhead.position", "gcode_move.gcode_position",
@@ -206,7 +217,54 @@ def seed_state(printer_state: dict) -> tuple[MotionState, list[str]]:
         homed = set(_AXES)
         notes.append("position was declared without homed_axes — "
                      "declaring a position asserts the machine knows it")
-    return MotionState(pos, homed), notes
+    # P2: heater/fan/LED state from DECLARED status keys only
+    # (Moonraker status names: extruder.target, heater_generic chamber
+    # .target, fan.speed, fan_generic myfan.speed, led strip.color_data).
+    heaters: dict[str, float | None] = {}
+    for key, raw in flat.items():
+        if not key.endswith(".target"):
+            continue
+        base = key[:-len(".target")]
+        if base in ("extruder", "heater_bed"):
+            nm = base
+        elif base.startswith("heater_generic "):
+            nm = base.split(" ", 1)[1]
+        else:
+            continue
+        v = _num(raw)
+        if v is not None:
+            heaters[nm] = v
+    fans: dict[str, float | None] = {}
+    for key, raw in flat.items():
+        if not key.endswith(".speed"):
+            continue
+        base = key[:-len(".speed")]
+        if base == "fan":
+            nm = "fan"
+        elif base.startswith(("fan_generic ", "heater_fan ",
+                              "controller_fan ")):
+            nm = base.split(" ", 1)[1]
+        else:
+            continue
+        v = _num(raw)
+        if v is not None:
+            fans[nm] = round(v * 100.0, 1)
+    leds: dict[str, object] = {}
+    for key, raw in flat.items():
+        if not key.endswith(".color_data") \
+                or not isinstance(raw, (list, tuple)) or not raw:
+            continue
+        base = key[:-len(".color_data")]
+        if not base.startswith("led ") or not isinstance(raw[0],
+                                                         (list, tuple)):
+            continue
+        comps = [_num(c) for c in raw[0][:4]]
+        if any(c is None for c in comps[:3]):
+            continue
+        leds[base.split(" ", 1)[1]] = tuple(
+            c if c is not None else 0.0 for c in comps)
+    return MotionState(pos, homed, heaters=heaters, fans=fans,
+                       leds=leds), notes
 
 
 # ── command parsing (mirrors the letter-vs-KEY=VALUE grammar of the
@@ -246,6 +304,45 @@ def parse_command(text: str) -> tuple[str, dict[str, str]] | None:
 
 def _fmt(v: float | None) -> str:
     return "?" if v is None else f"{v:g}"
+
+
+def _fmt_temp(v: float | None) -> str:
+    return "?" if v is None else f"{v:g}\u00b0C"
+
+
+def _fmt_pct(v: float | None) -> str:
+    return "?" if v is None else f"{v:g}%"
+
+
+def _fmt_led(v) -> str:
+    if isinstance(v, str):
+        return v
+    if v is None:
+        return "?"
+    if len(v) >= 4:
+        return "rgbw(" + ", ".join(_fmt(c) for c in v[:4]) + ")"
+    return "rgb(" + ", ".join(_fmt(c) for c in v[:3]) + ")"
+
+
+def _state_suffix(state: "MotionState") -> str:
+    """Declared-or-commanded heater/fan/LED state for Start and Final
+    lines; groups stay absent until something puts a name in them."""
+    out = ""
+    if state.heaters:
+        out += " \u00b7 targets: " + " ".join(
+            f"{n} {_fmt_temp(v)}"
+            for n, v in sorted(state.heaters.items()))
+    if state.fans:
+        out += " \u00b7 fans: " + " ".join(
+            f"{n} {_fmt_pct(v)}" for n, v in sorted(state.fans.items()))
+    if state.leds:
+        out += " \u00b7 leds: " + " ".join(
+            f"{n} {_fmt_led(v)}" for n, v in sorted(state.leds.items()))
+    return out
+
+
+def _before(store: dict, name: str, fmt) -> str:
+    return fmt(store[name]) if name in store else "\u2014"
 
 
 def _span(v: float, lo: float, hi: float, near_lo: str, near_hi: str) -> str:
@@ -322,6 +419,7 @@ def trace_motion(rendered: list[tuple[int | None, str]],
         start = f"Start: pos {_pos_str(state.pos)} \u00b7 homed {homed}"
         if ann:
             start += f" \u00b7 {ann}"
+    start += _state_suffix(state)
     if start_note:
         start += f" ({start_note})"
     add(start)
@@ -463,6 +561,139 @@ def trace_motion(rendered: list[tuple[int | None, str]],
                 state.abs_e = False
                 add(f"{loc}: M83 \u2192 relative extruder")
 
+        elif token in ("M104", "M109", "M140", "M190"):
+            # TARGETS only (D2) — the wait itself is not modelled and no
+            # current temperature is ever claimed.
+            nm = "extruder" if token in ("M104", "M109") else "heater_bed"
+            raw_s = params.get("S")
+            if raw_s is None:
+                # M109/M190 without S wait at the CURRENT target — the
+                # no-S form is in the registry snippet.
+                if token in ("M109", "M190") and nm in state.heaters:
+                    add(f"{loc}: {token} \u2192 {nm} target already "
+                        f"{_fmt_temp(state.heaters[nm])} (the wait is not "
+                        "modelled)")
+            else:
+                v = _num(raw_s)
+                note = "" if v is not None else \
+                    " (target did not render \u2014 Klipper: unable to " \
+                    "parse, the line fails at run time)"
+                old = _before(state.heaters, nm, _fmt_temp)
+                state.heaters[nm] = v
+                add(f"{loc}: {raw.strip()} \u2192 {nm} target {old} "
+                    f"\u2192 {_fmt_temp(v)}{note}")
+
+        elif token == "SET_HEATER_TEMPERATURE":
+            nm = (params.get("HEATER") or "").strip().lower()
+            if nm:
+                v = _num(params.get("TEMPERATURE"))
+                note = "" if v is not None else \
+                    " (value did not render \u2014 Klipper: unable to " \
+                    "parse, the line fails at run time)"
+                old = _before(state.heaters, nm, _fmt_temp)
+                state.heaters[nm] = v
+                add(f"{loc}: {raw.strip()} \u2192 {nm} target {old} "
+                    f"\u2192 {_fmt_temp(v)}{note}")
+
+        elif token == "TURN_OFF_HEATERS":
+            if state.heaters:
+                parts = [f"{n} target {_fmt_temp(v)} \u2192 0\u00b0C"
+                         for n, v in sorted(state.heaters.items())
+                         if v != 0]
+                for n in state.heaters:
+                    state.heaters[n] = 0.0
+                add(f"{loc}: TURN_OFF_HEATERS \u2192 "
+                    + (", ".join(parts) if parts else "already all 0\u00b0C"))
+            else:
+                add(f"{loc}: TURN_OFF_HEATERS \u2192 no heater targets "
+                    "known (heaters absent from the trace, not asserted "
+                    "off)")
+
+        elif token in ("M106", "M107"):
+            nm = "fan"
+            if token == "M106":
+                v = _num(params.get("S")) if "S" in params else 255.0
+                pct = None if v is None else round(v / 255.0 * 100.0, 1)
+            else:
+                pct = 0.0
+            old = _before(state.fans, nm, _fmt_pct)
+            state.fans[nm] = pct
+            add(f"{loc}: {raw.strip()} \u2192 {nm} speed {old} "
+                f"\u2192 {_fmt_pct(pct)}")
+
+        elif token == "SET_FAN_SPEED":
+            nm = (params.get("FAN") or "").strip().lower()
+            if nm:
+                v = _num(params.get("SPEED"))
+                note = ""
+                if v is None:
+                    note = (" (value did not render \u2014 Klipper: unable "
+                            "to parse, the line fails at run time)")
+                elif not 0.0 <= v <= 1.0:
+                    note = " (SPEED must be a 0\u20131 ratio \u2014 " \
+                           "Klipper refuses)"
+                    v = None
+                pct = None if v is None else round(v * 100.0, 1)
+                old = _before(state.fans, nm, _fmt_pct)
+                state.fans[nm] = pct
+                add(f"{loc}: {raw.strip()} \u2192 {nm} speed {old} "
+                    f"\u2192 {_fmt_pct(pct)}{note}")
+
+        elif token == "SET_LED":
+            nm = (params.get("LED") or "").strip().lower()
+            if nm:
+                comps, bad = [], False
+                for c in ("RED", "GREEN", "BLUE"):
+                    v = _num(params.get(c) or "0")
+                    if v is None:
+                        bad = True
+                    comps.append(v if v is not None else 0.0)
+                if "WHITE" in params and params["WHITE"].strip():
+                    w = _num(params["WHITE"])
+                    if w is None:
+                        bad = True
+                    comps.append(w if w is not None else 0.0)
+                old = _before(state.leds, nm, _fmt_led)
+                if bad:
+                    state.leds[nm] = None
+                    add(f"{loc}: {raw.strip()} \u2192 led {nm} {old} "
+                        "\u2192 ? (colour did not render \u2014 Klipper: "
+                        "unable to parse, the line fails at run time)")
+                else:
+                    state.leds[nm] = tuple(comps)
+                    add(f"{loc}: {raw.strip()} \u2192 led {nm} {old} "
+                        f"\u2192 {_fmt_led(comps)}")
+
+        elif token == "SET_LED_EFFECT":
+            nm = (params.get("LED") or "").strip().lower()
+            eff = (params.get("EFFECT") or "").strip().lower()
+            stop = (params.get("STOP") or "").strip() == "1"
+            if nm and (eff or stop):
+                old = _before(state.leds, nm, _fmt_led)
+                if stop:
+                    state.leds[nm] = "off"
+                    add(f"{loc}: {raw.strip()} \u2192 led {nm} {old} "
+                        "\u2192 stopped")
+                else:
+                    state.leds[nm] = f"effect {eff}"
+                    add(f"{loc}: {raw.strip()} \u2192 led {nm} {old} "
+                        f"\u2192 effect {eff} (colour cycles \u2014 not "
+                        "modelled)")
+
+        elif token == "STOP_LED_EFFECTS":
+            nm = (params.get("LED") or "").strip().lower()
+            stopped = []
+            for n, v in list(state.leds.items()):
+                if nm and n != nm:
+                    continue
+                if isinstance(v, str) and v.startswith("effect "):
+                    stopped.append(f"led {n} {v} \u2192 stopped")
+                    state.leds[n] = "off"
+            add(f"{loc}: STOP_LED_EFFECTS \u2192 "
+                + (", ".join(stopped) if stopped
+                   else "no running effects known \u2014 static colours "
+                        "are NOT turned off by this command"))
+
         elif token in Z_MOVERS:
             state.pos["z"] = None
             add(f"{loc}: {token} \u2014 physically moves Z: not modelled, "
@@ -476,6 +707,7 @@ def trace_motion(rendered: list[tuple[int | None, str]],
         final += f" \u00b7 e={_fmt(state.pos['e'])}"
     if ann:
         final += f" \u00b7 {ann}"
+    final += _state_suffix(state)
     if seen_cartesian or cart:
         final += (" \u00b7 (X0=left, Y0=front \u2014 conventions; verify "
                   "against your config)")

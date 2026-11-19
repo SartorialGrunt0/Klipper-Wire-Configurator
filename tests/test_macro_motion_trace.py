@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 import mcp_server  # noqa: E402
 from mcp_server import McpServer  # noqa: E402
 from parser.macro_trace import (  # noqa: E402
-    MotionState, derive_motion_profile, seed_state, trace_motion)
+    derive_motion_profile, seed_state, trace_motion)
 
 
 # ── machine profile derivation (frontend createMachineProfile parity) ──
@@ -268,7 +268,7 @@ def test_final_state_line_reports_position_and_annotations():
                         "gcode_move.homed_axes": "xyz"})
     tr = _t(_SLINGER, [(1, "G1 X0 Y5")], st)
     text = _lines(tr)
-    final = next(l for l in tr.lines if "Final state:" in l)
+    final = next(ln for ln in tr.lines if "Final state:" in ln)
     assert "front" in final          # Y=5 after the move
     assert "back" in text            # the Start line shows Y=235 = back edge
 
@@ -334,3 +334,128 @@ def test_runs_threads_position_between_calls(monkeypatch):
                            "gcode_move.homed_axes": "xyz"}})
     assert "carried from call 1" in out
     assert "190" in out and "180" in out   # 200→190→180 across the two calls
+
+
+# ── P2: heater/fan/LED targets — commanded before → after ──────────────
+# Laws inherited from the plan (.hermes/plans/2026-11-17_macro-simulation-
+# chat-card.md): D2 targets-and-commanded-values-only, NEVER a current
+# temperature; D3 an undeclared before-value stays "—", never 0.
+# SET_LED semantics pinned to reference/klipper led.py cmd_SET_LED: every
+# component defaults to 0 — SET_LED overwrites the whole colour (ablation
+# C7 confirmed this is what both engines agree on).
+
+def _tr(body, printer_state=None, profile=None):
+    seed, _notes = seed_state(printer_state or {})
+    return trace_motion(list(enumerate(body, 1)),
+                        profile or derive_motion_profile([_VORON]), seed)
+
+
+def test_heater_target_before_after_uses_dash_not_zero():
+    text = "\n".join(_tr(["M104 S215"]).lines)
+    assert "extruder target \u2014 \u2192 215\u00b0C" in text
+    # D3: an undeclared before-value must never read as 0
+    assert "0 \u2192 215" not in text and "0\u00b0C" not in text
+
+
+def test_seeded_heater_target_shows_declared_before():
+    text = "\n".join(_tr(["M104 S215"],
+                          {"extruder.target": 180}).lines)
+    assert "extruder target 180\u00b0C \u2192 215\u00b0C" in text
+    assert "targets: extruder 180\u00b0C" in text  # Start line declares seed
+
+
+def test_m109_m140_m190_set_targets_too():
+    text = "\n".join(_tr(["M109 S205", "M140 S60", "M190"]).lines)
+    assert "extruder target \u2014 \u2192 205\u00b0C" in text
+    assert "heater_bed target \u2014 \u2192 60\u00b0C" in text
+    assert "heater_bed target already 60\u00b0C" in text  # M190 with no S
+    # D2: the trace never claims a current temperature or heating progress
+    assert "current" not in text.lower()
+
+
+def test_set_heater_temperature_generic_heater():
+    text = "\n".join(
+        _tr(["SET_HEATER_TEMPERATURE HEATER=chamber TEMPERATURE=45"]).lines)
+    assert "chamber target \u2014 \u2192 45\u00b0C" in text
+
+
+def test_turn_off_heaters_zeroes_known_targets_only():
+    text = "\n".join(_tr(["M104 S200", "M140 S60", "TURN_OFF_HEATERS"]).lines)
+    assert "extruder target 200\u00b0C \u2192 0\u00b0C" in text
+    assert "heater_bed target 60\u00b0C \u2192 0\u00b0C" in text
+    assert "targets: extruder 0\u00b0C heater_bed 0\u00b0C" in text
+
+
+def test_fan_m106_m107_percent():
+    text = "\n".join(_tr(["M106 S128", "M107"]).lines)
+    assert "fan speed \u2014 \u2192 50.2%" in text
+    assert "fan speed 50.2% \u2192 0%" in text
+    text2 = "\n".join(_tr(["M106"]).lines)      # bare M106 = S255
+    assert "fan speed \u2014 \u2192 100%" in text2
+
+
+def test_set_fan_speed_ratio_and_out_of_range():
+    text = "\n".join(_tr(["SET_FAN_SPEED FAN=myfan SPEED=0.75"]).lines)
+    assert "myfan speed \u2014 \u2192 75%" in text
+    text = "\n".join(_tr(["SET_FAN_SPEED FAN=myfan SPEED=2",
+                           "G90"]).lines)
+    assert "myfan speed \u2014 \u2192 ?" in text and "0\u20131" in text
+    # unresolved fan does not abort the trace
+    assert "Final state" in text and "ABORTED" not in text
+
+
+def test_set_led_overwrites_omitted_components_zero():
+    text = "\n".join(_tr(["SET_LED LED=strip RED=1 GREEN=0.2"]).lines)
+    assert "led strip \u2014 \u2192 rgb(1, 0.2, 0)" in text
+    text = "\n".join(_tr(["SET_LED LED=strip WHITE=0.5"]).lines)
+    assert "rgbw(0, 0, 0, 0.5)" in text
+
+
+def test_led_effect_set_stop_and_stop_all():
+    text = "\n".join(_tr(["SET_LED_EFFECT LED=strip EFFECT=breathing",
+                           "SET_LED_EFFECT LED=strip STOP=1"]).lines)
+    assert "led strip \u2014 \u2192 effect breathing" in text
+    assert "led strip effect breathing \u2192 stopped" in text
+    text = "\n".join(_tr(["SET_LED LED=x RED=1",
+                          "STOP_LED_EFFECTS"]).lines)
+    # Klipper law: STOP_LED_EFFECTS stops EFFECTS — a static SET_LED
+    # colour is not an effect and survives the command.
+    assert "static colours are NOT turned off" in text
+
+
+def test_target_that_did_not_render_is_unresolved_not_refused():
+    text = "\n".join(_tr(["M104 S", "M106 S255"]).lines)
+    assert "extruder target \u2014 \u2192 ?" in text
+    assert "unable to parse" in text          # the run-time risk, said aloud
+    assert "ABORTED" not in text              # parse law, not motion law
+    assert "fan speed" in text                # later lines still traced
+
+
+def test_final_state_lists_targets_fans_leds():
+    body = ["G28", "M104 S215", "SET_FAN_SPEED FAN=part SPEED=1",
+            "SET_LED LED=st RED=0 GREEN=1 BLUE=0"]
+    final = [ln for ln in _tr(body).lines if ln.startswith("Final state")][0]
+    assert "targets: extruder 215\u00b0C" in final
+    assert "fans: part 100%" in final
+    assert "leds: st rgb(0, 1, 0)" in final
+
+
+def test_runs_threads_targets_between_calls(monkeypatch):
+    monkeypatch.setattr(mcp_server, "_working_scan_items", lambda: [(
+        "printer.cfg",
+        _TRACE_CFG + "\n[gcode_macro WARMER]\ngcode:\n"
+                     "    M104 S215\n    M106 S128\n")])
+    out = McpServer()._handle_simulate_macro(
+        {"macro": "WARMER", "runs": 2})
+    # The render stays static (Klipper law) — threading is EXECUTION
+    # level: call 2's trace Start line carries call 1's targets.
+    assert "carried from call 1" in out
+    starts = [ln for ln in out.splitlines() if "carried from call 1" in ln]
+    assert any("targets: extruder 215\u00b0C" in s and "fans: fan 50.2%"
+               in s for s in starts)
+
+
+def test_skill_body_and_chat_description_pin_the_trace_law():
+    from api.ai_routes import _MCP_TOOL_SNIPPETS, _macro_skill_body
+    assert "Execution trace" in _MCP_TOOL_SNIPPETS["simulate_macro"]
+    assert "Final state" in _macro_skill_body()

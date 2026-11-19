@@ -1268,8 +1268,11 @@ class McpServer:
                     "position after every move annotated against the "
                     "geometry the project DECLARES ([stepper] bounds, "
                     "home/endstops), un-homed and soft-limit moves shown "
-                    "as REFUSED (a refused line aborts), and a 'Final "
-                    "state' line — read it before claiming a macro "
+                    "as REFUSED (a refused line aborts), heater/fan/LED "
+                    "commands showing their TARGET changing before \u2192 "
+                    "after (targets only \u2014 never a current "
+                    "temperature), and a 'Final "
+                    "state' line \u2014 read it before claiming a macro "
                     "reaches where the user asked (front centre is not "
                     "the centre). Heat lines say "
                     "'Set' vs 'Set and Wait': M104/M140 return "
@@ -1294,7 +1297,9 @@ class McpServer:
                     "result: it renders the TEMPLATE only — CALL macros "
                     "are not recursed; the 'Execution trace' executes a "
                     "simple motion model only (speeds and dwell do not "
-                    "run; probing and other Z-movers make Z unresolved, "
+                    "run; heater/fan/LED report TARGETS while heating "
+                    "itself does not run; probing and other Z-movers "
+                    "make Z unresolved, "
                     "they do not fake a position); heating and delays do "
                     "not execute (waiting commands are reported as "
                     "waiting under 'Expected effect', nothing pauses)."
@@ -3707,7 +3712,9 @@ class McpServer:
         "Limits: this renders the TEMPLATE only — CALL macros are not "
         "recursed. The 'Execution trace' runs the RENDERED lines over a "
         "simple motion model: position, homing, and soft limits "
-        "execute; speeds, dwell, and heating do not, and probing or "
+        "execute; speeds, dwell, and heating progress do not; "
+        "heater/fan/LED lines update TARGETS as commanded (targets only, "
+        "never a current temperature); and probing or "
         "other Z-movers make Z unresolved rather than fake a position "
         "(waiting commands appear under 'Expected effect' as Set / Set "
         "and Wait / blocking waits, but nothing actually pauses). "
@@ -4192,8 +4199,10 @@ class McpServer:
                     start_note=trace_note)
                 out.append("Execution trace (moves execute over the "
                            "rendered lines against the machine geometry "
-                           "the project declares; feedrate and waiting "
-                           "are not modelled):")
+                           "the project declares; heater/fan/LED lines "
+                           "report TARGETS as commanded; feedrate, "
+                           "waiting, and heating progress are not "
+                           "modelled):")
                 out.extend("  " + t for t in tr.lines)
 
         effects = McpServer._sim_effect_lines(

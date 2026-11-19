@@ -136,7 +136,9 @@ def test_undeclared_scenario_variable_is_refused_not_invented():
     # Klipper truth kept: the undeclared read stays falsy, so this one
     # scenario renders the single else-branch command and nothing else.
     assert "M107" not in out
-    assert out.count("M106 S255") == 1
+    # one rendered line + its Execution trace echo (the trace mirrors
+    # every modelled command; only M107's absence proves the branch)
+    assert out.count("M106 S255") == 2
 
 
 # ── provenance law: the result labels what it knows ────────────────────────
