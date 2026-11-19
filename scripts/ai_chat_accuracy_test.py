@@ -1435,28 +1435,24 @@ def build_simtool_questions() -> list[TestQuestion]:
                 ("tool_output_regex", "simulate_macro::M104 S240"),
                 ("tool_output_not_regex",
                  "simulate_macro::outside the range|maximum of 1"),
-                # r1 (2026-11-15) FALSE-FAILED "Klipper will accept it" —
-                # the arm listed accepted/accepts but not the bare verb,
-                # which is the most natural phrasing of this verdict.
-                # The command-level verdict must be affirmative. Guards are
-                # the INVENTED-BOUND claim only: "if max_temp is below 240
-                # Klipper will refuse it" is TRUE and must not fail — so the
-                # negative arms name the bound, never the verb "accept"
-                # (r2 trace: "it will not run successfully ... won't accept"
-                # was an environment finding, not a bounds error).
-                ("regex", r"(?i)\b(valid|fine|allowed|ok)\b|"
-                          r"will (be )?accept|accepts\b|"
-                          r"no (issues|problems|refusal|findings|range rejection|range error)|"
-                          r"not (an )?out[ -]of[ -]range|"
-                          r"not rejected|not outside (any|a) range|no bound"),
-                          # NOTE: no bare accept-STEM arm: `accept\w*` would
-                          # match "won't accept" — a fabricated refusal must
-                          # not light the affirmative arm. The three 2026-11-17
-                          # answers needed only not-rejected / not-outside /
-                          # no-range-rejection arms.
-                ("not_contains", "outside the range Klipper accepts"),
-                ("not_contains", "is outside the range"),
-                ("not_contains", "exceeds the maximum"),
+                # Engagement: the answer must be ABOUT the value under
+                # test. Deliberately verdict-free — no synonym list here.
+                ("regex", r"\b240\b|M104|M109"),
+                # The verdict, graded structurally (2026-11-19): the prose
+                # may not ASSERT a refusal. Affirmations were enumerated
+                # here for three live rounds and lost every time — r1
+                # (2026-11-15) "Klipper will accept it" missed the arm;
+                # r2 added bold "only one of"; p3-r1 (2026-11-19) said
+                # "240 is in range — no rejection" / "**Findings: none**"
+                # / "will not be rejected" and missed three more. Refusal
+                # claims are a closed set and every correct mention of one
+                # is scoped (conditional "only if max_temp is below 240",
+                # or environmental "won't run on this printer"), so the
+                # kind decides scope by clause, not wording.
+                # The three old not_contains guards (outside the range
+                # Klipper accepts / is outside the range / exceeds the
+                # maximum) are subsumed: each is an unscoped claim.
+                ("no_asserted_refusal", ""),
             ),
         ),
         TestQuestion(
@@ -4154,6 +4150,50 @@ def _staged_section_body(text: str, section: str) -> str | None:
 
 
 # ── Evaluation ─────────────────────────────────────────────────────────
+# ── refusal-claim vocabulary for the `no_asserted_refusal` kind ─────────
+# SIMTOOL-07 (2026-11-19). A correct cry-wolf answer may NAME the refusal
+# it rules out, but only inside a scoped clause — conditional ("would
+# refuse only if max_temp is below 240") or environmental ("won't run on
+# this printer — config error"). Affirmations are an OPEN set; refusal
+# claims are CLOSED. So the criterion enumerates the claim and decides
+# scope structurally, instead of enumerating ways to say yes (three live
+# rounds added "will accept", bold "only one of", then "in range — no
+# rejection"/"Findings: none"/"will not be rejected" and still missed).
+_REFUSAL_CLAIM_RE = re.compile(
+    r"(?i)out[ -]of[ -]range|outside the range|"
+    r"\bwill (?:be )?(?:refused|rejected)\b|\bis rejected\b|\bare rejected\b|"
+    r"\bwon'?t (?:be )?(?:accepted|run)\b|"
+    r"\bwill not (?:be )?(?:run|accepted)\b|"
+    r"\bexceeds? (?:the )?(?:maximum|max_temp|limit)\b|"
+    r"\baborts? the macro\b")
+# Negators scope a claim when they sit shortly BEFORE it in the SAME
+# clause ("no out-of-range rejection", "not rejected"). They must not
+# rescue a neighbouring clause: "will not accept 240 — so the command is
+# rejected" asserts a refusal and stays red.
+_REFUSAL_NEGATOR_RE = re.compile(
+    r"(?i)\bno\b|\bnot\b|\bnever\b|\bnothing\b|\bneither\b|\bnor\b|"
+    r"\bwithout\b|\bnone\b|\bisn'?t\b|\baren'?t\b|\bwon'?t\b|"
+    r"\bdoesn'?t\b|\bdidn'?t\b|\bcan'?t\b|\bfree (?:of|from)\b")
+# Conditional / environmental frames: a refusal that only happens under a
+# condition or because of the host's own state is not a claim about the
+# command, and the qid's doctrine says those answers PASS.
+_REFUSAL_SCOPE_RE = re.compile(
+    r"(?i)\bif\b|\bunless\b|\bwould\b|\bshould\b|\bcould\b|\bonly if\b|"
+    r"\bassuming\b|\bdepending\b|\breal printer\b|"
+    r"\byour (?:config|printer|extruder|max_temp)\b|"
+    r"\b(?:this|the) printer\b|\bthis host\b|\bworking config\b|\bthe config\b|"
+    r"\bno \[extruder\]\b|\bhypothetical\b|\bcase where\b|\buntil\b|"
+    r"\bwhile\b|\bright now\b|\bmust be (?:set|configured)\b")
+_NEGATOR_WINDOW = 45
+
+
+def _verdict_clauses(text: str) -> list[str]:
+    """Clauses for verdict grading: sentence enders plus em/en dashes and
+    " - " (the models' verdict frames: "240 is in range — no rejection")."""
+    text = re.sub(r"[\u2014\u2013]", ";", text)
+    return [c for c in re.split(r"[.;:!?\n]| - ", text) if c.strip()]
+
+
 def criterion_ok(kind: str, value: str, content: str,
                  memory: tuple[str, dict | None] | None = None,
                  tool_calls: list[dict] | None = None,
@@ -4514,6 +4554,21 @@ def criterion_ok(kind: str, value: str, content: str,
             if not neg.search(content[start:end]):
                 return False
             idx = i + len(phrase)
+    if kind == "no_asserted_refusal":
+        # Prose-only; `value` is unused. Fails on the FIRST refusal claim
+        # that is NOT scoped — a claim preceded (same clause, short window)
+        # by a negator, or sitting in a conditional/environmental clause,
+        # is a refusal the answer RULES OUT or attributes to the host, and
+        # passes. See _REFUSAL_* above for why the test is inverted.
+        for clause in _verdict_clauses(content):
+            for m in _REFUSAL_CLAIM_RE.finditer(clause):
+                prefix = clause[:m.start()][-_NEGATOR_WINDOW:]
+                if _REFUSAL_NEGATOR_RE.search(prefix):
+                    continue
+                if _REFUSAL_SCOPE_RE.search(clause):
+                    continue
+                return False
+        return True
     if kind == "reply_not_regex":
         # Prose-claim NEGATIVE (C-01, round-1 review 2026-10-25): fails
         # when the final reply MATCHES the regex. value is

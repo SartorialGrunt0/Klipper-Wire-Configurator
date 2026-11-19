@@ -756,6 +756,24 @@ NEGATIVE_CONTROLS += [
 ]
 
 
+# ── SIMTOOL-07 verdict corpus (2026-11-19) ──────────────────────────────
+# The `no_asserted_refusal` kind grades adjudicated answers, so a new live
+# phrasing is DATA — append it to the corpus — instead of another regex arm
+# (three rounds of arm-patching each false-failed a correct answer). Single
+# source of truth: tests/data/simtool07_verdicts.json, also unit-tested by
+# tests/test_accuracy_bank_refusal_verdict.py.
+_CORPUS_PATH = ROOT / "tests" / "data" / "simtool07_verdicts.json"
+if _CORPUS_PATH.exists():
+    NEGATIVE_CONTROLS += [
+        (f"SIMTOOL-07 corpus: {entry['label']}", "SIMTOOL-07",
+         dict({"response": entry["text"], "pending_edits": [],
+               "tool_calls": [{"name": "simulate_macro",
+                               "output": _SIM_PREHEAT_CLEAN_OUTPUT}]},
+              **({"_expect_pass": True} if entry["expect"] == "pass" else {})))
+        for entry in json.loads(_CORPUS_PATH.read_text())["entries"]
+    ]
+
+
 def controls() -> int:
     qmap = bank()
     print("=" * 74)
