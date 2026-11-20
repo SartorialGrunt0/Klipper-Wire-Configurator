@@ -316,21 +316,38 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     }
   }, [open, docked, settings]);
 
-  // PR #43 review F6: the message trail persists across page reloads but
-  // kept/undone events are memory-only, so a reloaded thread that was
-  // never explicitly saved would claim 'awaiting review' for staging
-  // decided in the lost session. Everything restored at mount is inside
-  // the no-decision-record zone: those rows render 'unknown' (absence
-  // never claims). A decision made NOW on a still-open review row beats
-  // the boundary — a matching decision always outranks it — and loading
-  // an explicit save clears it, because that record arrives with the
-  // conversation whole.
+  // PR #43 review F6 + third pass (L-1/L-2): the message trail persists
+  // across page reloads but kept/undone events are memory-only, so a
+  // reloaded thread that was never explicitly saved would claim
+  // 'awaiting review' for staging decided in the lost session.
+  // Everything restored is inside the no-decision-record zone: those
+  // rows render 'unknown' (absence never claims). A decision made NOW
+  // on a still-open review row beats the boundary — a matching decision
+  // always outranks it (the overlay branch runs before the boundary) —
+  // and loading an explicit save clears it, because that record arrives
+  // with the conversation whole.
+  // L-1: the boundary must be armed when the trail ARRIVES. The trail
+  // lands asynchronously (main.tsx fires loadState() in the same tick
+  // it renders, and the backend file is the source of truth), so a
+  // mount-only effect read an empty store, never armed anything, and
+  // every restored staging reported 'awaiting review'. Watch for the
+  // first non-empty trail that did NOT come from a send in this
+  // session. (A send racing the restore loses its message to the
+  // restore wholesale — pre-existing behavior — and this boot-only
+  // window cannot re-open after that.)
+  // L-2: the newest restored turn carries turnOrdinal == the user
+  // count and the boundary test is strict (`<`), so the boundary is
+  // ONE PAST the count — otherwise the last restored staging keeps
+  // claiming 'awaiting review' for its lost decision.
+  const decisionBoundaryArmedRef = useRef(false);
+  const sentThisSessionRef = useRef(false);
   useEffect(() => {
-    const users = useAiStore.getState().messages
-      .filter((m) => m.role === 'user').length;
-    if (users > 0) useWorkLedgerStore.getState().setDecisionTrustFrom(users);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (decisionBoundaryArmedRef.current || sentThisSessionRef.current) return;
+    const users = messages.filter((m) => m.role === 'user').length;
+    if (users === 0) return;
+    useWorkLedgerStore.getState().setDecisionTrustFrom(users + 1);
+    decisionBoundaryArmedRef.current = true;
+  }, [messages]);
 
   // ── Auto-scroll to bottom (sticky) ──────────────────────────────
   // Follows new messages AND content growth (approval cards, progress
@@ -479,6 +496,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       // does NOT clear the edits an earlier one staged. Those stay in the
       // review summary until they are kept or undone.
       appliedStagedRef.current = '';
+
+      // L-1 (third pass): a send means any trail in the store is now
+      // session-authored — its decisions are live, so the no-decision
+      // boundary must never be armed from it.
+      sentThisSessionRef.current = true;
 
       const userMsg = { role: 'user' as const, content: trimmedMessage, hiddenFromUser: options?.hiddenFromUser === true };
       const previousMessages = options?.hiddenFromUser ? [] : messages;
@@ -1164,8 +1186,12 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       // the fresh epoch (they arrive with their conversation, trustworthy
       // as a set). F6: the save carries its decision record whole, so
       // nothing in the loaded thread is untrusted.
+      // L-1 (third pass): mark the boundary armed too — an explicit
+      // load must not be re-armed by the trail watcher later (the trail
+      // it brings is trustworthy, decisions included).
       useWorkLedgerStore.getState().bumpEpoch();
       useWorkLedgerStore.getState().setDecisionTrustFrom(null);
+      decisionBoundaryArmedRef.current = true;
       useWorkLedgerStore.getState().hydrate(conversation.workLedger ?? []);
     },
     [saveCurrentConversation, setMessages, setSettings],

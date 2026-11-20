@@ -458,6 +458,31 @@ describe('buildWorkLedger — lineage epoch and trust boundary (PR #43 F5/F6)', 
       .toBe('kept');
   });
 
+  it('L-2: the boundary covers the LAST restored turn (users + 1)', () => {
+    // Restored trail with two staged turns: ordinals 1 and 2, users = 2.
+    // ChatDialog arms the boundary at users + 1 = 3 — the newest
+    // restored staging (ordinal == users, which `trustFrom: 2` would
+    // spare) must render 'unknown' too…
+    const twoTurnTrail: ChatMessage[] = [
+      user('one'),
+      assistant([call('config_edit', { file: 'printer.cfg', section: 'led' }, SINGLE_OK)]),
+      user('two'),
+      assistant([call('config_edit', { file: 'printer.cfg', section: 'fan' }, SINGLE_OK)]),
+      user('three'),
+    ];
+    const rows = buildWorkLedger(twoTurnTrail, [], { epoch: 1, trustFrom: 3 });
+    const bySection = Object.fromEntries(rows.map((r) => [r.section, r.verdict]));
+    expect(bySection).toEqual({ led: 'unknown', fan: 'unknown' });
+    // …while a decision made NOW on that last row (turnIndex == users)
+    // still outranks the boundary.
+    const keptFan: WorkLedgerDecision = {
+      file: 'printer.cfg', section: 'fan', verdict: 'kept', turnIndex: 2, epoch: 1,
+    };
+    const rows2 = buildWorkLedger(twoTurnTrail, [keptFan], { epoch: 1, trustFrom: 3 });
+    const fanRow = rows2.find((r) => r.section === 'fan')!;
+    expect(fanRow.verdict).toBe('kept');
+  });
+
   it('failed rows never become unknown (trace-derived, trustworthy after reload)', () => {
     const failTrail: ChatMessage[] = [
       user('one'),
