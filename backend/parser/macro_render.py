@@ -78,12 +78,13 @@ shows whether the invocation is legal.
 from __future__ import annotations
 
 import ast
+import builtins as _builtins
 import json
 import logging
 import re
 import shlex
+from collections import OrderedDict
 from dataclasses import dataclass, field, replace
-from functools import lru_cache
 
 import jinja2
 from jinja2 import UndefinedError
@@ -161,6 +162,13 @@ class RenderFinding:
 
 
 _RENDER_LINE_CAP = 5000  # bounded work: stop verifying past this many lines
+# PR #43 review F3 (bounded work law): total loop iterations one render
+# may consume. The old guard regex matched only bare 6+ digit range()
+# LITERALS, so computed bounds — range(10**9), a {% set %}-bound, nested
+# loops — reached the render and HUNG the save-gate thread (the engine
+# runs on every validate_config). The budget shadows `range` itself, so
+# the bound holds for every shape and is checked BEFORE materializing.
+_RENDER_ITER_BUDGET = 100_000
 
 
 @dataclass(frozen=True)
@@ -199,13 +207,13 @@ class _Unknown:
     def __float__(self): return float("nan")
 
     def __int__(self):
-        # UNKNOWN must stay invisible-but-plausible where the template
-        # coerces to int (|int, range()). 0 would make
-        # 'range(printer.x|int)' render ZERO times — silently dropping
-        # branch coverage the simulation exists to provide; 1 executes
-        # the body exactly once. The fabricated digit never gains
-        # severity: it is only reachable where real values exist.
-        return 1
+        # PR #43 review F2: this used to fabricate 1 to keep
+        # 'range(printer.x|int)' rendering once — but the digit landed in
+        # RENDERED COMMAND TEXT ('M104 S1'), presented as what Klipper
+        # would send. Honesty beats coverage: raise exactly like the
+        # truth test / iteration above; the variant contains to an info
+        # macro_render_blocked and never claims a rendered shape.
+        raise _RenderBlocked("int cast of unknown printer state")
 
     def __round__(self, n=None): return self
     def __trunc__(self): return self
@@ -264,7 +272,9 @@ class _StateNode:
     def __iter__(self):
         raise _RenderBlocked("iteration over a declared state container")
     def __float__(self): return float("nan")
-    def __int__(self): return 1  # coverage parity with _Unknown
+    # PR #43 review F2: same law as _Unknown — no fabricated digit.
+    def __int__(self):
+        raise _RenderBlocked("int cast of an undeclared state container")
 
     def _widen(self, *args): return UNKNOWN
     __add__ = __radd__ = _widen
@@ -665,6 +675,27 @@ def _render_context(params: dict[str, str],
         # and the caller treats the splat as undecided (never as absent).
         "rawparams": rawparams,
     })
+    # PR #43 review F3: shadow Jinja's `range` global with a budgeted one.
+    # The span is checked (O(1) on a range object) BEFORE any iteration
+    # materializes, and a per-render counter bounds TOTAL loop work across
+    # nested calls — computed bounds and nested loops included, the two
+    # shapes the old literal regex missed. Over-budget control flow is
+    # contained to info macro_render_blocked by _render_one, exactly like
+    # every other un-followable flow. Budget-sized ranges behave exactly
+    # like the builtin (it is returned untouched).
+    budget = [0]
+
+    def _budgeted_range(*args):
+        r = _builtins.range(*args)
+        size = len(r)
+        if budget[0] + size > _RENDER_ITER_BUDGET:
+            raise _RenderBlocked(
+                f"loop work exceeds the {_RENDER_ITER_BUDGET}-iteration "
+                "simulation budget")
+        budget[0] += size
+        return r
+
+    ctx["range"] = _budgeted_range
     return ctx
 
 
@@ -978,6 +1009,11 @@ def _is_traditional_gcode(token: str) -> bool:
 # tokenizer for traditional letter-parameter commands.
 _KLIPPER_ARGS_R = re.compile("([A-Z_]+|[A-Z*])")
 
+# PR #43 review F1: an args_r run that IS (a letter + ) a float(UNKNOWN)
+# marker — 'SNAN'/'PINF'/'NAN'/'-INF'/'S-INF'. Klipper never sees these;
+# they are simulation markers absorbed into letter runs.
+_SENTINEL_RUN_RE = re.compile(r"[A-Z*]?-?(?:NAN|INF)")
+
 
 def _check_rendered_line(text: str, registry: dict, variant: int,
                          source_line: int | None = None,
@@ -1030,6 +1066,26 @@ def _check_rendered_line(text: str, registry: dict, variant: int,
         # (unknown_gcode_command) owns that verdict — post-render does
         # not duplicate it.
         return []
+
+    # PR #43 review F1: the UNKNOWN sentinel must never be tokenized as a
+    # value. Klipper never sees '<unknown>'/'nan' — they are simulation
+    # markers — but args_r cuts 'S<unknown>' into S='<' (bogus unparseable
+    # ERROR that survived the human filter and the AI delta gate: a false
+    # block on a config Klipper executes) and absorbs 'Snan' into one
+    # letter run (the S check silently VANISHED). Traditional letter
+    # commands have no string grammar: a marker anywhere on the line means
+    # a value is unknown state — one info, shape not decisive.
+    if _is_traditional_gcode(token):
+        up = text.upper()
+        if ("<" in up and "UNKNOWN" in up) or any(
+                _SENTINEL_RUN_RE.fullmatch(p.strip())
+                for p in _KLIPPER_ARGS_R.split(up)):
+            return [RenderFinding(
+                "info", "macro_unknown_value",
+                f"A parameter of {token} renders as unknown printer state "
+                "(<unknown>/NaN) — the command SHAPE was simulated with "
+                "the value unmeasured.", variant=variant,
+                source_line=source_line)]
 
     findings: list[RenderFinding] = []
     # Klipper tokenizes parameters in TWO flavors (review L7):
@@ -1617,17 +1673,11 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
         # error (A-03).
         return MacroRenderResult(findings=_syntax_findings())
 
-    # Bounded work (round-2 D6): a body looping over a huge constant
-    # range hangs the render (range(10**9) neither raises nor gets
-    # contained — unlike range(...)|list, which trips the S2 guard).
-    # Refuse up front with an info finding: validation must never stall.
-    _big_range = re.search(r"\brange\s*\(\s*(\d[\d_]{5,})", stripped)
-    if _big_range:
-        return MacroRenderResult(findings=_syntax_findings() + [RenderFinding(
-            "info", "macro_render_blocked",
-            f"Template loops over range({_big_range.group(1)}) — too "
-            "large to simulate; this body's rendered commands were not "
-            "verified.")])
+    # PR #43 review F3: the old pre-render regex guard
+    # (r"range\\(\\s*(\\d[\\d_]{5,})") is GONE — it matched only bare
+    # literals and its own comment named range(10**9), the shape it did
+    # not catch. Loop work is now bounded structurally for every shape by
+    # the budgeted range in _render_context.
 
     # Param-presence guards consult PARAMS ONLY (review L6): Klipper's
     # params dict never contains the macro's variables. Bare `x is
@@ -1786,6 +1836,33 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
                         continue
                 findings.append(replace(f, source_line=f.source_line or src_line))
 
+    # PR #43 review F4 (4R static-decidability law): a sim ERROR is a
+    # blocking verdict only when the breakage holds on EVERY simulated
+    # path. With unknown-condition expansion, an error code that fired on
+    # only a SUBSET of variants lives under a condition on unknown printer
+    # state — Klipper fails only if that state occurs — so those findings
+    # downgrade to warning. is_sim_advisory then strips them from the
+    # human save gate (D1) and from the AI delta gate (D2); the tool
+    # surfaces keep them with the gating caveat (D3). A code that fired on
+    # all variants (e.g. both arms broken) is every-path and keeps ERROR.
+    if len(variants) > 1:
+        _error_variants: dict[str, set] = {}
+        for f in findings:
+            if f.severity == "error" and f.variant is not None:
+                _error_variants.setdefault(f.code, set()).add(f.variant)
+        _partial_codes = {code for code, vs in _error_variants.items()
+                          if vs != set(range(len(variants)))}
+        if _partial_codes:
+            findings = [
+                replace(f, severity="warning", message=f.message + (
+                    " — simulated on an arm gated by unknown printer "
+                    "state: it fails only if that condition occurs, not "
+                    "on every path."))
+                if (f.severity == "error" and f.code in _partial_codes)
+                else f
+                for f in findings
+            ]
+
     # Dedup findings that repeat across variants when the breakage is
     # structural (same code + message + source line): keep the first
     # (lowest variant index) so a both-arms defect is reported once.
@@ -1816,7 +1893,36 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
     )
 
 
-@lru_cache(maxsize=1024)
+# PR #43 review A-R2: @lru_cache(maxsize=1024) retained whole
+# MacroRenderResult objects — up to _RENDER_LINE_CAP (5000) RenderedLine
+# entries plus findings — per unique body/context tuple. Repeated
+# validate_macro/simulate_macro calls over large bodies could therefore
+# retain on the order of a gigabyte despite the entry-count cap. Manual
+# LRU with TWO bounds: entry count (as before) and a per-entry rendered-
+# line ceiling; oversized results are computed but NOT retained (a body
+# that large is rarely called twice, and never caching it is the honest
+# memory/cost trade).
+_RENDER_CACHE_MAX_ENTRIES = 1024
+_RENDER_CACHE_MAX_LINES = 1000
+_render_cache: "OrderedDict[tuple, MacroRenderResult]" = OrderedDict()
+
+
+def _cache_get(key: tuple):
+    hit = _render_cache.get(key)
+    if hit is not None:
+        _render_cache.move_to_end(key)
+    return hit
+
+
+def _cache_put(key: tuple, result: MacroRenderResult) -> None:
+    if len(result.rendered) > _RENDER_CACHE_MAX_LINES:
+        return  # oversized: never retained
+    _render_cache[key] = result
+    _render_cache.move_to_end(key)
+    while len(_render_cache) > _RENDER_CACHE_MAX_ENTRIES:
+        _render_cache.popitem(last=False)
+
+
 def _simulate_cached(body: str, params_items: tuple[tuple[str, str], ...],
                      max_variants: int,
                      variables_items: tuple[tuple[str, str], ...],
@@ -1834,6 +1940,11 @@ def _simulate_cached(body: str, params_items: tuple[tuple[str, str], ...],
     # depend on which hardware the loaded project declares, so two
     # projects must never share a cached result.
     import json
+    key = (body, params_items, max_variants, variables_items,
+           state_items, defaults_items, invocation_given, sections_items)
+    hit = _cache_get(key)
+    if hit is not None:
+        return hit
     state = {}
     for path, raw in state_items:
         try:
@@ -1841,12 +1952,14 @@ def _simulate_cached(body: str, params_items: tuple[tuple[str, str], ...],
         except ValueError:
             state[path] = raw
     sections = None if sections_items is None else frozenset(sections_items)
-    return simulate_macro_uncached(body, dict(params_items),
-                                   frozenset(), max_variants,
-                                   dict(variables_items), state,
-                                   declared_defaults=dict(defaults_items),
-                                   invocation_given=invocation_given,
-                                   sections=sections)
+    result = simulate_macro_uncached(body, dict(params_items),
+                                     frozenset(), max_variants,
+                                     dict(variables_items), state,
+                                     declared_defaults=dict(defaults_items),
+                                     invocation_given=invocation_given,
+                                     sections=sections)
+    _cache_put(key, result)
+    return result
 
 
 def simulate_macro(body: str, params: dict[str, str] | None = None,

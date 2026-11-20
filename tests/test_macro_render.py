@@ -30,7 +30,8 @@ BACKEND_DIR = Path(__file__).resolve().parents[1] / "backend"
 if str(BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(BACKEND_DIR))
 
-from parser.macro_render import MAX_RENDER_VARIANTS, simulate_macro  # noqa: E402
+from parser.macro_render import (  # noqa: E402
+    MAX_RENDER_VARIANTS, is_sim_advisory, simulate_macro)
 
 
 def _codes(result):
@@ -202,7 +203,12 @@ def test_unknown_condition_renders_both_arms():
     # validators (and the W1 presence check) cannot see.
     empties = _findings(result, "macro_param_renders_empty")
     assert len(empties) == 1
-    assert empties[0].severity == "error"
+    # PR #43 review F4 (static-decidability law): an arm-only defect under
+    # an UNKNOWN condition fails only if that state occurs — it is a
+    # warning, not a blocking error. The discovery property (the arm-level
+    # defect IS found and reported on the tool surface) is unchanged.
+    assert empties[0].severity == "warning"
+    assert is_sim_advisory(empties[0].code, empties[0].severity)
     assert empties[0].source_line == 4
     assert empties[0].variant == 1  # the false arm
 
