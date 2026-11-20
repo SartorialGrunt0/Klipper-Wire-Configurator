@@ -870,6 +870,31 @@ def _finding_is_param_dependent(finding: RenderFinding, src_line: str,
     return _expr_depends_on_missing(src_line, alias_map, param_dependent)
 
 
+def _install_honest_int_filter(env: jinja2.Environment) -> None:
+    """PR #43 second pass (F2b): Jinja's int filter swallows ValueError,
+    so ``int(NaN)`` returns 0 and ``int(NaN, 9)`` returns 9 — the chain
+    ``{printer.…|float|int}`` turned the unknown-state NaN (the float
+    form of the UNKNOWN sentinel, produced by ``|float`` after the
+    sentinel's ``__float__``) into a FABRICATED S0/S9 with zero findings.
+    The direct ``{state|int}`` cast blocks (F2); a NaN reaching the int
+    filter can only come from unknown state, so the filter blocks the
+    same way — the simulation may stay silent, it may never guess.
+    Everything decidable delegates to Jinja's own filter untouched.
+    Idempotent: installs once on the shared validator env (validator
+    itself only COMPILES with it; rendering happens here)."""
+    if getattr(env, "_kwc_honest_int_installed", False):
+        return
+    from jinja2.filters import do_int as _jinja_do_int
+
+    def _honest_int(value, default=0, base=10):
+        if isinstance(value, float) and value != value:  # NaN
+            raise _RenderBlocked("int cast of unknown printer state")
+        return _jinja_do_int(value, default, base)
+
+    env.filters["int"] = _honest_int
+    env._kwc_honest_int_installed = True
+
+
 def _render_one(env: jinja2.Environment, src: str, params: dict[str, str],
                 variant: int,
                 variables: dict[str, str] | None = None,
@@ -1642,6 +1667,7 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
                             ) -> MacroRenderResult:
     from parser.validator import (_MACRO_JINJA_ENV, _compile_macro_template,
                                   _strip_inline_comments)
+    _install_honest_int_filter(_MACRO_JINJA_ENV)
 
     params = _coerce_str_map(params)
     variables = variables or {}
@@ -1932,6 +1958,16 @@ def _cache_get(key: tuple):
 def _cache_put(key: tuple, result: MacroRenderResult) -> None:
     if len(result.rendered) > _RENDER_CACHE_MAX_LINES:
         return  # oversized: never retained
+    if any(f.code == "gcode_registry_unavailable" for f in result.findings):
+        # The gap verdict describes a TRANSIENT global condition, not a
+        # property of the key: never retain it. load_registry's lru never
+        # caches a FAILURE, so an artifact that comes back mid-process
+        # must be answered with a fresh render — a cached stale caveat
+        # would keep claiming SKIPPED forever. (The reverse crossing is
+        # not a truth bug: once loaded, the lru-pinned registry keeps
+        # answering shape checks in memory, so a cached clean verdict
+        # stays true when the file later vanishes.)
+        return
     _render_cache[key] = result
     _render_cache.move_to_end(key)
     while len(_render_cache) > _RENDER_CACHE_MAX_ENTRIES:

@@ -185,3 +185,90 @@ def test_cache_skips_oversized_results():
     assert not retained, "results over the cache line bound must not be retained"
     simulate_macro("M117 " + tag + " small\n")
     assert len(cache) > before  # small result IS cached
+
+
+# ── PR #43 second pass F2b: the int FILTER must not fabricate from NaN ───
+# Jinja's int filter swallows ValueError, so int(NaN) -> 0 and
+# int(NaN, 9) -> 9: the chain {state|float|int} turned the unknown-state
+# NaN sentinel into a fabricated S0/S9 with ZERO findings — the exact
+# fabrication the direct {state|int} block (F2) forbids, reborn one
+# filter later. NaN exists in this engine only as the float form of the
+# UNKNOWN sentinel, so int(NaN) blocks the render (macro_render_blocked),
+# never claims a number.
+
+def test_float_then_int_never_fabricates_zero():
+    r = simulate_macro("M104 S{printer.extruder.target|float|int}", None)
+    texts = [ln.text for ln in r.rendered]
+    assert not any("S0" in t for t in texts), \
+        f"NaN|int fabricated a value: {texts}"
+    blocked = _findings(r, "macro_render_blocked")
+    assert blocked, r.findings
+    assert blocked[0].severity == "info"
+
+
+def test_float_then_int_default_never_fabricates_the_default():
+    r = simulate_macro("M104 S{printer.extruder.target|float|int(9)}", None)
+    texts = [ln.text for ln in r.rendered]
+    assert not any("S9" in t for t in texts), \
+        f"NaN|int(9) fabricated the default: {texts}"
+    assert _findings(r, "macro_render_blocked"), r.findings
+
+
+def test_float_round_int_chain_blocks_too():
+    r = simulate_macro(
+        "M104 S{printer.extruder.target|float|round(0)|int}", None)
+    texts = [ln.text for ln in r.rendered]
+    assert not any("S0" in t for t in texts), texts
+    assert _findings(r, "macro_render_blocked"), r.findings
+
+
+def test_declared_values_strengthen_the_filter_normal_path():
+    # Guards: the honest filter must not touch ANY decidable rendering.
+    r = simulate_macro("M104 S{printer.extruder.target|float|int}", None,
+                       printer_state={"extruder.target": 210.0})
+    assert [ln.text for ln in r.rendered] == ["M104 S210"], \
+        [ln.text for ln in r.rendered]
+    assert not r.findings, r.findings
+    r2 = simulate_macro("M104 S{params.T|float|int}", {"T": "250"})
+    assert [ln.text for ln in r2.rendered] == ["M104 S250"], \
+        [ln.text for ln in r2.rendered]
+    assert not r2.findings, r2.findings
+
+
+# ── PR #43 second pass: the gap verdict must never be cached ─────────────
+# load_registry is @lru_cache(maxsize=1) and lru never caches a FAILURE,
+# so the one cache/registry crossing that can really happen mid-process
+# is artifact-missing -> artifact-restored: a cached
+# 'gcode_registry_unavailable' would keep claiming SKIPPED forever.
+# (The reverse crossing is not a truth bug: once loaded, the lru-pinned
+# registry keeps answering shape checks in memory, so a cached clean
+# verdict stays true when the file later vanishes.)
+
+def test_registry_gap_verdict_is_not_cached(tmp_path):
+    from services import gcode_registry
+    body = "M106 S201  # registry-cache-probe-4k2v\n"
+    real_path = gcode_registry.DATA_PATH
+    try:
+        # Fresh lru: the missing artifact has never loaded successfully,
+        # so every load really does raise while it is absent.
+        gcode_registry.load_registry.cache_clear()
+        gcode_registry.DATA_PATH = tmp_path / "absent.json"
+        r1 = simulate_macro(body)
+        assert any(f.code == "gcode_registry_unavailable"
+                   for f in r1.findings), r1.findings
+        # The gap verdict is not retained in the render cache.
+        from parser import macro_render as mr
+        assert not any(
+            any(f.code == "gcode_registry_unavailable" for f in res.findings)
+            for res in mr._render_cache.values()), \
+            "gap verdict must never be retained in the render cache"
+        # Artifact back: the next call re-renders (miss) and answers with
+        # a FRESH verdict — no stale SKIPPED caveat.
+        gcode_registry.DATA_PATH = real_path
+        r2 = simulate_macro(body)
+        assert not any(f.code == "gcode_registry_unavailable"
+                       for f in r2.findings), \
+            "cached unavailable verdict survived a registry that came back"
+    finally:
+        gcode_registry.DATA_PATH = real_path
+        gcode_registry.load_registry.cache_clear()
