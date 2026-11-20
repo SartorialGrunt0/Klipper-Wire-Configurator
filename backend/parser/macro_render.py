@@ -1731,14 +1731,29 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
     # params_* defaults are not part of what the caller typed).
     raw_tail = _rawparam_text(params)
 
+    registry_unavailable = False
     try:
         from services.gcode_registry import load_registry
         registry = load_registry()
-    except (FileNotFoundError, ValueError):
-        registry = {}  # missing/corrupt artifact: shape-free render only
+    except (FileNotFoundError, ValueError) as exc:
+        # PR #43 review A-F9: swallowing this left every shape check below
+        # running against an EMPTY registry while the tool printed the
+        # POSITIVE verdict ("every rendered command matched") — a vacuous
+        # pass. Keep rendering, but record the gap once per call (the
+        # condition is global, never per line) so consumers can say so.
+        registry = {}
+        registry_unavailable = True
+        logger.warning("gcode registry unavailable (%s): command shape "
+                       "checks skipped", exc)
 
     rendered: list[RenderedLine] = []
     findings: list[RenderFinding] = []
+    if registry_unavailable:
+        findings.append(RenderFinding(
+            "info", "gcode_registry_unavailable",
+            "The gcode command registry could not be loaded — rendered "
+            "command shapes were not checked on this invocation (fix the "
+            "registry artifact for a shape verdict)."))
     pd_reported: set[str] = set()
     for vi, variant_src in enumerate(variants):
         src_lines = variant_src.split("\n")

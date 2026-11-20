@@ -48,7 +48,10 @@ CENTRE_TOL = 1e-6
 Z_MOVERS = {
     "PROBE", "PROBE_CALIBRATE", "PROBE_ACCURACY", "BED_MESH_CALIBRATE",
     "QUAD_GANTRY_LEVEL", "Z_TILT_ADJUST", "Z_TILT_CALIBRATE",
-    "DELTA_CALIBRATE", "CALIBATE_Z", "SCREWS_TILT_CALCULATE", "G30", "G31",
+    # PR #43 review (cosmetic 1): "CALIBATE_Z" was a typo for a command
+    # Klipper does not have at all (klippy has neither CALIBATE_Z nor
+    # CALIBRATE_Z), so it modelled a line that could never run.
+    "DELTA_CALIBRATE", "SCREWS_TILT_CALCULATE", "G30", "G31",
 }
 
 _AXES = "xyz"
@@ -346,6 +349,12 @@ def _before(store: dict, name: str, fmt) -> str:
 
 
 def _span(v: float, lo: float, hi: float, near_lo: str, near_hi: str) -> str:
+    # PR #43 review (cosmetic 2): a declared span with no extent
+    # (position_min == position_max) has no centre and no fraction of the
+    # travel; annotate() skips such axes, and this guard keeps the helper
+    # itself from ever dividing by (hi - lo) == 0.
+    if hi <= lo:
+        return f"{v:g} (declared span {lo:g}\u2013{hi:g} has no extent)"
     mid = (lo + hi) / 2.0
     # "at the edge" scales with the bed: 5mm off the endstop of a 250 bed
     # parks AT the edge; 5mm off a small bed's edge is not "at" anything.
@@ -366,7 +375,10 @@ def annotate(pos: dict, profile: MotionProfile) -> tuple[str, bool]:
     parts: list[str] = []
     cartesian = False
     x, y = pos.get("x"), pos.get("y")
-    if profile.radius is not None and x is not None and y is not None:
+    # PR #43 review (cosmetic 2): a declared radius of 0 backs no round-bed
+    # words, and (d / radius) raised ZeroDivisionError out of the handler.
+    if (profile.radius is not None and profile.radius > 0
+            and x is not None and y is not None):
         d = math.hypot(x, y)
         if d <= CENTRE_TOL:
             parts.append(f"over centre (r\u2264{profile.radius:g})")
@@ -379,6 +391,11 @@ def annotate(pos: dict, profile: MotionProfile) -> tuple[str, bool]:
         v = pos.get(axis)
         span = profile.bounds.get(axis)
         if v is None or span is None:
+            continue
+        # PR #43 review (cosmetic 2): position_min == position_max is a
+        # degenerate axis — "centre of 200–200" claims an extent the
+        # config does not declare, so the axis stays unannotated.
+        if span[1] <= span[0]:
             continue
         parts.append(f"{axis.upper()} {_span(v, span[0], span[1], lo_lbl, hi_lbl)}")
         cartesian = True
@@ -409,6 +426,14 @@ def trace_motion(rendered: list[tuple[int | None, str]],
     state = seed.copy()
     out: TraceResult = TraceResult(state=state)
     add = out.lines.append
+
+    def abort(loc: str, why: str) -> None:
+        """The trace's ONE abort pattern: a line Klipper refuses stops the
+        macro there — later lines never run (virtual-printer law)."""
+        add(f"{loc}: REFUSED \u2014 {why}")
+        add("\u2192 ABORTED at this line: the real printer stops the macro "
+            "here; later lines do not run")
+        out.aborted = True
 
     ann, _ = annotate(state.pos, profile)
     if all(state.pos[a] is None for a in _AXES) and not state.homed:
@@ -490,10 +515,7 @@ def trace_motion(rendered: list[tuple[int | None, str]],
                 else:
                     state.pos["e"] += v
             if refusal:
-                add(f"{loc}: REFUSED — {refusal}")
-                add("\u2192 ABORTED at this line: the real printer stops "
-                    "the macro here; later lines do not run")
-                out.aborted = True
+                abort(loc, refusal)
                 break
             if moved:
                 for a in moved:
@@ -512,9 +534,19 @@ def trace_motion(rendered: list[tuple[int | None, str]],
                     "(extruder only \u2014 no homing required)")
 
         elif token == "G28.1":
-            state.homed = set(_AXES)
-            add(f"{loc}: G28.1 \u2192 marked homed X Y Z, no move "
-                f"(pos {_pos_str(state.pos)})")
+            # PR #43 review A-F6: klippy registers ONLY G28
+            # (extras/homing.py:306, cmd_G28); gcode.py:210-215 keeps the
+            # dotted suffix as the dispatch token, so "G28.1" matches no
+            # handler and falls to gcode.cmd_default -> "Unknown command",
+            # which aborts the macro. It resolves on a real printer only
+            # when some OTHER macro claims it via rename_existing — not
+            # knowable from the rendered body. Marking axes homed here was
+            # a trace untruth: no command ran, nothing moved, nothing homed.
+            abort(loc, "Unknown command: G28.1 \u2014 Klipper registers "
+                       "only G28; unless another macro claims G28.1 via "
+                       "rename_existing, the line fails and the macro "
+                       "stops here")
+            break
 
         elif token == "G28":
             axes = [a for a in _AXES if a.upper() in params] or list(_AXES)
@@ -528,21 +560,59 @@ def trace_motion(rendered: list[tuple[int | None, str]],
                 f"{_pos_str(state.pos)}{note}")
 
         elif token == "SET_KINEMATIC_POSITION":
-            axes = [a for a in _AXES if a.upper() in params] or list(_AXES)
-            for a in axes:
-                state.pos[a] = _num(params.get(a.upper()) or "0") \
-                    if a.upper() in params else state.pos[a]
-                state.homed.add(a)
+            # PR #43 review A-F5: Klipper's cmd_SET_KINEMATIC_POSITION
+            # (extras/force_move.py:118-137) sets a position only for the
+            # axes NAMED on the line, but homes whatever SET_HOMED names —
+            # and SET_HOMED DEFAULTS to 'xyz', i.e. all three axes. The old
+            # branch homed just the named axes, so it refused moves the
+            # printer would allow.
+            named = [a for a in _AXES if a.upper() in params]
+            # PR #43 review A-F7: a named-but-empty value ("X=") is a
+            # gcmd.get_float parse failure on the printer — never position 0.
+            bad = [a for a in named if _num(params[a.upper()]) is None]
+            if bad:
+                abort(loc, "SET_KINEMATIC_POSITION "
+                           + "/".join(f"{a.upper()}={params[a.upper()]!r}"
+                                      for a in bad)
+                           + " \u2014 Klipper: unable to parse, the line "
+                             "fails and the macro stops")
+                break
+            for a in named:
+                state.pos[a] = _num(params[a.upper()])
+            # PR #43 review A-F5: SET_HOMED decides the homed set, default
+            # 'xyz' (force_move.py:125). An explicit but empty
+            # SET_HOMED= homes nothing, exactly like gcmd.get('') there.
+            set_homed = params.get("SET_HOMED")
+            set_homed = "xyz" if set_homed is None else set_homed
+            homed_now = [a for a in _AXES if a in set_homed.strip().lower()]
+            state.homed |= set(homed_now)
+            homed_str = " ".join(a.upper() for a in homed_now) or "\u2014"
+            # PR #43 review A-F5: availability is gated on config —
+            # force_move.py:44-47 registers the command only when
+            # [force_move] enable_force_move is true. Config gating is not
+            # modelled, so the caveat is said out loud instead.
             add(f"{loc}: SET_KINEMATIC_POSITION \u2192 pos "
-                f"{_pos_str(state.pos)}, marked homed "
-                + " ".join(a.upper() for a in axes))
+                f"{_pos_str(state.pos)}, marked homed {homed_str} "
+                "(SET_HOMED defaults to 'xyz'; available only when "
+                "[force_move] enable_force_move)")
 
         elif token == "G92":
+            named = [a for a in "xyze" if a.upper() in params]
+            # PR #43 review A-F7: "G92 X" (empty rendered value) is a parse
+            # error in Klipper — the macro stops; reading it as 0 silently
+            # moved the trace's position to a coordinate the printer never
+            # reached.
+            bad = [a for a in named if _num(params[a.upper()]) is None]
+            if bad:
+                abort(loc, "G92 " + "/".join(
+                    f"{a.upper()}={params[a.upper()]!r}" for a in bad)
+                    + " \u2014 Klipper: unable to parse, the line fails "
+                      "and the macro stops")
+                break
             touched = []
-            for a in "xyze":
-                if a.upper() in params:
-                    state.pos[a] = _num(params[a.upper()] or "0")
-                    touched.append(a.upper())
+            for a in named:
+                state.pos[a] = _num(params[a.upper()])
+                touched.append(a.upper())
             if touched:
                 add(f"{loc}: G92 {' '.join(touched)} \u2192 pos "
                     f"{_pos_str(state.pos)} (offset; homing unchanged)")

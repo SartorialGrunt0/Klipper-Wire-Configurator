@@ -1293,7 +1293,14 @@ class McpServer:
                     "near-miss. With no scenarios "
                     "the DEFAULT invocation renders (params_* defaults, "
                     "printer state unknown; branches on undeclared "
-                    "state render BOTH ways). Limits it states on every "
+                    "state render BOTH ways) and NO invocation is "
+                    "declared: a param read without a params_* default is "
+                    "reported as param-dependent, never fabricated as an "
+                    "error — declare params (even {}) to grade one call. "
+                    "Renders longer than 200 lines per scenario are "
+                    "elided with the elided count stated (read the "
+                    "config for the full expansion). Limits it states on "
+                    "every "
                     "result: it renders the TEMPLATE only — CALL macros "
                     "are not recursed; the 'Execution trace' executes a "
                     "simple motion model only (speeds and dwell do not "
@@ -3182,15 +3189,18 @@ class McpServer:
         if gcode_idx is None:
             return None
         inline = lines[gcode_idx].split(":", 1)[1]
-        if inline.strip():
-            return inline
-        body_lines: list[str] = []
+        # PR #43 review (coverage): an inline value ('gcode: G28') does NOT
+        # end the option — configparser treats the indented lines that
+        # follow as MORE of the same value. Returning only the inline part
+        # checked a body shorter than the one Klipper actually runs (a
+        # defect on a continuation line was invisible).
+        parts: list[str] = [inline] if inline.strip() else []
         for line in lines[gcode_idx + 1:]:
             if not line.strip() or line[:1] in (" ", "\t"):
-                body_lines.append(line)
+                parts.append(line)
             else:
                 break
-        return "\n".join(body_lines)
+        return "\n".join(parts)
 
     @staticmethod
     def _gcode_command_registry() -> dict[str, dict]:
@@ -3205,6 +3215,36 @@ class McpServer:
         McpServer._gcode_registry_cache = cache
         return cache
 
+    @staticmethod
+    def _line_has_param(line: str, pname: str) -> bool:
+        """Does this command line carry ``pname``, in either grammar?
+
+        Extended (multi-char) params are spelled 'NAME=value'. A
+        traditional letter command has no '=' grammar at all: Klipper
+        splits the line with gcode.py's args_r ('([A-Z_]+|[A-Z*])'), so
+        'M26 S10' declares S='10', 'M26 S-5' declares S='-5' and
+        'M26 S.25' declares S='.25'. PR #43 review A-F8: the
+        NAME=-only test fabricated "missing required parameter 'S='" for
+        a line the printer accepts.
+        """
+        if re.search(rf"(?:^|\s){re.escape(pname)}=", line, re.IGNORECASE):
+            return True
+        if len(pname) != 1:
+            return False
+        from parser.macro_render import _KLIPPER_ARGS_R
+        letter = pname.upper()
+        # Skip the command word: it is not a parameter. args_r's letter
+        # run must be EXACTLY this one letter, so 'SET_LED' never reads
+        # as an S parameter.
+        for tok in line.split()[1:]:
+            match = _KLIPPER_ARGS_R.match(tok.upper())
+            if not match or match.group(1) != letter:
+                continue
+            value = tok[match.end():]
+            if value and not value.startswith("="):
+                return True
+        return False
+
     @classmethod
     def _missing_required_params(cls, gcode_body: str | None):
         """Yield (param_name, body_line_no, command_token) for registry
@@ -3214,7 +3254,6 @@ class McpServer:
         commands = cls._gcode_command_registry()
         if not commands:
             return
-        import re as _re
         from services.gcode_registry import (
             _CMD_TOKEN_RE, _COMMENT_RE, NON_COMMAND_TOKENS,
             _logical_lines, _strip_jinja_inline,
@@ -3237,10 +3276,12 @@ class McpServer:
             for pname, pdef in sorted(entry.get("params", {}).items()):
                 if not pdef.get("required"):
                     continue
-                # Klipper param tokens are 'NAME=value' delimited by space.
-                if not _re.search(rf"(?:^|\s){_re.escape(pname)}=", line,
-                                  _re.IGNORECASE):
-                    yield pname, line_no, token
+                # Klipper param tokens are 'NAME=value' for extended
+                # params and the bare letter form ('S10') for traditional
+                # commands — both count as supplied.
+                if cls._line_has_param(line, pname):
+                    continue
+                yield pname, line_no, token
 
     def _handle_validate_macro(self, args: dict[str, Any]) -> str:
         """Validate a Klipper gcode_macro for common structural issues."""
@@ -3380,7 +3421,13 @@ class McpServer:
                     key, _, value = stripped_raw.partition(":")
                     sim_variables[key.strip()[len("variable_"):]] = value.strip()
             simulation = simulate_macro(
-                gcode_body, sim_params, variables=sim_variables,
+                # PR #43 review A-F4: a params_*-derived dict IS a declared
+                # default invocation (Klipper's bare-call semantics), but an
+                # EMPTY dict from a section with no params_* keys carries no
+                # authority — passing {} made the engine treat an invented
+                # bare call as real and fabricate 'renders EMPTY' for
+                # {params.X} reads. None = no invocation declared.
+                gcode_body, sim_params or None, variables=sim_variables,
                 sections=self._sim_project_sections())
             for finding in simulation.findings:
                 where = f"Line {finding.source_line}: " if finding.source_line else ""
@@ -3708,6 +3755,10 @@ class McpServer:
 
     _SIM_SCENARIO_CAP = 8
     _SIM_RUN_CAP = 6
+    # A-R1: emitted render lines per scenario (the engine's own work cap is
+    # 5000 lines PER path; 8 scenarios × 5000 lines is a 12 MB tool call).
+    # Elision is always announced on the face of the output.
+    _SIM_RENDER_LINE_EMIT_CAP = 200
     _SIM_LIMITS = (
         "Limits: this renders the TEMPLATE only — CALL macros are not "
         "recursed. The 'Execution trace' runs the RENDERED lines over a "
@@ -3785,7 +3836,7 @@ class McpServer:
                     return path
         return None
 
-    def _sim_project_sections(self) -> "frozenset[str] | None":
+    def _sim_project_sections(self, diagnostics: dict | None = None) -> "frozenset[str] | None":
         """Lowercased section headers of the project as chat sees it.
 
         Working state first (staged/draft wins — the same precedence the
@@ -3793,6 +3844,11 @@ class McpServer:
         when absence is NOT decidable: an include we cannot resolve means
         the hardware list may be incomplete, and an incomplete list must
         never produce a "this hardware does not exist" verdict.
+
+        ``diagnostics`` (optional, filled in place) reports which inventory
+        the answer came from — output-truth: the host fallback describes
+        THIS HOST, not necessarily the project under discussion, and the
+        caller must say so.
         """
         _HDR = re.compile(r"^\[([^\]\n]+)\]\s*(?:#.*)?$", re.M)
         _INC = re.compile(r"^\[include\s+([^\]\n]+)\]\s*(?:#.*)?$", re.M)
@@ -3826,6 +3882,8 @@ class McpServer:
                     names.add(path.name.lower())
         if not texts:
             return None
+        if diagnostics is not None:
+            diagnostics["inventory"] = "overlay" if overlay_mode else "host"
         sections: set[str] = set()
         # PR #43 B-05: in overlay mode the `sections` inventory is built
         # ONLY from overlay texts, so "a file we can see" means an overlay
@@ -4022,11 +4080,34 @@ class McpServer:
         # Hardware the loaded project declares, for mux-target verdicts:
         # None = the files cannot decide absence (unresolved include) and
         # the engine stays silent rather than inventing a missing fan.
-        sections = self._sim_project_sections()
+        sections_diag: dict[str, str] = {}
+        sections = self._sim_project_sections(sections_diag)
         profile = self._sim_motion_profile()
+        if sections and sections_diag.get("inventory") == "host":
+            # PR #43 review output-truth (sections fallback): with an empty
+            # working overlay the inventory came from THIS HOST's config
+            # mirror, so a "no [fan_generic] section exists" verdict
+            # describes the host machine — say so instead of letting it
+            # read as the project's.
+            out.append(
+                "NOTE: hardware sections came from THIS HOST's config mirror "
+                "— the conversation working overlay was empty, so "
+                "section/mux-target verdicts below describe the host config, "
+                "not necessarily the project under discussion.")
         if truncated:
             out.append(f"(scenario list truncated to the cap of "
                        f"{self._SIM_SCENARIO_CAP})")
+        # PR #43 review A-F4 (no-invocation law): a params dict is an
+        # AUTHORITATIVE invocation — an empty one makes every undeclared
+        # {params.X} read render EMPTY, which is a real Klipper error only
+        # when a call was actually declared. The caller declared one when
+        # it passed the params key itself (top-level shorthand, even {}) or
+        # listed scenarios (each scenario IS a Klipper call, and Klipper
+        # always passes a params dict on a call). Otherwise params=None:
+        # reads without a declared value stay param-dependent INFO, never
+        # fabricated errors.
+        invocation_declared = (args.get("scenarios") is not None
+                               or args.get("params") is not None)
         for idx, sc in enumerate(scenarios_raw, 1):
             name = f"scenario-{idx}"
             if not isinstance(sc, dict):
@@ -4079,10 +4160,17 @@ class McpServer:
             seq_vars = dict(variables)
             cmd_sets: list[tuple[str, ...]] = []
             motion_seed = None
+            # A-F4: the section's params_* defaults always ride the call
+            # (that is Klipper's params_X mechanism, not a caller
+            # declaration), so they go in as declared_defaults; `params`
+            # becomes the INVOCATION — None when the caller declared none.
+            call_params = params if invocation_declared else None
             for run_no in range(1, runs + 1):
                 label = name if runs == 1 else f"call {run_no}"
-                result = simulate_macro(body, params, variables=seq_vars,
+                result = simulate_macro(body, call_params,
+                                        variables=seq_vars,
                                         printer_state=state,
+                                        declared_defaults=default_params,
                                         sections=sections)
                 # Motion threading: consecutive calls share a printer, so
                 # a resolved trace's final position seeds the next call —
@@ -4094,7 +4182,7 @@ class McpServer:
                     seed_for_call = seed_state(state)[0]
                     trace_note = ""
                 tr = self._sim_emit_call(
-                    out, label, result, params,
+                    out, label, result, call_params,
                     state if runs == 1 else None,
                     seq_vars if runs > 1 else None,
                     undeclared_vars, declared_vars,
@@ -4147,7 +4235,7 @@ class McpServer:
 
     @staticmethod
     def _sim_emit_call(out: list[str], label: str, result,
-                       params: dict, printer_state: dict | None,
+                       params: "dict | None", printer_state: dict | None,
                        variables: dict | None,
                        undeclared_vars: list[str],
                        declared_vars: set[str],
@@ -4159,7 +4247,12 @@ class McpServer:
         thread position into the next call."""
         out.append("")
         out.append(f"## {label}")
-        declared = [f"params: {params or '{}'}"]
+        if params is None:
+            # A-F4: never echo a params dict the caller did not declare.
+            declared = ["params: none (no invocation declared — reads "
+                        "without a declared value stay param-dependent)"]
+        else:
+            declared = [f"params: {params}"]
         if printer_state:
             declared.append(f"printer_state: {printer_state}")
         if variables:
@@ -4168,11 +4261,22 @@ class McpServer:
 
         out.append(f"Rendered ({result.variants_rendered} path(s)):")
         if result.rendered:
-            for line in result.rendered:
+            # A-R1: the engine caps work at 5000 lines PER path; eight
+            # scenarios therefore stream megabytes in one tool result. Cap
+            # the EMITTED lines here and announce the elision — never a
+            # silent truncation (F17 doctrine).
+            shown = result.rendered[:McpServer._SIM_RENDER_LINE_EMIT_CAP]
+            for line in shown:
                 ln = f"  L{line.source_line}" if line.source_line else "  L?"
                 tag = f" [path {line.variant}]" \
                     if result.variants_rendered > 1 else ""
                 out.append(f"{ln}: {line.text}{tag}")
+            elided = len(result.rendered) - len(shown)
+            if elided:
+                out.append(
+                    f"  ... {elided} further lines elided from "
+                    f"{len(result.rendered)} rendered — read the config for "
+                    "the full expansion")
         elif any(f.code == "macro_jinja_syntax" for f in result.findings):
             out.append("  (nothing rendered — the body did NOT compile; "
                        "see the Jinja error below)")
@@ -4205,10 +4309,27 @@ class McpServer:
                            "modelled):")
                 out.extend("  " + t for t in tr.lines)
 
-        effects = McpServer._sim_effect_lines(
-            [line.text for line in result.rendered])
+        if result.variants_rendered > 1:
+            # PR #43 review output-truth (effect path tags): the rendered
+            # lines above are path-tagged; untagged effects would read the
+            # alternative arms as ONE commanded sequence. Tag every effect
+            # with the path it comes from — the same convention.
+            by_path: dict[int, list[str]] = {}
+            for line in result.rendered:
+                by_path.setdefault(line.variant, []).append(line.text)
+            effects: list[str] = []
+            for vi in sorted(by_path):
+                for eff in McpServer._sim_effect_lines(by_path[vi]):
+                    effects.append(f"{eff} [path {vi}]")
+        else:
+            effects = McpServer._sim_effect_lines(
+                [line.text for line in result.rendered])
         if effects:
             out.append("Expected effect (commanded, not observed):")
+            if result.variants_rendered > 1:
+                out.append("  (paths are alternatives — only ONE executes; "
+                           "each effect is tagged with the path that "
+                           "commands it)")
             for eff in effects[:8]:
                 out.append(f"  - {eff}")
             if len(effects) > 8:
@@ -4239,6 +4360,15 @@ class McpServer:
             out.append("Findings: none — every rendered command "
                        "matched the registry shape on this "
                        "invocation.")
+        if any(f.code == "gcode_registry_unavailable"
+               for f in result.findings):
+            # A-F9: the positive verdict above must NEVER be what this
+            # call says when the registry never loaded — the shape checks
+            # did not run, so "no shape findings" is not a clean render.
+            out.append("Shape checks SKIPPED - command registry unavailable: "
+                       "the rendered commands were NOT verified against the "
+                       "command registry (absence of shape findings here is "
+                       "not evidence of a clean render).")
         if result.unknown_accesses:
             out.append("Still <unknown> (NOT simulated, never "
                        "guessed): "

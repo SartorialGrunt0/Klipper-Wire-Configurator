@@ -235,12 +235,22 @@ def test_set_kinematic_position_marks_homed_at_values():
     assert tr.state.pos["x"] == 100.0
 
 
-def test_g28_1_marks_homed_without_moving():
-    st, _ = seed_state({"toolhead.position": [42, 42, 42],
-                        "gcode_move.homed_axes": ""})
-    tr = _t(_SLINGER, [(1, "G28.1")], st)
-    assert tr.state.pos["x"] == 42.0  # no move — Klipper home-without-move
-    assert tr.state.homed == {"x", "y", "z"}
+def test_g28_1_is_unknown_and_stops_the_trace():
+    # PR #43 review A-F6 — INTENTIONAL FLIP of the old pin ("G28.1 marks
+    # homed without moving"). klippy registers only G28
+    # (extras/homing.py:306) and keeps the dotted suffix as the dispatch
+    # token (gcode.py:210-215), so "G28.1" reaches cmd_default: "Unknown
+    # command", and the macro ABORTS. The old pin encoded a command that
+    # does not exist.
+    # Cold seed on purpose: a declared position auto-homes in seed_state,
+    # which would mask whether G28.1 homed anything by itself.
+    st, _ = seed_state({})
+    tr = _t(_SLINGER, [(1, "G28.1"), (2, "G1 X10 Y10")], st)
+    text = _lines(tr)
+    assert tr.aborted is True
+    assert "Unknown command" in text
+    assert tr.state.homed == set()
+    assert "L2" not in text
 
 
 def test_unknown_coordinate_unresolves_never_invents():
