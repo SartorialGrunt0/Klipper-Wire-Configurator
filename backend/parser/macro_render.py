@@ -130,6 +130,12 @@ SIM_FINDING_CODES = frozenset({
     # so this is zero-behavior hardening (consumption-split completeness).
     "macro_param_missing_choice",
     "macro_param_out_of_bounds",
+    # PR #43 third pass (own review, R-3): the registry-gap verdict is
+    # sim origin too — with the artifact missing it was appended to
+    # every simulated validation, and validator + human_to_dict only
+    # drop findings for which is_sim_advisory is True: one environment
+    # gap was blocking the human save gate once per macro section.
+    "gcode_registry_unavailable",
 })
 
 
@@ -879,19 +885,43 @@ def _install_honest_int_filter(env: jinja2.Environment) -> None:
     The direct ``{state|int}`` cast blocks (F2); a NaN reaching the int
     filter can only come from unknown state, so the filter blocks the
     same way — the simulation may stay silent, it may never guess.
-    Everything decidable delegates to Jinja's own filter untouched.
-    Idempotent: installs once on the shared validator env (validator
-    itself only COMPILES with it; rendering happens here)."""
+    THIRD PASS (own review, R-1): the same swallow-and-default exists in
+    |float and is also reached through the sentinel's STRING forms
+    ('<unknown>' and 'nan' fail int()/float() and then default), and
+    |length/|count happily count the marker text ('<unknown>'=9,
+    'nan'=3) into a parameter position. Every filter that defaults
+    instead of raising gets the marker guard; everything decidable
+    delegates to Jinja's own filter untouched. Idempotent: installs once
+    on the shared validator env (validator itself only COMPILES with it;
+    rendering happens here)."""
     if getattr(env, "_kwc_honest_int_installed", False):
         return
+    from jinja2.filters import do_float as _jinja_do_float
     from jinja2.filters import do_int as _jinja_do_int
 
     def _honest_int(value, default=0, base=10):
         if isinstance(value, float) and value != value:  # NaN
             raise _RenderBlocked("int cast of unknown printer state")
+        if _marker_derived(value):
+            raise _RenderBlocked("int cast of unknown printer state")
         return _jinja_do_int(value, default, base)
 
+    def _honest_float(value, default=0.0):
+        if _marker_derived(value):
+            raise _RenderBlocked("float cast of unknown printer state")
+        return _jinja_do_float(value, default)
+
+    def _honest_length(value):
+        # Jinja maps length/count to the builtin len — there is no
+        # do_length to delegate to.
+        if _marker_derived(value):
+            raise _RenderBlocked("length of unknown printer state")
+        return len(value)
+
     env.filters["int"] = _honest_int
+    env.filters["float"] = _honest_float
+    env.filters["length"] = _honest_length
+    env.filters["count"] = _honest_length
     env._kwc_honest_int_installed = True
 
 
@@ -1034,10 +1064,40 @@ def _is_traditional_gcode(token: str) -> bool:
 # tokenizer for traditional letter-parameter commands.
 _KLIPPER_ARGS_R = re.compile("([A-Z_]+|[A-Z*])")
 
-# PR #43 review F1: an args_r run that IS (a letter + ) a float(UNKNOWN)
-# marker — 'SNAN'/'PINF'/'NAN'/'-INF'/'S-INF'. Klipper never sees these;
-# they are simulation markers absorbed into letter runs.
-_SENTINEL_RUN_RE = re.compile(r"[A-Z*]?-?(?:NAN|INF)")
+# THIRD PASS (own review, R-4): a marker value ABSORBED into its
+# parameter letter run — 'Snan', 'X-inf'. str(UNKNOWN) is '<unknown>'
+# and str(NaN/±inf) is lowercase, so the absorbed form is an uppercase
+# parameter letter glued (no separator — that is what args_r absorbs)
+# to a lowercase marker. Word lookarounds keep free text out: 'M117 NAN'
+# (uppercase message) and a bare lowercase 'nan' word (no letter prefix)
+# do NOT match — claiming unknown state there was an untrue info.
+_ABSORBED_MARKER_RE = re.compile(
+    r"(?<![A-Za-z])[A-Z]\d*-?(?:nan|inf|infinity)(?![A-Za-z])")
+
+
+# THIRD PASS (own review, R-1): the string forms of the sentinel. The
+# F2b int-filter guard matched the NaN RUNTIME TYPE, so any
+# stringification before the cast walked past it into Jinja's swallow-
+# and-default: {state|string|int} fabricated S0, {state|float|string
+# |int(9)} fabricated S9, {state|string|length} counted the marker text
+# (9) — plausible numeric parameters with zero findings. The guard is
+# the marker STRING (exact token, or a string still containing the
+# '<unknown>' marker after concatenation), applied to every filter that
+# defaults instead of raising.
+_MARKER_TEXTS = frozenset({
+    "<unknown>", "nan", "+nan", "-nan", "inf", "+inf", "-inf",
+    "infinity", "+infinity", "-infinity",
+})
+
+
+def _marker_derived(value) -> bool:
+    """True when a value's TEXT can only come from the UNKNOWN sentinel
+    (or its NaN/inf float forms): the exact marker token, or a string
+    that still contains the '<unknown>' marker."""
+    if not isinstance(value, str):
+        return False
+    s = value.strip().lower()
+    return "<unknown>" in s or s in _MARKER_TEXTS
 
 
 def _check_rendered_line(text: str, registry: dict, variant: int,
@@ -1100,11 +1160,17 @@ def _check_rendered_line(text: str, registry: dict, variant: int,
     # letter run (the S check silently VANISHED). Traditional letter
     # commands have no string grammar: a marker anywhere on the line means
     # a value is unknown state — one info, shape not decisive.
+    # THIRD PASS (own review, R-4): the scan must match the MARKER, not
+    # marker-shaped words. Forms: '<unknown>' exactly as the sentinel
+    # stringifies it (lowercase) and a value ABSORBED into its letter
+    # run by args_r ('Snan', 'X-inf' — the marker text reached this way
+    # is always lowercase, always letter-prefixed, because it is
+    # str(UNKNOWN) / str(NaN) glued to the parameter letter). Uppercase
+    # 'M117 NAN' / 'M118 INF' / 'M117 UNKNOWN < 50' are free message
+    # text — claiming unknown state there was an untrue info.
     if _is_traditional_gcode(token):
-        up = text.upper()
-        if ("<" in up and "UNKNOWN" in up) or any(
-                _SENTINEL_RUN_RE.fullmatch(p.strip())
-                for p in _KLIPPER_ARGS_R.split(up)):
+        if ("<unknown>" in text
+                or _ABSORBED_MARKER_RE.search(text)):
             return [RenderFinding(
                 "info", "macro_unknown_value",
                 f"A parameter of {token} renders as unknown printer state "
@@ -1880,25 +1946,44 @@ def simulate_macro_uncached(body: str, params: dict[str, str] | None = None,
     # PR #43 review F4 (4R static-decidability law): a sim ERROR is a
     # blocking verdict only when the breakage holds on EVERY simulated
     # path. With unknown-condition expansion, an error code that fired on
-    # only a SUBSET of variants lives under a condition on unknown printer
+    # only a subset of variants lives under a condition on unknown printer
     # state — Klipper fails only if that state occurs — so those findings
     # downgrade to warning. is_sim_advisory then strips them from the
     # human save gate (D1) and from the AI delta gate (D2); the tool
     # surfaces keep them with the gating caveat (D3). A code that fired on
     # all variants (e.g. both arms broken) is every-path and keeps ERROR.
+    # THIRD PASS (own review, R-2): a variant that ABORTED mid-render
+    # (unknown-state int cast, loop budget, ZeroDivision, syntax, an
+    # Undefined abort) yields no findings at all — its silence is NOT
+    # gating evidence. Treating 'not observed there' as 'a path where the
+    # defect does not hold' turned a defect firing on every COMPLETED path
+    # into a warning carrying the false scope claim 'fails only if that
+    # condition occurs', and stripped a real block from the save gate.
+    # The subset law therefore runs against the completed variants only:
+    #  - observed everywhere                  -> every-path, keeps ERROR
+    #  - observed on every completed variant  -> keeps ERROR (the aborted
+    #    paths are unknown, never disproven)
+    #  - a completed variant lacks it         -> genuinely gated, downgrade
     if len(variants) > 1:
         _error_variants: dict[str, set] = {}
         for f in findings:
             if f.severity == "error" and f.variant is not None:
                 _error_variants.setdefault(f.code, set()).add(f.variant)
+        _aborted = {f.variant for f in findings
+                    if f.variant is not None and f.code in (
+                        "macro_render_blocked", "macro_jinja_syntax",
+                        "macro_param_undefined")}
+        _completed = set(range(len(variants))) - _aborted
         _partial_codes = {code for code, vs in _error_variants.items()
-                          if vs != set(range(len(variants)))}
+                          if vs != set(range(len(variants)))
+                          and vs != _completed}
         if _partial_codes:
             findings = [
                 replace(f, severity="warning", message=f.message + (
-                    " — simulated on an arm gated by unknown printer "
-                    "state: it fails only if that condition occurs, not "
-                    "on every path."))
+                    " — simulated on an arm gated by a condition the "
+                    "simulator cannot decide (unknown printer state or an "
+                    "undecidable parameter guard): it fails only if that "
+                    "branch runs, not on every path."))
                 if (f.severity == "error" and f.code in _partial_codes)
                 else f
                 for f in findings

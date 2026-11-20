@@ -272,3 +272,105 @@ def test_registry_gap_verdict_is_not_cached(tmp_path):
     finally:
         gcode_registry.DATA_PATH = real_path
         gcode_registry.load_registry.cache_clear()
+
+
+# ── PR #43 third pass (own review): marker PROVENANCE through filters ───
+# R-1: the F2b int-filter guard matches the NaN RUNTIME TYPE, so any
+# stringification of the sentinel before the cast walks past it into
+# Jinja's do_int default: {state|string|int} rendered 'M104 S0' and
+# {state|float|string|int(9)} rendered 'M104 S9' with ZERO findings;
+# |length counted the marker text itself ('<unknown>'=9, 'nan'=3). The
+# guard must match the marker STRING, not the float NaN — the same law
+# applies to |float and to |length/|count.
+
+def test_r1_string_then_int_never_fabricates():
+    for body, forbidden in (
+            ("M104 S{printer.extruder.target|string|int}", "S0"),
+            ("M104 S{printer.extruder.target|float|string|int(9)}", "S9"),
+            ("M104 S{printer.extruder.target|string|float}", "S0"),
+    ):
+        result = simulate_macro(body, None)
+        texts = [ln.text for ln in result.rendered]
+        assert not any(forbidden in t for t in texts), \
+            f"{body} fabricated {forbidden}: {texts}"
+        assert _findings(result, "macro_render_blocked"), (body, result.findings)
+
+
+def test_r1_length_filter_never_counts_the_marker():
+    for body, forbidden in (
+            ("M104 S{printer.extruder.target|string|length}", "S9"),
+            ("M104 S{printer.extruder.target|float|string|length}", "S3"),
+    ):
+        result = simulate_macro(body, None)
+        texts = [ln.text for ln in result.rendered]
+        assert not any(forbidden in t for t in texts), \
+            f"{body} fabricated {forbidden}: {texts}"
+        assert _findings(result, "macro_render_blocked"), (body, result.findings)
+
+
+def test_r1_decidable_string_chain_still_works():
+    result = simulate_macro("M104 S{params.T|string|int}", {"T": "250"})
+    assert [ln.text for ln in result.rendered] == ["M104 S250"]
+    assert not result.findings, result.findings
+    result = simulate_macro("M104 S{params.N|string|length}", {"N": "1234"})
+    assert [ln.text for ln in result.rendered] == ["M104 S4"]
+
+
+# R-2: the F4 subset law must not treat an ABORTED sibling variant as
+# evidence of gating — a variant that stopped at an unknown-state guard
+# contributed no observations, and its silence turned a defect holding
+# on every completed path into a warning carrying the FALSE claim
+# 'fails only if that condition occurs' (and stripped the save gate).
+
+def test_r2_aborted_sibling_does_not_downgrade_every_completed_error():
+    body = ("{% if printer.x %}\nM104 S{printer.y|int}\n{% endif %}\n"
+            "G4 P=0\n")
+    result = simulate_macro(body)
+    unp = _findings(result, "macro_param_unparseable")
+    assert unp, result.findings
+    assert all(f.severity == "error" for f in unp), \
+        "unconditional defect downgraded because a sibling variant aborted"
+    assert not any("fails only if that condition occurs" in f.message
+                   for f in unp), unp[0].message
+
+
+def test_r2_clean_gating_still_downgrades():
+    # Both variants complete; the defect fires on ONE arm only -> the
+    # F4-A downgrade still holds (this is its evidence, not an abort).
+    body = ("{% if printer.x %}\nSET_LED LED=k RED=\n{% else %}\n"
+            "M117 b\n{% endif %}")
+    result = simulate_macro(body)
+    empties = _findings(result, "macro_param_renders_empty")
+    assert empties and empties[0].severity == "warning", empties
+
+
+# R-3: gcode_registry_unavailable is sim origin — missing from
+# SIM_FINDING_CODES it leaks past the human save gate whenever the
+# registry artifact is absent (validator adds every sim finding).
+
+def test_r3_registry_gap_code_is_sim_advisory():
+    assert is_sim_advisory("gcode_registry_unavailable", "info")
+
+
+# R-4: marker DETECTION was text-shaped — 'M117 NAN' / 'M118 INF' (M117
+# free text) and 'M117 UNKNOWN < 50' each claimed 'renders as unknown
+# printer state', a claim that is untrue when the word is user text.
+# The marker forms are exact: '<unknown>' (the sentinel's str) and a
+# value ABSORBED letter run ('Snan', 'Xnan' — Klipper's args_r glues
+# letter+lowercase-nan into one run, so detection requires the letter).
+
+def test_r4_nan_inf_words_in_message_text_are_not_markers():
+    for body in ("M117 NAN", "M118 INF", "M117 UNKNOWN < 50",
+                 "M117 INFINITE patience"):
+        result = simulate_macro(body)
+        assert not _findings(result, "macro_unknown_value"), \
+            f"{body}: false unknown-state claim"
+
+
+def test_r4_absorbed_and_marker_string_forms_still_detected():
+    result = simulate_macro("M104 S{printer.extruder.target}")
+    assert _findings(result, "macro_unknown_value"), result.findings
+    assert not _findings(result, "macro_param_unparseable"), result.findings
+    result = simulate_macro("M104 S{printer.extruder.target|float}")
+    assert _findings(result, "macro_unknown_value"), result.findings
+    assert not _findings(result, "macro_param_unparseable"), result.findings
