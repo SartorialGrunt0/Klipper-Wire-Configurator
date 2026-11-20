@@ -316,6 +316,22 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     }
   }, [open, docked, settings]);
 
+  // PR #43 review F6: the message trail persists across page reloads but
+  // kept/undone events are memory-only, so a reloaded thread that was
+  // never explicitly saved would claim 'awaiting review' for staging
+  // decided in the lost session. Everything restored at mount is inside
+  // the no-decision-record zone: those rows render 'unknown' (absence
+  // never claims). A decision made NOW on a still-open review row beats
+  // the boundary — a matching decision always outranks it — and loading
+  // an explicit save clears it, because that record arrives with the
+  // conversation whole.
+  useEffect(() => {
+    const users = useAiStore.getState().messages
+      .filter((m) => m.role === 'user').length;
+    if (users > 0) useWorkLedgerStore.getState().setDecisionTrustFrom(users);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // ── Auto-scroll to bottom (sticky) ──────────────────────────────
   // Follows new messages AND content growth (approval cards, progress
   // strip, long markdown reflows) while the user is at the bottom.
@@ -478,6 +494,15 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       } else {
         newMessages = options?.retry ? messages : [...previousMessages, userMsg];
       }
+      // PR #43 review F5: edit-resend TRUNCATES the trail and a hidden
+      // analyze send REPLACES it — both branch the conversation lineage.
+      // Kept/undone events recorded against the old lineage must stop
+      // overlaying rows in the new one (a stale verdict otherwise stamps
+      // a fresh re-staging of the same file+section). One epoch bump per
+      // branch is the whole mechanism; the builder does the matching.
+      if (options?.editIndex !== undefined || options?.hiddenFromUser === true) {
+        useWorkLedgerStore.getState().bumpEpoch();
+      }
       // Take the attached context for this message and empty the slots in ONE
       // step. Reading the store and clearing it separately is how the first
       // live build sent an empty list — see takeAttachedReferences. Findings
@@ -530,7 +555,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
           // it verbatim as the trailing ledger message and never decides
           // anything from it (review law).
           workLedger: (() => {
-            const rows = buildWorkLedger(newMessages, useWorkLedgerStore.getState().events);
+            const ledger = useWorkLedgerStore.getState();
+            const rows = buildWorkLedger(newMessages, ledger.events, {
+              epoch: ledger.epoch,
+              trustFrom: ledger.decisionTrustFrom ?? undefined,
+            });
             return rows.length > 0 ? rows : undefined;
           })(),
         };
@@ -1130,6 +1159,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       useContextPressureStore.getState().reset();
       // W6: restore the thread's kept/undone record alongside its
       // messages (legacy saves hydrate to empty — trace rows still work).
+      // F5: bump BEFORE hydrate — the replaced thread's events must not
+      // overlay the loaded one, and the restored events are stamped with
+      // the fresh epoch (they arrive with their conversation, trustworthy
+      // as a set). F6: the save carries its decision record whole, so
+      // nothing in the loaded thread is untrusted.
+      useWorkLedgerStore.getState().bumpEpoch();
+      useWorkLedgerStore.getState().setDecisionTrustFrom(null);
       useWorkLedgerStore.getState().hydrate(conversation.workLedger ?? []);
     },
     [saveCurrentConversation, setMessages, setSettings],

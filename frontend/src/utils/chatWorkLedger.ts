@@ -60,6 +60,16 @@ export interface WorkLedgerDecision {
    *  the same ordinaling the staging events use, so the two sources
    *  compare directly. */
   turnIndex: number;
+  /** PR #43 review F5: conversation LINEAGE tag. turnIndex alone is a
+   *  lower bound over a trail that can be branched (edit-resend truncates,
+   *  hidden analyze sends replace) or switched (loading another saved
+   *  thread), and a stale event then silently overwrites a NEW staging of
+   *  the same file+section with a verdict from the dead lineage. Events
+   *  carry the epoch their conversation lived in; the builder overlays
+   *  only same-epoch events. Restored events are stamped with the current
+   *  epoch (they arrive together with their conversation — trustworthy
+   *  as a set). */
+  epoch?: number;
 }
 
 /** One ledger row: one section's final state in one turn. */
@@ -70,7 +80,7 @@ export interface WorkLedgerRow {
   file: string;
   /** Bare section name; '' = file-level. */
   section: string;
-  verdict: 'pending' | 'kept' | 'undone' | 'failed' | 'touched';
+  verdict: 'pending' | 'kept' | 'undone' | 'failed' | 'touched' | 'unknown';
   /** failed only — the harness's own error line, single, bounded. */
   detail?: string;
 }
@@ -240,6 +250,22 @@ function parseWriteCall(
   return null; // unknown shape: no row
 }
 
+/** Send-time build context (PR #43 review F5/F6). */
+export interface WorkLedgerBuildOptions {
+  /** Current conversation epoch: only same-epoch decision events overlay
+   *  (dead-lineage events claim nothing). Omit = no epoch filtering. */
+  epoch?: number;
+  /** F6 honest absence: decision events are memory-only, but the message
+   *  trail is persisted — so after a reload of a thread that was NOT
+   *  explicitly saved, staging older than this user-message count has NO
+   *  reachable decision record, and 'pending' would claim 'awaiting
+   *  review' for edits the human may have decided (or not) in a lost
+   *  session. Rows that would be pending get verdict 'unknown'.
+   *  Omit/undefined = everything trustable (fresh conversation, or a
+   *  loaded save whose decision record came with it). */
+  trustFrom?: number;
+}
+
 /**
  * Derive the ledger rows for one outgoing request.
  *
@@ -251,6 +277,7 @@ function parseWriteCall(
 export function buildWorkLedger(
   messages: ChatMessage[],
   decisions: readonly WorkLedgerDecision[],
+  options?: WorkLedgerBuildOptions,
 ): WorkLedgerRow[] {
   // Latest write event per (file, section) wins: a retry that failed then
   // applied reads applied; an applied-then-failed correction reads failed.
@@ -300,14 +327,28 @@ export function buildWorkLedger(
       // Latest matching decision at-or-after the staging turn wins
       // (kept-then-undone reads undone). Section match: exact, or
       // file-level when either side has no section (created files).
+      // F5 gates: same-epoch only (dead lineages claim nothing) and
+      // never beyond the trail's end (a turnIndex above the total user
+      // messages can only be a stale/fabricated tag — ignored).
+      const epoch = options?.epoch;
+      const totalBound = totalUsers;
       let latest: WorkLedgerDecision | null = null;
       for (const decision of decisions) {
+        if (epoch !== undefined && decision.epoch !== epoch) continue;
+        if (decision.turnIndex > totalBound) continue;
         if (decision.file !== file) continue;
         if (decision.section !== section && decision.section !== '' && section !== '') continue;
         if (decision.turnIndex < event.turnOrdinal) continue;
         if (!latest || decision.turnIndex >= latest.turnIndex) latest = decision;
       }
-      if (latest) verdict = latest.verdict;
+      if (latest) {
+        verdict = latest.verdict;
+      } else if (options?.trustFrom !== undefined
+        && event.turnOrdinal < options.trustFrom) {
+        // F6: staging predates this session's decision history — the
+        // honest statement is 'unknown', never 'awaiting review'.
+        verdict = 'unknown';
+      }
     }
     rows.push(detail !== undefined && verdict === 'failed'
       ? { turnOffset, file, section, verdict, detail }

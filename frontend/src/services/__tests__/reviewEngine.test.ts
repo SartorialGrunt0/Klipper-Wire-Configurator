@@ -458,7 +458,7 @@ describe('work-ledger decision events (W6)', () => {
     const [run] = ledgerFor('printer.cfg');
     keepRun('printer.cfg', run.key);
     expect(useWorkLedgerStore.getState().events).toEqual([
-      { file: 'printer.cfg', section: 'led', verdict: 'kept', turnIndex: 0 },
+      { file: 'printer.cfg', section: 'led', verdict: 'kept', turnIndex: 0, epoch: 1 },
     ]);
   });
 
@@ -490,7 +490,7 @@ describe('work-ledger decision events (W6)', () => {
     await undoRun('printer.cfg', run.key);
     expect(applied).toHaveLength(1);
     expect(useWorkLedgerStore.getState().events).toEqual([
-      { file: 'printer.cfg', section: 'led', verdict: 'undone', turnIndex: 0 },
+      { file: 'printer.cfg', section: 'led', verdict: 'undone', turnIndex: 0, epoch: 1 },
     ]);
   });
 
@@ -503,7 +503,7 @@ describe('work-ledger decision events (W6)', () => {
     const [run] = ledgerFor('new.cfg');
     await undoRun('new.cfg', run.key);
     expect(useWorkLedgerStore.getState().events).toEqual([
-      { file: 'new.cfg', section: '', verdict: 'undone', turnIndex: 0 },
+      { file: 'new.cfg', section: '', verdict: 'undone', turnIndex: 0, epoch: 1 },
     ]);
   });
 
@@ -514,7 +514,7 @@ describe('work-ledger decision events (W6)', () => {
     // The create-run's section header names the event (a created file's
     // first section is what the reviewer saw).
     expect(useWorkLedgerStore.getState().events).toEqual([
-      { file: 'new.cfg', section: 'fan_generic f', verdict: 'kept', turnIndex: 0 },
+      { file: 'new.cfg', section: 'fan_generic f', verdict: 'kept', turnIndex: 0, epoch: 1 },
     ]);
   });
 
@@ -527,5 +527,52 @@ describe('work-ledger decision events (W6)', () => {
       ['a.cfg', 'x', 'kept'],
       ['b.cfg', 'y', 'kept'],
     ]);
+  });
+});
+
+// ── PR #43 review F15/F16: ledger decision integrity ─────────────────
+
+describe('ledger decision integrity (PR #43 F15/F16)', () => {
+  it('keeping ONE run of a multi-run section records no section verdict (F15)', () => {
+    // Two runs inside [led], separated by an unchanged context line.
+    // Stamping the SECTION kept while its sibling run is still undecided
+    // would misstate the ledger row (row = section).
+    seed(
+      'printer.cfg',
+      L('[led]', 'red: 0', 'keep: 1', 'green: 0'),
+      L('[led]', 'red: 1', 'keep: 1', 'green: 1'),
+    );
+    const runs = ledgerFor('printer.cfg');
+    expect(runs.length).toBe(2);
+    keepRun('printer.cfg', runs[0].key);
+    expect(useWorkLedgerStore.getState().events).toEqual([]);
+  });
+
+  it('keeping every run of a multi-run section records ONE kept event', () => {
+    seed(
+      'printer.cfg',
+      L('[led]', 'red: 0', 'keep: 1', 'green: 0'),
+      L('[led]', 'red: 1', 'keep: 1', 'green: 1'),
+    );
+    keepAllIn('printer.cfg');
+    expect(useWorkLedgerStore.getState().events.map((e) => [e.section, e.verdict]))
+      .toEqual([['led', 'kept']]);
+  });
+
+  it('a single-run section keeps its per-run kept event (common path unchanged)', () => {
+    seed('printer.cfg', L('[led]', 'red: 0'), L('[led]', 'red: 1'));
+    const [run] = ledgerFor('printer.cfg');
+    keepRun('printer.cfg', run.key);
+    expect(useWorkLedgerStore.getState().events.map((e) => [e.section, e.verdict]))
+      .toEqual([['led', 'kept']]);
+  });
+
+  it('a run with no attributable section header records nothing (F16)', () => {
+    // A '' decision event overlays EVERY staged section of the file in
+    // the builder — an unattributable label must not speak.
+    seed('printer.cfg', L('# globals', 'speed: 0'), L('# globals', 'speed: 1'));
+    const [run] = ledgerFor('printer.cfg');
+    keepRun('printer.cfg', run.key);
+    expect(useWorkLedgerStore.getState().events).toEqual([]);
   });
 });

@@ -361,17 +361,52 @@ export function foldExternalEdit(file: string, newLive: string): void {
  *  itself is invisible one turn later. Section names follow the
  *  `runSectionLabel` law (header-in-run wins, dead header, nearest
  *  above), normalized to the bare name so trace-derived rows and
- *  decision events key identically. */
+ *  decision events key identically.
+ *
+ *  PR #43 review F16: an empty section label on a NON-created file is
+ *  never recorded. The builder's overlay rule matches a '' decision
+ *  against EVERY staged section of that file (it exists for created
+ *  files, staged file-level by config_write), so one accidentally-empty
+ *  label silently rewrites unrelated pending rows. Absence claims
+ *  nothing; a label that cannot attribute must not speak. (The
+ *  frame===null created-file sites record '' deliberately and stay.)
+ *
+ *  F15 (partial-section law): a section holding SEVERAL runs decided
+ *  one at a time has no single section verdict — the ledger row is the
+ *  section, and stamping 'kept' while sibling runs are still undecided
+ *  (or later undone) misstates the section. So: a decision covering the
+ *  WHOLE scope (keep/undo all) records each distinct non-empty section
+ *  once; a single-run decision records only when that run IS the whole
+ *  section (its label occurs exactly once among the current runs).
+ *  Partially-decided multi-run sections stay pending — which is true:
+ *  review of that section is not finished. */
 function recordLedgerDecisions(
   file: string,
   runs: readonly ReviewRun[],
+  decided: (run: ReviewRun) => boolean,
   frame: string | null,
   live: string,
   verdict: 'kept' | 'undone',
 ): void {
   const store = useWorkLedgerStore.getState();
-  for (const run of runs) {
-    store.recordDecision(file, normalizeSection(runSectionLabel(live, frame ?? '', run)), verdict);
+  const labelOf = (run: ReviewRun) =>
+    normalizeSection(runSectionLabel(live, frame ?? '', run));
+  const decidedRuns = runs.filter(decided);
+  if (decidedRuns.length === 0) return;
+  if (decidedRuns.length === runs.length) {
+    const sections = new Set<string>();
+    for (const run of decidedRuns) {
+      const label = labelOf(run);
+      if (label) sections.add(label);
+    }
+    for (const section of sections) store.recordDecision(file, section, verdict);
+    return;
+  }
+  for (const run of decidedRuns) {
+    const label = labelOf(run);
+    if (!label) continue;
+    if (runs.filter((other) => labelOf(other) === label).length !== 1) continue;
+    store.recordDecision(file, label, verdict);
   }
 }
 
@@ -384,7 +419,7 @@ export function keepRun(file: string, key: string): void {
   const runs = reviewRuns(frame, live);
   if (!runs.some((run) => run.key === key)) return;   // no matching run: no-op
   store.setReviewFrame(file, keepRunsInFrame(frame, live, runs, new Set([key])));
-  recordLedgerDecisions(file, runs.filter((run) => run.key === key), frame, live, 'kept');
+  recordLedgerDecisions(file, runs, (run) => run.key === key, frame, live, 'kept');
 }
 
 /** KEEP every run of one file. */
@@ -396,7 +431,7 @@ export function keepAllIn(file: string): void {
   const runs = reviewRuns(frame, live);
   if (runs.length === 0) return;
   store.setReviewFrame(file, keepRunsInFrame(frame, live, runs, new Set(runs.map((run) => run.key))));
-  recordLedgerDecisions(file, runs, frame, live, 'kept');
+  recordLedgerDecisions(file, runs, () => true, frame, live, 'kept');
 }
 
 /** UNDO one run: live takes the frame version of it. */
@@ -415,7 +450,7 @@ export async function undoRun(file: string, key: string): Promise<void> {
     return;
   }
   await applyLive(file, undoRunsInLive(frame, live, runs, new Set([key])));
-  recordLedgerDecisions(file, runs.filter((run) => run.key === key), frame, live, 'undone');
+  recordLedgerDecisions(file, runs, (run) => run.key === key, frame, live, 'undone');
 }
 
 /** UNDO every run of one file. */
@@ -432,7 +467,7 @@ export async function undoAllIn(file: string): Promise<void> {
     return;
   }
   await applyLive(file, undoRunsInLive(frame, live, runs, new Set(runs.map((run) => run.key))));
-  recordLedgerDecisions(file, runs, frame, live, 'undone');
+  recordLedgerDecisions(file, runs, () => true, frame, live, 'undone');
 }
 
 /** KEEP every run everywhere. */

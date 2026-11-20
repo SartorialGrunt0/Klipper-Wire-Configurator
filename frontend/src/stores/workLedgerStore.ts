@@ -41,12 +41,33 @@ export function isWorkLedgerDecision(value: unknown): value is WorkLedgerDecisio
 
 export interface WorkLedgerState {
   events: WorkLedgerDecision[];
+  /** PR #43 review F5: conversation lineage counter (memory-only, never
+   *  saved). Bumped whenever the visible trail is BRANCHED or SWITCHED
+   *  (edit-resend truncation, hidden analyze send, loading another saved
+   *  thread). Decision events carry the epoch they were recorded in; the
+   *  builder overlays only same-epoch events, so a verdict from a dead
+   *  lineage can never overwrite a fresh staging of the same file+section. */
+  epoch: number;
+  /** PR #43 review F6: first turn whose decision record is complete for
+   *  this page session. Set once at mount from the RESTORED trail: staging
+   *  before it may have been decided in a session whose events did not
+   *  survive, so pending rows there render 'unknown', not 'awaiting
+   *  review'. null = nothing to distrust (fresh chat, or a loaded save
+   *  whose decisions came with it). */
+  decisionTrustFrom: number | null;
   /** Record one human decision. The turn tag is read live from the
    *  conversation (user-message count), so no send-time bump hook can
    *  drift out of sync. */
   recordDecision: (file: string, section: string, verdict: 'kept' | 'undone') => void;
+  /** Start a new decision lineage (branch/switch of the visible trail). */
+  bumpEpoch: () => void;
+  /** Set/clear the F6 trust boundary (mount restore: current user count;
+   *  loaded save / new chat: null). */
+  setDecisionTrustFrom: (turn: number | null) => void;
   /** Replace the events when a saved conversation is loaded (malformed
-   *  entries dropped). */
+   *  entries dropped). Restored events are stamped with the CURRENT epoch:
+   *  they arrive together with their conversation and are trustworthy as
+   *  a set; any save-time epoch tag is stale and overwritten here. */
   hydrate: (events: readonly unknown[]) => void;
   /** Forget everything — a new chat. */
   clear: () => void;
@@ -54,19 +75,31 @@ export interface WorkLedgerState {
 
 export const useWorkLedgerStore = create<WorkLedgerState>((set, get) => ({
   events: [],
+  epoch: 1,
+  decisionTrustFrom: null,
 
   recordDecision: (file, section, verdict) => {
     const turnIndex = useAiStore.getState().messages
       .filter((m) => m.role === 'user').length;
+    const { epoch } = get();
     set({
-      events: [...get().events, { file, section, verdict, turnIndex }]
+      events: [...get().events, { file, section, verdict, turnIndex, epoch }]
         .slice(-WORK_LEDGER_MAX_EVENTS),
     });
   },
 
-  hydrate: (events) => set({
-    events: Array.isArray(events) ? events.filter(isWorkLedgerDecision) : [],
-  }),
+  bumpEpoch: () => set({ epoch: get().epoch + 1 }),
 
-  clear: () => set({ events: [] }),
+  setDecisionTrustFrom: (turn) => set({ decisionTrustFrom: turn }),
+
+  hydrate: (events) => {
+    const epoch = get().epoch;
+    set({
+      events: Array.isArray(events)
+        ? events.filter(isWorkLedgerDecision).map((e) => ({ ...e, epoch }))
+        : [],
+    });
+  },
+
+  clear: () => set({ events: [], decisionTrustFrom: null }),
 }));

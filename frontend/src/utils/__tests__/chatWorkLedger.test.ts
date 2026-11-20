@@ -405,3 +405,66 @@ describe('buildWorkLedger — touched files (W6.5 enrichment)', () => {
     expect(rows).toEqual([]);
   });
 });
+
+// ── PR #43 review F5/F6: lineage epoch and trust boundary ───────────
+
+describe('buildWorkLedger — lineage epoch and trust boundary (PR #43 F5/F6)', () => {
+  const trail: ChatMessage[] = [
+    user('one'),
+    assistant([call('config_edit', { file: 'printer.cfg', section: 'led' }, SINGLE_OK)]),
+    user('two'),
+  ];
+
+  it('overlays only same-epoch decisions (F5)', () => {
+    const led: WorkLedgerDecision = {
+      file: 'printer.cfg', section: 'led', verdict: 'kept', turnIndex: 1, epoch: 7,
+    };
+    // Dead lineage (epoch 8 built, event from epoch 7): no overlay.
+    expect(buildWorkLedger(trail, [led], { epoch: 8 })[0].verdict).toBe('pending');
+    expect(buildWorkLedger(trail, [led], { epoch: 7 })[0].verdict).toBe('kept');
+    // No options at all: no epoch gate (legacy call sites keep working).
+    expect(buildWorkLedger(trail, [led])[0].verdict).toBe('kept');
+  });
+
+  it('an event without an epoch cannot overlay when an epoch is required', () => {
+    const legacy = {
+      file: 'printer.cfg', section: 'led', verdict: 'kept', turnIndex: 1,
+    } as WorkLedgerDecision;
+    expect(buildWorkLedger(trail, [legacy], { epoch: 1 })[0].verdict).toBe('pending');
+  });
+
+  it('a turnIndex beyond the trail end is ignored (F5 upper bound)', () => {
+    const beyond: WorkLedgerDecision = {
+      file: 'printer.cfg', section: 'led', verdict: 'undone', turnIndex: 99, epoch: 1,
+    };
+    expect(buildWorkLedger(trail, [beyond], { epoch: 1 })[0].verdict).toBe('pending');
+  });
+
+  it('trustFrom renders pre-bound pending rows as unknown (F6)', () => {
+    // Staging sits at turnOrdinal 1; the boundary at 2 means the decision
+    // record for turn 1 did not survive — never claim 'awaiting review'.
+    expect(buildWorkLedger(trail, [], { epoch: 1, trustFrom: 2 })[0].verdict)
+      .toBe('unknown');
+    // Boundary at/below the staging turn: normal pending.
+    expect(buildWorkLedger(trail, [], { epoch: 1, trustFrom: 1 })[0].verdict)
+      .toBe('pending');
+  });
+
+  it('a matching decision outranks the trust boundary', () => {
+    const kept: WorkLedgerDecision = {
+      file: 'printer.cfg', section: 'led', verdict: 'kept', turnIndex: 1, epoch: 1,
+    };
+    expect(buildWorkLedger(trail, [kept], { epoch: 1, trustFrom: 5 })[0].verdict)
+      .toBe('kept');
+  });
+
+  it('failed rows never become unknown (trace-derived, trustworthy after reload)', () => {
+    const failTrail: ChatMessage[] = [
+      user('one'),
+      assistant([call('config_edit', { file: 'printer.cfg', section: 'led' }, SINGLE_FAIL)]),
+      user('two'),
+    ];
+    expect(buildWorkLedger(failTrail, [], { epoch: 1, trustFrom: 2 })[0].verdict)
+      .toBe('failed');
+  });
+});

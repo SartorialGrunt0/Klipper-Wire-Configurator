@@ -2070,7 +2070,30 @@ WORK_LEDGER_MAX_TURNS = 10
 # turning the ledger into a payload channel.
 WORK_LEDGER_MAX_ROWS = 60
 
-_LEDGER_VERDICTS = ("pending", "kept", "undone", "failed", "touched")
+_LEDGER_VERDICTS = ("pending", "kept", "undone", "failed", "touched",
+                    # PR #43 review F6/F17: staging whose decision record
+                    # did not survive a reload. It must reach the model as
+                    # an honest unknown row — DROPPING the row would let
+                    # the header teach 'absence = never staged', which is
+                    # exactly the false claim F6 exists to stop.
+                    "unknown")
+
+# PR #43 review F17: per-field byte bounds (the client bounds detail at
+# 120; the backend re-caps defensively — this channel carries names, and
+# a hand-built request must not turn a name into a payload channel) and
+# whitespace collapsing for ALL THREE text fields: file was only
+# strip()'d, so an embedded newline injected extra lines into the ledger
+# message verbatim.
+_LEDGER_FIELD_MAX = 200
+_LEDGER_DETAIL_MAX = 120
+
+
+def _ledger_field(raw: object, cap: int) -> str:
+    """One-line, length-bounded rendering of a ledger text field."""
+    text = " ".join(str(raw or "").split())
+    if len(text) > cap:
+        text = text[:cap - 1] + "…"
+    return text
 
 
 def _render_work_ledger(rows: list | None) -> str | None:
@@ -2092,12 +2115,12 @@ def _render_work_ledger(rows: list | None) -> str | None:
             continue
         if offset < 1 or offset > WORK_LEDGER_MAX_TURNS:
             continue
-        file = str(row.get("file") or "").strip()
-        section = " ".join(str(row.get("section") or "").split())
+        file = _ledger_field(row.get("file"), _LEDGER_FIELD_MAX)
+        section = _ledger_field(row.get("section"), _LEDGER_FIELD_MAX)
         verdict = str(row.get("verdict") or "").strip()
         if not file or verdict not in _LEDGER_VERDICTS:
             continue
-        detail = " ".join(str(row.get("detail") or "").split())
+        detail = _ledger_field(row.get("detail"), _LEDGER_DETAIL_MAX)
         valid.append((offset, file, section, verdict, detail))
     if not valid:
         return None
@@ -2109,8 +2132,10 @@ def _render_work_ledger(rows: list | None) -> str | None:
     # 'del valid[MAX:]' kept the oldest 60 and threw away the recent
     # staging the ledger is FOR, then told the model the missing recent
     # sections 'were never staged'. Keep the newest MAX rows instead.
+    elided = 0
     if len(valid) > WORK_LEDGER_MAX_ROWS:
-        del valid[:len(valid) - WORK_LEDGER_MAX_ROWS]
+        elided = len(valid) - WORK_LEDGER_MAX_ROWS
+        del valid[:elided]
 
     def _outcome(verdict: str, detail: str) -> str:
         if verdict == "pending":
@@ -2121,18 +2146,23 @@ def _render_work_ledger(rows: list | None) -> str | None:
             return "undone by user"
         if verdict == "touched":
             return "read (content may have changed since)"
+        if verdict == "unknown":
+            return "staged (decision not recorded)"
         return f"FAILED: {detail}" if detail else "FAILED"
 
     header = (
         "Conversation work-ledger (recorded by the client; the outcomes "
         "of YOUR staged edits and the user's review decisions; oldest "
-        "turn first, newest last). A section that no longer appears was "
-        "never staged in the recorded window; config state itself is "
+        "turn first, newest last). A section that no longer appears has "
+        "left the recorded window — its absence claims nothing and is "
+        "NOT evidence of past staging; config state itself is "
         "always re-derivable via the read tools. Outcomes: 'kept' = user "
         "accepted at review; 'undone by user' = applied successfully, "
         "then removed by the user at review — the edit itself did NOT "
         "fail; 'FAILED' = never applied (the failure code follows); "
-        "'staged' = awaiting review; 'read' = section re-read in a "
+        "'staged' = awaiting review; 'staged (decision not recorded)' = "
+        "the review outcome is NOT in the record — never infer kept, "
+        "undone, or still-pending from it; 'read' = section re-read in a "
         "later turn."
     )
     lines: list[str] = []
@@ -2151,6 +2181,11 @@ def _render_work_ledger(rows: list | None) -> str | None:
             suffix = f" in {file}" if section else ""
             label += suffix
         lines.append(f"    {label} -> {_outcome(verdict, detail)}")
+    if elided:
+        # F17 header truthfulness: when the flood cap dropped rows, say
+        # so — never let the model read the trimmed window as complete.
+        lines.append(f"- ({elided} older entries elided: window full; "
+                     "their absence claims nothing)")
     return header + "\n" + "\n".join(lines)
 
 

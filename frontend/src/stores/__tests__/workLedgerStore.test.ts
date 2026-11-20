@@ -30,7 +30,7 @@ describe('recordDecision — turn tagging from live conversation state', () => {
     useAiStore.setState({ messages: [user('a'), assistant('b'), user('c')] });
     useWorkLedgerStore.getState().recordDecision('printer.cfg', 'led', 'kept');
     expect(useWorkLedgerStore.getState().events).toEqual([
-      { file: 'printer.cfg', section: 'led', verdict: 'kept', turnIndex: 2 },
+      { file: 'printer.cfg', section: 'led', verdict: 'kept', turnIndex: 2, epoch: 1 },
     ]);
   });
 
@@ -56,25 +56,25 @@ describe('hydrate — restoring a saved conversation', () => {
   it('replaces the events wholesale', () => {
     useWorkLedgerStore.getState().recordDecision('a.cfg', 'x', 'kept');
     useWorkLedgerStore.getState().hydrate([
-      { file: 'b.cfg', section: 'y', verdict: 'undone', turnIndex: 3 },
+      { file: 'b.cfg', section: 'y', verdict: 'undone', turnIndex: 3, epoch: 1 },
     ]);
     expect(useWorkLedgerStore.getState().events).toEqual([
-      { file: 'b.cfg', section: 'y', verdict: 'undone', turnIndex: 3 },
+      { file: 'b.cfg', section: 'y', verdict: 'undone', turnIndex: 3, epoch: 1 },
     ]);
   });
 
   it('filters malformed entries from legacy/untrusted saves', () => {
     useWorkLedgerStore.getState().hydrate([
-      { file: 'ok.cfg', section: '', verdict: 'kept', turnIndex: 1 },
-      { file: 'bad.cfg', section: 'x', verdict: 'deleted', turnIndex: 1 },
+      { file: 'ok.cfg', section: '', verdict: 'kept', turnIndex: 1, epoch: 1 },
+      { file: 'bad.cfg', section: 'x', verdict: 'deleted', turnIndex: 1, epoch: 1 },
       { file: 'bad2.cfg', verdict: 'kept' },
-      { section: 'x', verdict: 'kept', turnIndex: 0 },
+      { section: 'x', verdict: 'kept', turnIndex: 0, epoch: 1 },
       { file: 'bad3.cfg', section: 'x', verdict: 'kept', turnIndex: 'two' },
       null,
       'nope',
     ] as never);
     expect(useWorkLedgerStore.getState().events).toEqual([
-      { file: 'ok.cfg', section: '', verdict: 'kept', turnIndex: 1 },
+      { file: 'ok.cfg', section: '', verdict: 'kept', turnIndex: 1, epoch: 1 },
     ]);
   });
 });
@@ -82,5 +82,36 @@ describe('hydrate — restoring a saved conversation', () => {
 describe('isWorkLedgerDecision', () => {
   it('accepts a file-level (empty section) event', () => {
     expect(isWorkLedgerDecision({ file: 'f.cfg', section: '', verdict: 'undone', turnIndex: 0 })).toBe(true);
+  });
+});
+
+describe('epoch lineage and trust boundary (PR #43 F5/F6)', () => {
+  it('recordDecision stamps the current epoch', () => {
+    const epoch = useWorkLedgerStore.getState().epoch;
+    useWorkLedgerStore.getState().recordDecision('a.cfg', 'x', 'kept');
+    expect(useWorkLedgerStore.getState().events[0].epoch).toBe(epoch);
+  });
+
+  it('bumpEpoch starts a new lineage', () => {
+    const before = useWorkLedgerStore.getState().epoch;
+    useWorkLedgerStore.getState().bumpEpoch();
+    expect(useWorkLedgerStore.getState().epoch).toBe(before + 1);
+    useWorkLedgerStore.getState().recordDecision('a.cfg', 'x', 'kept');
+    expect(useWorkLedgerStore.getState().events[0].epoch).toBe(before + 1);
+  });
+
+  it('hydrate stamps restored events with the CURRENT epoch (save-time tags are stale)', () => {
+    useWorkLedgerStore.getState().bumpEpoch();
+    const epoch = useWorkLedgerStore.getState().epoch;
+    useWorkLedgerStore.getState().hydrate([
+      { file: 'b.cfg', section: 'y', verdict: 'undone', turnIndex: 3, epoch: 1 },
+    ]);
+    expect(useWorkLedgerStore.getState().events[0].epoch).toBe(epoch);
+  });
+
+  it('clear resets the trust boundary', () => {
+    useWorkLedgerStore.getState().setDecisionTrustFrom(4);
+    useWorkLedgerStore.getState().clear();
+    expect(useWorkLedgerStore.getState().decisionTrustFrom).toBeNull();
   });
 });
