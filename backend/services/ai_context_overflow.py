@@ -30,6 +30,7 @@ Number sources (per the meta-law: every constant gets a citation):
 """
 from __future__ import annotations
 
+import json
 import math
 
 #: Structured error code on the /ai/chat error payload. The frontend keys
@@ -78,30 +79,53 @@ def _content_chars(content: object) -> int:
     return len(str(content))
 
 
-def estimate_prompt_tokens(messages: list) -> int:
+def _tools_chars(tools: object) -> int:
+    """Serialized size of the provider tools payload (PR #43 review F9).
+
+    json.dumps with default=str never raises on ordinary tool schemas;
+    the ValueError leg covers circular references, and the final str()
+    fallback keeps the estimate a length, never an exception — an
+    estimate failure must not become a 500 on the chat route.
+    """
+    try:
+        return len(json.dumps(tools, default=str))
+    except (TypeError, ValueError):
+        return len(str(tools))
+
+
+def estimate_prompt_tokens(messages: list, tools: object = None) -> int:
     """chars/4 estimate of one provider payload's prompt size (ceil).
 
     Ceil, never floor: underestimating is the direction that defeats a
     pre-flight. Malformed rows are str()'d defensively — same direction.
+    `tools` is the native function-calling payload when one is sent:
+    providers bill it against the context window, so counting only the
+    messages understated an edit-armed request by ~8k tokens (PR #43
+    review F9, measured 4,215 counted vs 12,392 sent).
     """
     total = 0
     for msg in messages:
         if isinstance(msg, dict):
             total += _content_chars(msg.get("content"))
+    if tools:
+        total += _tools_chars(tools)
     return math.ceil(total / _CHARS_PER_TOKEN)
 
 
-def preflight_overflow(messages: list, context_window: object) -> dict | None:
+def preflight_overflow(messages: list, context_window: object,
+                       tools: object = None) -> dict | None:
     """Refuse an obviously-over request, or None to let it through.
 
     Only an ``int > 0`` window can block (bools are not windows — W7's
     ``_positive_int`` law). An estimate must be strictly OVER the window;
     borderline is the provider's call. The payload carries harness-visible
     telemetry (estimate + window) alongside the user-facing label.
+    ``tools`` is the native tools payload sent with the same request —
+    it occupies the window too and joins the estimate (F9).
     """
     if isinstance(context_window, bool) or not isinstance(context_window, int) or context_window <= 0:
         return None
-    estimate = estimate_prompt_tokens(messages)
+    estimate = estimate_prompt_tokens(messages, tools=tools)
     if estimate > context_window:
         return {
             "error": CONTEXT_OVERFLOW_MESSAGE,

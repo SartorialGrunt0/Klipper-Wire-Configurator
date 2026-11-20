@@ -4549,7 +4549,18 @@ async def chat_proxy(req: ChatRequest, request: Request):
     # anywhere in this path by design), and even a clean 400 is a wasted
     # slot on a single-parallelism local router. The window comes from the
     # client's W7 probe; unknown = silent pass-through, provider decides.
-    overflow = preflight_overflow(messages, req.knownContextWindow)
+    # PR #43 review F9: the native tools payload occupies the SAME window
+    # (resolved first, handed to the pre-flight) — counting only the
+    # messages understated an edit-armed request by ~8k tokens.
+    # Tool protocol: native function calling is the DEFAULT for every
+    # provider (see _resolve_native_tools). toolProtocol="text" forces the
+    # ```tool fallback; the loop still regex-extracts text calls when a
+    # native server ignores the tools array, so degradation is graceful.
+    native_tools = _resolve_native_tools(req.apiProvider, req.apiUrl, req.toolProtocol,
+                                         edit_capable=edit_capable,
+                                         skill_active=_skill_state['active'])
+    overflow = preflight_overflow(messages, req.knownContextWindow,
+                                  tools=native_tools)
     if overflow is not None:
         logger.warning(
             "Pre-flight overflow refusal | est=%d window=%d requestId=%s",
@@ -4565,13 +4576,8 @@ async def chat_proxy(req: ChatRequest, request: Request):
         req.apiKey,
     )
 
-    # Tool protocol: native function calling is the DEFAULT for every
-    # provider (see _resolve_native_tools). toolProtocol="text" forces the
-    # ```tool fallback; the loop still regex-extracts text calls when a
-    # native server ignores the tools array, so degradation is graceful.
-    native_tools = _resolve_native_tools(req.apiProvider, req.apiUrl, req.toolProtocol,
-                                         edit_capable=edit_capable,
-                                         skill_active=_skill_state['active'])
+    # native_tools was resolved before the pre-flight above (F9) and is
+    # reused by the request build and the tool loop.
 
     # ── Stop-event registration ──
     stop_event = None

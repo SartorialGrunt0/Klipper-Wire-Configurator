@@ -320,3 +320,41 @@ def test_provider_200_unrelated_error_body_keeps_api_error_prefix(monkeypatch):
     body = response.json()
     assert 'errorCode' not in body
     assert body['error'].startswith('API error:')
+
+
+# ── PR #43 review F9: the native tools payload rides the same window ──
+
+def test_estimate_prompt_tokens_counts_native_tools_payload():
+    # The provider bills the tools JSON against the context window, but
+    # the pre-flight counted ONLY message content: measured 4,215 tokens
+    # counted against 12,392 actually sent for an edit-armed request.
+    msgs = [{"role": "user", "content": "hi"}]
+    tools = [{"name": "t", "description": "x" * 4000}]
+    assert estimate_prompt_tokens(msgs) < estimate_prompt_tokens(msgs, tools=tools)
+
+
+def test_preflight_blocks_tools_inflated_request():
+    msgs = [{"role": "user", "content": "hi"}]
+    tools = [{"name": "t", "description": "x" * 4000}]  # ~1000 tokens
+    assert preflight_overflow(msgs, 900) is None  # messages alone: under
+    blocked = preflight_overflow(msgs, 900, tools=tools)
+    assert blocked is not None
+    assert blocked["estimatedPromptTokens"] > 900
+    assert blocked["errorCode"]  # harness telemetry fields unchanged
+
+
+def test_preflight_tools_none_is_the_old_behaviour():
+    msgs = [{"role": "user", "content": "hi"}]
+    assert (preflight_overflow(msgs, 10, tools=None)
+            == preflight_overflow(msgs, 10))
+
+
+def test_estimate_prompt_tokens_tools_never_raises():
+    class Weird:
+        pass
+
+    # Non-serialisable entries degrade to str-length, never an exception:
+    # an estimate failure must not turn into a 500 on the chat route.
+    est = estimate_prompt_tokens([{"role": "user", "content": "hi"}],
+                                 tools=[Weird(), {"a": 1}])
+    assert est >= 0

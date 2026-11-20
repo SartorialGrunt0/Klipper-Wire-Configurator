@@ -4189,13 +4189,25 @@ _REFUSAL_NEGATOR_RE = re.compile(
 # Conditional / environmental frames: a refusal that only happens under a
 # condition or because of the host's own state is not a claim about the
 # command, and the qid's doctrine says those answers PASS.
+# PR #43 review F10: the bare conditional words (if / unless / would /
+# should / could / only if / assuming / depending / until / while) are
+# GONE from the scope. They scoped a clause WHOLESALE, and the three
+# probe wrong-answers showed the exploit: 'If you call PREHEAT T=240,
+# M104 S240 IS REJECTED', 'Should you run it, 240 is outside the range',
+# 'While M104 S240 renders, 240 EXCEEDS THE MAXIMUM' — the 'condition'
+# is the very invocation the tool output shows clean, so the frame is
+# rhetorical, not hypothetical. The removal costs nothing legitimate:
+# a genuinely conditional refusal is stated irrealis ('would refuse only
+# if ...'), and the claim vocabulary above only matches INDICATIVE
+# claims (is rejected / will refuse / exceeds / aborts) — an irrealis
+# refusal never reaches the scope check at all. What remains scopes a
+# real location/state frame.
 _REFUSAL_SCOPE_RE = re.compile(
-    r"(?i)\bif\b|\bunless\b|\bwould\b|\bshould\b|\bcould\b|\bonly if\b|"
-    r"\bassuming\b|\bdepending\b|\breal printer\b|"
+    r"(?i)\breal printer\b|"
     r"\byour (?:config|printer|extruder|max_temp)\b|"
     r"\b(?:this|the) printer\b|\bthis host\b|\bworking config\b|\bthe config\b|"
-    r"\bno \[extruder\]\b|\bhypothetical\b|\bcase where\b|\buntil\b|"
-    r"\bwhile\b|\bright now\b|\bmust be (?:set|configured)\b")
+    r"\bno \[extruder\]\b|\bhypothetical\b|\bcase where\b|"
+    r"\bright now\b|\bmust be (?:set|configured)\b")
 _NEGATOR_WINDOW = 45
 
 
@@ -4540,14 +4552,19 @@ def criterion_ok(kind: str, value: str, content: str,
         # Negation-aware not_contains (2026-11-17, MACRO-14 lesson): a
         # cry-wolf-clean answer may LEGITIMATELY name the defect it rules
         # out ("so no 'unable to parse' risk at runtime") — naive
-        # containment false-failed it. The phrase may appear only inside a
-        # negated sentence (sentence split on . ! ? newline); ANY
-        # unnegated occurrence fails. Conservative by design: ambiguous
-        # phrasing ("risk of unable to parse", "unable to parse is
-        # unlikely") stays RED.
-        neg = re.compile(r"\bno\b|\bnot\b|\bnever\b|neither|won'?t|"
-                         r"wouldn'?t|isn'?t|doesn'?t|aren'?t|can'?not|"
-                         r"avoid|free (?:of|from)|without", re.IGNORECASE)
+        # containment false-failed it. The phrase may appear only inside
+        # a NEGATED CLAUSE. PR #43 review F11: the negation must be IN
+        # that clause — the old anywhere-in-sentence rule let the hedge
+        # 'NOT SURE, but that macro is UNBALANCED' pass, because 'not'
+        # from "not sure" rescued an assertion three words later. A
+        # sentence splits on enders AND 'but' (the word that separates a
+        # hedge from what it concedes): the negator must sit before the
+        # phrase inside the same clause. Conservative by design:
+        # ambiguous phrasing ("risk of unable to parse") stays RED.
+        neg = re.compile(r"\bno\b|\bnot\b|\bnever\b|\bnothing\b|neither|"
+                         r"won'?t|wouldn'?t|isn'?t|doesn'?t|aren'?t|"
+                         r"can'?not|avoid|free (?:of|from)|without",
+                         re.IGNORECASE)
         low = content.lower()
         phrase = value.lower()
         idx = 0
@@ -4558,12 +4575,33 @@ def criterion_ok(kind: str, value: str, content: str,
             start = 0
             for t in ".!?\n":
                 start = max(start, content.rfind(t, 0, i) + 1)
+            # 'but' opens a new clause for grading purposes: the hedge a
+            # negator lives behind it no longer scopes what follows.
+            for m in re.finditer(r"\bbut\b", content[start:i], re.IGNORECASE):
+                start = max(start, start + m.end())
             end = len(content)
             for t in ".!?\n":
                 e = content.find(t, i + len(phrase))
                 if e != -1:
                     end = min(end, e)
-            if not neg.search(content[start:end]):
+            clause_lo = low[start:end]
+            phrase_lo = i - start
+            # Epistemic hedges and assertion boosters are NOT negators:
+            # 'not sure', 'no doubt', 'not certain' speak about the
+            # speaker's confidence while the embedded claim stands
+            # (F11's 'No doubt about it: the macro renders empty').
+            # Stripped with length preserved so positions still align.
+            clause_lo = re.sub(
+                r"(?i)\b(?:no doubt|not sure|not certain|not confident|"
+                r"not convinced|unsure)\b",
+                lambda m: " " * (m.end() - m.start()), clause_lo)
+            # The negator must PRECEDE the phrase inside its clause
+            # ('no risk of X'). Anything else ('X avoided', 'is
+            # unbalanced, not fine') stays RED — ambiguity is never
+            # scored as ruling the defect out.
+            negated = any(m.start() < phrase_lo
+                          for m in neg.finditer(clause_lo))
+            if not negated:
                 return False
             idx = i + len(phrase)
     if kind == "no_asserted_refusal":
