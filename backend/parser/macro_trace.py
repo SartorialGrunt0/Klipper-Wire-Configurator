@@ -14,12 +14,18 @@ LAWS:
   * Never invent: bounds/home exist only if the project config declares
     them (no frontend drawing-defaults); a coordinate that did not
     resolve makes the position unresolved, never guessed.
-  * A refused line aborts: an un-homed move or a soft-limit violation
-    stops the trace exactly like the real macro aborts (virtual-printer
-    law, 2026-11-15 — a refused line ABORTS; later lines never run).
-  * Refusal wording describes Klipper's behaviour; the bundled
-    reference checkout is too old for verbatim quoting, so nothing here
-    pretends to be klippy's exact response text.
+  * A refused line aborts: an un-homed move, a soft-limit violation or a
+    gcmd parse/range error stops the trace exactly like the real macro
+    aborts (virtual-printer law, 2026-11-15 — a refused line ABORTS;
+    later lines never run, and no state is invented for them).
+  * ...but a line Klipper only WARNS about does not: an unregistered
+    token such as G28.1 reaches gcode.cmd_default, which prints
+    'Unknown command:"..."' and returns (gcode.py:283-316) — the macro
+    keeps running, so the trace notes it and traces on (PR #43 review
+    second pass, T-1).
+  * Refusal wording describes Klipper's behaviour; where the bundled
+    reference checkout has klippy's own text it is quoted, otherwise
+    nothing here pretends to be klippy's exact response text.
 
 HOME/BOUNDARIES parity: frontend macroDesigner.ts createMachineProfile
 (same derivation, minus its drawing defaults — the trace would rather
@@ -537,16 +543,21 @@ def trace_motion(rendered: list[tuple[int | None, str]],
             # PR #43 review A-F6: klippy registers ONLY G28
             # (extras/homing.py:306, cmd_G28); gcode.py:210-215 keeps the
             # dotted suffix as the dispatch token, so "G28.1" matches no
-            # handler and falls to gcode.cmd_default -> "Unknown command",
-            # which aborts the macro. It resolves on a real printer only
-            # when some OTHER macro claims it via rename_existing — not
-            # knowable from the rendered body. Marking axes homed here was
-            # a trace untruth: no command ran, nothing moved, nothing homed.
-            abort(loc, "Unknown command: G28.1 \u2014 Klipper registers "
-                       "only G28; unless another macro claims G28.1 via "
-                       "rename_existing, the line fails and the macro "
-                       "stops here")
-            break
+            # handler and falls to gcode.cmd_default. Marking axes homed
+            # here was a trace untruth: no command ran, nothing moved.
+            # SECOND PASS (T-1): what cmd_default DOES there is
+            # respond_info('Unknown command:"G28.1"') and return
+            # (gcode.py:283-316) — it raises nothing, so
+            # run_script_from_command keeps executing and the macro
+            # CONTINUES. The old abort ("the real printer stops the macro
+            # here") was false in the aborting direction and hid every
+            # later line. It resolves into real homing only when some
+            # OTHER macro claims G28.1 via rename_existing — not knowable
+            # from the rendered body.
+            add(f"{loc}: {raw.strip()} \u2192 Unknown command \u2014 "
+                'Klipper prints \'Unknown command:"G28.1"\' and CONTINUES '
+                "the macro (later lines still run); no command ran, "
+                "nothing homed, nothing moved")
 
         elif token == "G28":
             axes = [a for a in _AXES if a.upper() in params] or list(_AXES)
@@ -587,13 +598,30 @@ def trace_motion(rendered: list[tuple[int | None, str]],
             homed_now = [a for a in _AXES if a in set_homed.strip().lower()]
             state.homed |= set(homed_now)
             homed_str = " ".join(a.upper() for a in homed_now) or "\u2014"
+            # PR #43 review second pass (T-5): force_move.py:127-137 reads
+            # CLEAR_HOMED (alias CLEAR, and the alias is only consulted
+            # when CLEAR_HOMED is absent) and calls clear_homing_state on
+            # those axes AFTER set_position — so a cleared axis ends up NOT
+            # homed, even if SET_HOMED named it too (clear runs last; for
+            # cartesian/corexy the limits are simply reset, no error).
+            # Empty / unnamed axes clear nothing, like gcmd.get('', '').
+            if "CLEAR_HOMED" in params:
+                clear_homed = params["CLEAR_HOMED"]
+            else:
+                clear_homed = params.get("CLEAR", "")
+            cleared = [a for a in _AXES if a in clear_homed.strip().lower()]
+            state.homed -= set(cleared)
+            cleared_str = (", cleared homed "
+                           + " ".join(a.upper() for a in cleared)) \
+                if cleared else ""
             # PR #43 review A-F5: availability is gated on config —
             # force_move.py:44-47 registers the command only when
             # [force_move] enable_force_move is true. Config gating is not
             # modelled, so the caveat is said out loud instead.
             add(f"{loc}: SET_KINEMATIC_POSITION \u2192 pos "
-                f"{_pos_str(state.pos)}, marked homed {homed_str} "
-                "(SET_HOMED defaults to 'xyz'; available only when "
+                f"{_pos_str(state.pos)}, marked homed {homed_str}"
+                f"{cleared_str}"
+                " (SET_HOMED defaults to 'xyz'; available only when "
                 "[force_move] enable_force_move)")
 
         elif token == "G92":
@@ -635,8 +663,7 @@ def trace_motion(rendered: list[tuple[int | None, str]],
             # TARGETS only (D2) — the wait itself is not modelled and no
             # current temperature is ever claimed.
             nm = "extruder" if token in ("M104", "M109") else "heater_bed"
-            raw_s = params.get("S")
-            if raw_s is None:
+            if "S" not in params:
                 # M109/M190 without S wait at the CURRENT target — the
                 # no-S form is in the registry snippet.
                 if token in ("M109", "M190") and nm in state.heaters:
@@ -644,26 +671,50 @@ def trace_motion(rendered: list[tuple[int | None, str]],
                         f"{_fmt_temp(state.heaters[nm])} (the wait is not "
                         "modelled)")
             else:
+                raw_s = params["S"]
                 v = _num(raw_s)
-                note = "" if v is not None else \
-                    " (target did not render \u2014 Klipper: unable to " \
-                    "parse, the line fails at run time)"
+                # PR #43 review second pass (T-4): M104/M109 read
+                # get_float('S', 0.) and M140/M190 the same
+                # (kinematics/extruder.py:261-262, heater_bed.py:19-21).
+                # A present-but-unparseable S raises there: the line fails
+                # and the macro STOPS — printing '?' and tracing on
+                # invented a printer that kept running past the error.
+                if v is None:
+                    abort(loc, f"{token} S={raw_s!r} \u2014 Klipper: "
+                               "unable to parse, the line fails and the "
+                               "macro stops")
+                    break
                 old = _before(state.heaters, nm, _fmt_temp)
                 state.heaters[nm] = v
                 add(f"{loc}: {raw.strip()} \u2192 {nm} target {old} "
-                    f"\u2192 {_fmt_temp(v)}{note}")
+                    f"\u2192 {_fmt_temp(v)}")
 
         elif token == "SET_HEATER_TEMPERATURE":
             nm = (params.get("HEATER") or "").strip().lower()
             if nm:
-                v = _num(params.get("TEMPERATURE"))
-                note = "" if v is not None else \
-                    " (value did not render \u2014 Klipper: unable to " \
-                    "parse, the line fails at run time)"
+                # heaters.py:156-159: temp = get_float('TARGET', 0.).
+                # An ABSENT key is that 0. default (heater off); a
+                # present-but-empty/out-of-range value is a parse error.
+                # PR #43 review second pass (T-4): a parse error stops the
+                # macro — no '?' target and no later lines.
+                # THIRD PASS (own code review): the parameter is TARGET —
+                # a stray TEMPERATURE= is never read by Klipper (unknown
+                # key=value params are simply not fetched), so it must not
+                # set a target either: absent TARGET is the 0. default.
+                v = 0.0
+                if "TARGET" in params:
+                    raw_t = params["TARGET"]
+                    v = _num(raw_t)
+                    if v is None:
+                        abort(loc, "SET_HEATER_TEMPERATURE "
+                                   f"TARGET={raw_t!r} \u2014 Klipper: "
+                                   "unable to parse, the line fails and the "
+                                   "macro stops")
+                        break
                 old = _before(state.heaters, nm, _fmt_temp)
                 state.heaters[nm] = v
                 add(f"{loc}: {raw.strip()} \u2192 {nm} target {old} "
-                    f"\u2192 {_fmt_temp(v)}{note}")
+                    f"\u2192 {_fmt_temp(v)}")
 
         elif token == "TURN_OFF_HEATERS":
             if state.heaters:
@@ -694,45 +745,99 @@ def trace_motion(rendered: list[tuple[int | None, str]],
         elif token == "SET_FAN_SPEED":
             nm = (params.get("FAN") or "").strip().lower()
             if nm:
-                v = _num(params.get("SPEED"))
-                note = ""
-                if v is None:
-                    note = (" (value did not render \u2014 Klipper: unable "
-                            "to parse, the line fails at run time)")
-                elif not 0.0 <= v <= 1.0:
-                    note = " (SPEED must be a 0\u20131 ratio \u2014 " \
-                           "Klipper refuses)"
-                    v = None
-                pct = None if v is None else round(v * 100.0, 1)
-                old = _before(state.fans, nm, _fmt_pct)
-                state.fans[nm] = pct
-                add(f"{loc}: {raw.strip()} \u2192 {nm} speed {old} "
-                    f"\u2192 {_fmt_pct(pct)}{note}")
+                # fan_generic.py:34-42: speed = get_float('SPEED', None, 0.)
+                # — minval 0., NO maxval — and a missing SPEED is only
+                # legal when TEMPLATE names a template.
+                # PR #43 review second pass (T-4): the parse failure and
+                # the negative value both raise on the printer, so the
+                # macro STOPS; SPEED above 1 is NOT an error (fan.py
+                # _apply_speed clamps to max_power), so it is modelled as
+                # the clamped 100% and said aloud instead of refused.
+                if "SPEED" not in params:
+                    if "TEMPLATE" in params:
+                        old = _before(state.fans, nm, _fmt_pct)
+                        state.fans[nm] = None
+                        add(f"{loc}: {raw.strip()} \u2192 {nm} speed "
+                            f"{old} \u2192 ? (TEMPLATE drives the speed "
+                            "\u2014 not modelled)")
+                    else:
+                        abort(loc, "SET_FAN_SPEED without SPEED or "
+                                   "TEMPLATE \u2014 Klipper: \"must "
+                                   "specify SPEED or TEMPLATE\", the line "
+                                   "fails and the macro stops")
+                        break
+                else:
+                    raw_v = params["SPEED"]
+                    v = _num(raw_v)
+                    if v is None:
+                        abort(loc, f"SET_FAN_SPEED SPEED={raw_v!r} "
+                                   "\u2014 Klipper: unable to parse, the "
+                                   "line fails and the macro stops")
+                        break
+                    if v < 0.0:
+                        abort(loc, f"SET_FAN_SPEED SPEED={v:g} "
+                                   "\u2014 Klipper: SPEED must have "
+                                   "minimum of 0.0 (get_float minval=0), "
+                                   "the line fails and the macro stops")
+                        break
+                    pct = round(v * 100.0, 1)
+                    note = ""
+                    if v > 1.0:
+                        pct = 100.0
+                        note = (" (SPEED is above the 0\u20131 ratio: "
+                                "Klipper clamps to the fan's max_power "
+                                "\u2014 1.0 by default, i.e. 100%)")
+                    old = _before(state.fans, nm, _fmt_pct)
+                    state.fans[nm] = pct
+                    add(f"{loc}: {raw.strip()} \u2192 {nm} speed {old} "
+                        f"\u2192 {_fmt_pct(pct)}{note}")
 
         elif token == "SET_LED":
+            # led.py:74-83 reads every component with
+            # get_float(<C>, 0., minval=0., maxval=1.). So: an ABSENT key
+            # takes the 0. default (real, modelled colour), while a
+            # present-but-empty value raises on float('') and an
+            # out-of-range value raises on minval/maxval — either way the
+            # line fails and the macro STOPS. PR #43 review second pass
+            # (T-4): the old branch fabricated rgb(0, 0, 0) for `RED=`
+            # (via `or "0"`) and stored rgb(2, ...) verbatim, i.e. modelled
+            # a printer that kept going with a colour it never applied.
             nm = (params.get("LED") or "").strip().lower()
             if nm:
-                comps, bad = [], False
+                comps: list[float] = []
+                bad: list[str] = []
                 for c in ("RED", "GREEN", "BLUE"):
-                    v = _num(params.get(c) or "0")
+                    if c not in params:
+                        comps.append(0.0)      # get_float default 0.
+                        continue
+                    v = _num(params[c])
                     if v is None:
-                        bad = True
-                    comps.append(v if v is not None else 0.0)
-                if "WHITE" in params and params["WHITE"].strip():
-                    w = _num(params["WHITE"])
-                    if w is None:
-                        bad = True
-                    comps.append(w if w is not None else 0.0)
-                old = _before(state.leds, nm, _fmt_led)
+                        bad.append(f"{c}={params[c]!r} (unable to parse)")
+                    elif not 0.0 <= v <= 1.0:
+                        bad.append(f"{c}={v:g} (out of range 0\u20131)")
+                    else:
+                        comps.append(v)
+                white = None
+                if "WHITE" in params:
+                    white = _num(params["WHITE"])
+                    if white is None:
+                        bad.append(f"WHITE={params['WHITE']!r} "
+                                   "(unable to parse)")
+                    elif not 0.0 <= white <= 1.0:
+                        bad.append(f"WHITE={white:g} "
+                                   "(out of range 0\u20131)")
                 if bad:
-                    state.leds[nm] = None
-                    add(f"{loc}: {raw.strip()} \u2192 led {nm} {old} "
-                        "\u2192 ? (colour did not render \u2014 Klipper: "
-                        "unable to parse, the line fails at run time)")
-                else:
-                    state.leds[nm] = tuple(comps)
-                    add(f"{loc}: {raw.strip()} \u2192 led {nm} {old} "
-                        f"\u2192 {_fmt_led(comps)}")
+                    abort(loc, "SET_LED " + ", ".join(bad)
+                          + " \u2014 Klipper: led.py:76-79 takes RED/"
+                            "GREEN/BLUE/WHITE as 0\u20131 floats, the "
+                            "line fails and the macro stops")
+                    break
+                if white is not None:
+                    comps.append(white)
+                old = _before(state.leds, nm, _fmt_led)
+                state.leds[nm] = tuple(comps)
+                add(f"{loc}: {raw.strip()} \u2192 led {nm} {old} "
+                    f"\u2192 {_fmt_led(comps)}")
 
         elif token == "SET_LED_EFFECT":
             nm = (params.get("LED") or "").strip().lower()

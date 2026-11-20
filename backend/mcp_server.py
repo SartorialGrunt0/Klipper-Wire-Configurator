@@ -3204,14 +3204,22 @@ class McpServer:
 
     @staticmethod
     def _gcode_command_registry() -> dict[str, dict]:
-        """Command map of the generated registry, loaded once per process."""
+        """Command map of the generated registry, loaded once per process.
+
+        Review T-9: a FAILED load is NOT cached. The artifact can appear
+        later (a generator run, a repaired checkout), and caching the
+        empty dict disabled every required-param check for the rest of the
+        process — the checks came back only on restart. Absence disables
+        the checks for THIS call and the next call retries.
+        """
         cache = getattr(McpServer, "_gcode_registry_cache", None)
-        if cache is None:
-            try:
-                from services.gcode_registry import load_registry
-                cache = load_registry().get("commands", {})
-            except Exception:
-                cache = {}  # absent/corrupt artifact: presence checks off
+        if cache is not None:
+            return cache
+        try:
+            from services.gcode_registry import load_registry
+            cache = load_registry().get("commands", {})
+        except Exception:
+            return {}  # absent/corrupt artifact: presence checks off, retry next call
         McpServer._gcode_registry_cache = cache
         return cache
 
@@ -3226,6 +3234,16 @@ class McpServer:
         'M26 S.25' declares S='.25'. PR #43 review A-F8: the
         NAME=-only test fabricated "missing required parameter 'S='" for
         a line the printer accepts.
+
+        Review T-6: args_r runs over the WHOLE line, not per whitespace
+        token — 'M26 S 10' supplies S='10' and the printer runs it — so
+        presence is decided by the same splitter the render engine uses
+        at its A-01 fix (parser/macro_render.py), keeping both surfaces
+        identical. The command's own run pairs with the command text
+        ('M26' -> M:'26') and is not a parameter. A present-but-empty
+        value ('M26 S') supplies nothing and stays a missing-parameter
+        verdict, and an '='-prefixed value ('M104 S=0') is not a letter
+        value either — Klipper's letter grammar never consumes '='.
         """
         if re.search(rf"(?:^|\s){re.escape(pname)}=", line, re.IGNORECASE):
             return True
@@ -3233,14 +3251,12 @@ class McpServer:
             return False
         from parser.macro_render import _KLIPPER_ARGS_R
         letter = pname.upper()
-        # Skip the command word: it is not a parameter. args_r's letter
-        # run must be EXACTLY this one letter, so 'SET_LED' never reads
-        # as an S parameter.
-        for tok in line.split()[1:]:
-            match = _KLIPPER_ARGS_R.match(tok.upper())
-            if not match or match.group(1) != letter:
+        parts = _KLIPPER_ARGS_R.split(line.upper())
+        # i == 1 is the command's own run; parameters start at i == 3.
+        for i in range(3, len(parts) - 1, 2):
+            if parts[i] != letter:
                 continue
-            value = tok[match.end():]
+            value = parts[i + 1].strip()
             if value and not value.startswith("="):
                 return True
         return False
@@ -3421,13 +3437,18 @@ class McpServer:
                     key, _, value = stripped_raw.partition(":")
                     sim_variables[key.strip()[len("variable_"):]] = value.strip()
             simulation = simulate_macro(
-                # PR #43 review A-F4: a params_*-derived dict IS a declared
-                # default invocation (Klipper's bare-call semantics), but an
-                # EMPTY dict from a section with no params_* keys carries no
-                # authority — passing {} made the engine treat an invented
-                # bare call as real and fabricate 'renders EMPTY' for
-                # {params.X} reads. None = no invocation declared.
-                gcode_body, sim_params or None, variables=sim_variables,
+                # PR #43 review A-F4 + T-3: a params_*-derived dict is a
+                # DECLARED DEFAULT (the KWC simulation convention that
+                # documents the invocation a macro expects — NOT a Klipper
+                # runtime mechanism and NOT a caller invocation), so it
+                # rides as declared_defaults with params=None. Passing it as
+                # `params` made the derived dict authoritative: an undeclared
+                # bare-call read became a hard 'renders EMPTY' ERROR here
+                # while simulate_macro reported the same text as INFO
+                # param-dependent. An explicit empty default (params_X with
+                # no value) still rides every call and still errors.
+                gcode_body, None, variables=sim_variables,
+                declared_defaults=sim_params,
                 sections=self._sim_project_sections())
             for finding in simulation.findings:
                 where = f"Line {finding.source_line}: " if finding.source_line else ""
@@ -3908,11 +3929,20 @@ class McpServer:
                     sections.add(" ".join(header.lower().split()))
         return frozenset(sections)
 
-    def _sim_motion_profile(self):
+    def _sim_motion_profile(self, diagnostics: dict | None = None):
         """Machine bounds/home for the Execution trace, from the same
         working-state-first scan the sim already uses. Partial or
         missing stepper data yields a silent profile — the trace would
-        rather stay quiet than invent geometry."""
+        rather stay quiet than invent geometry.
+
+        ``diagnostics`` (optional, filled in place) reports WHOSE geometry
+        this is: ``inventory`` is 'overlay' when the project/overlay
+        sections supplied the texts, 'host' when the working overlay was
+        empty and THIS HOST's config mirror did, and 'none' when nothing
+        was readable. Output-truth: a host-derived profile makes the trace
+        refuse moves against the host machine's limits, and the caller
+        must say so (review T-2).
+        """
         from parser.macro_trace import derive_motion_profile
         texts: list[str] = []
         overlay = _working_scan_items()
@@ -3933,6 +3963,10 @@ class McpServer:
                                                     errors="replace"))
                     except OSError:
                         pass
+        if diagnostics is not None:
+            diagnostics["inventory"] = ("overlay" if overlay
+                                        else "host" if texts
+                                        else "none")
         return derive_motion_profile(texts)
 
     @staticmethod
@@ -4082,18 +4116,28 @@ class McpServer:
         # the engine stays silent rather than inventing a missing fan.
         sections_diag: dict[str, str] = {}
         sections = self._sim_project_sections(sections_diag)
-        profile = self._sim_motion_profile()
+        # Geometry provenance (review T-2): with an empty working overlay
+        # the motion profile is derived from THIS HOST's config mirror, so
+        # a REFUSED/soft-limit verdict below describes the host machine —
+        # the trace header must name the source instead of claiming 'the
+        # machine geometry the project declares'.
+        profile_diag: dict[str, str] = {}
+        profile = self._sim_motion_profile(profile_diag)
+        host_geometry = (profile_diag.get("inventory") == "host"
+                         and bool(getattr(profile, "bounds", None)))
         if sections and sections_diag.get("inventory") == "host":
             # PR #43 review output-truth (sections fallback): with an empty
             # working overlay the inventory came from THIS HOST's config
             # mirror, so a "no [fan_generic] section exists" verdict
             # describes the host machine — say so instead of letting it
-            # read as the project's.
+            # read as the project's. The same fallback feeds the motion
+            # profile, so motion/geometry verdicts are in scope too.
             out.append(
                 "NOTE: hardware sections came from THIS HOST's config mirror "
                 "— the conversation working overlay was empty, so "
-                "section/mux-target verdicts below describe the host config, "
-                "not necessarily the project under discussion.")
+                "section/mux-target and motion/geometry verdicts below "
+                "describe the host config, not necessarily the project "
+                "under discussion.")
         if truncated:
             out.append(f"(scenario list truncated to the cap of "
                        f"{self._SIM_SCENARIO_CAP})")
@@ -4160,10 +4204,14 @@ class McpServer:
             seq_vars = dict(variables)
             cmd_sets: list[tuple[str, ...]] = []
             motion_seed = None
-            # A-F4: the section's params_* defaults always ride the call
-            # (that is Klipper's params_X mechanism, not a caller
-            # declaration), so they go in as declared_defaults; `params`
-            # becomes the INVOCATION — None when the caller declared none.
+            # A-F4: the section's params_* defaults are the KWC simulation
+            # convention for documenting the invocation defaults a macro
+            # EXPECTS — not a Klipper runtime mechanism (klippy's
+            # gcode_macro reads only gcode/description/rename_existing/
+            # variable_*; an unknown params_X option is a config ERROR, per
+            # validator.py) — and never a caller declaration. They ride
+            # every simulated call as declared_defaults; `params` becomes
+            # the INVOCATION — None when the caller declared none.
             call_params = params if invocation_declared else None
             for run_no in range(1, runs + 1):
                 label = name if runs == 1 else f"call {run_no}"
@@ -4186,7 +4234,8 @@ class McpServer:
                     state if runs == 1 else None,
                     seq_vars if runs > 1 else None,
                     undeclared_vars, declared_vars,
-                    profile, seed_for_call, trace_note)
+                    profile, seed_for_call, trace_note,
+                    host_geometry=host_geometry)
                 if tr is not None:
                     motion_seed = tr.state
                 if runs == 1:
@@ -4240,7 +4289,7 @@ class McpServer:
                        undeclared_vars: list[str],
                        declared_vars: set[str],
                        profile=None, motion_seed=None,
-                       trace_note: str = ""):
+                       trace_note: str = "", host_geometry: bool = False):
         """One invocation's block: declared assumption → rendered lines →
         execution trace → expected effect → findings. Returns the
         motion-trace result (None when no trace ran) so sequence mode can
@@ -4301,13 +4350,34 @@ class McpServer:
                     motion_seed if motion_seed is not None
                     else seed_state({})[0],
                     start_note=trace_note)
-                out.append("Execution trace (moves execute over the "
-                           "rendered lines against the machine geometry "
-                           "the project declares; heater/fan/LED lines "
-                           "report TARGETS as commanded; feedrate, "
-                           "waiting, and heating progress are not "
-                           "modelled):")
-                out.extend("  " + t for t in tr.lines)
+                # T-2: name the geometry's SOURCE. A host-mirror profile
+                # makes the limit verdicts below describe this machine, not
+                # the project's — "the geometry the project declares" would
+                # be a false claim about someone else's printer.
+                geometry = (
+                    "geometry from THIS HOST's config mirror — the "
+                    "project/overlay declares no stepper sections; limits "
+                    "may differ from the project's machine"
+                    if host_geometry else
+                    "moves execute over the rendered lines against the "
+                    "machine geometry the project declares")
+                trace_tail = ("heater/fan/LED lines report TARGETS as "
+                              "commanded; feedrate, waiting, and heating "
+                              "progress are not modelled")
+                out.append(f"Execution trace ({geometry}; {trace_tail}):")
+                # T-8: one trace line per rendered command means a long
+                # body streams hundreds of lines. Cap the EMITTED detail
+                # and announce the elision — same doctrine as the rendered
+                # list above (the trace itself still ran every line).
+                shown = tr.lines[:McpServer._SIM_RENDER_LINE_EMIT_CAP]
+                out.extend("  " + t for t in shown)
+                elided = len(tr.lines) - len(shown)
+                if elided:
+                    elision = (f"  ... {elided} further trace lines elided "
+                               f"from {len(tr.lines)} traced — the trace ran "
+                               "every rendered line; only the emitted detail "
+                               "is capped")
+                    out.append(elision)
 
         if result.variants_rendered > 1:
             # PR #43 review output-truth (effect path tags): the rendered

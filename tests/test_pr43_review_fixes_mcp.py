@@ -25,7 +25,22 @@ OT-2  When the section inventory falls back to THIS HOST's config
       host, not necessarily the project under discussion.
 COV   'gcode: G28' plus indented continuation lines is ONE option value
       (configparser continuation), so the checked body must include them.
+T-2   The Execution trace's geometry provenance is DISCLOSED: with an
+      empty working overlay the bounds/home come from this host's
+      config mirror, so REFUSED/limit verdicts describe the host — the
+      header says so and the OT-2 note's scope covers motion verdicts.
+T-3   validate_macro treats a params_*-derived default as a DECLARED
+      DEFAULT (params=None), never as an authoritative bare invocation:
+      both surfaces must report the same INFO param-dependent verdict.
+T-6   Presence for traditional letters is the whole-line args_r split
+      ('M26 S 10' supplies S='10'), identical to the render engine's
+      splitter; an empty value ('M26 S') is still a missing parameter.
+T-8   The Execution trace is capped per scenario with an honest elision
+      line, same doctrine as the rendered lines above it.
+T-9   A FAILED command-registry load is never cached: the next call
+      retries, so a returning artifact re-enables the shape checks.
 """
+import re
 import sys
 from pathlib import Path
 
@@ -271,3 +286,172 @@ def test_inline_gcode_value_keeps_its_indented_continuation():
                     "  M26\n")
     assert "missing required parameter S" in out, out
     assert "Line 2:" in out, out
+
+# ── T-2: the trace's geometry provenance is disclosed ─────────────────────
+
+_HOST_MIRROR_250 = (
+    "[printer]\nkinematics: cartesian\n\n"
+    "[stepper_x]\nposition_endstop: 0\nposition_max: 250\n\n"
+    "[stepper_y]\nposition_endstop: 0\nposition_max: 250\n\n"
+    "[stepper_z]\nposition_endstop: 0\nposition_max: 250\n")
+
+_PARK_OUT_OF_BOUNDS = ("[gcode_macro PARK]\n"
+                       "description: park\n"
+                       "gcode:\n"
+                       "  G28\n"
+                       "  G1 X300 Y10\n")
+
+
+def _trace_header(out):
+    return next(ln for ln in out.splitlines()
+                if ln.startswith("Execution trace"))
+
+
+def test_host_mirror_geometry_is_disclosed_in_the_trace_header(monkeypatch,
+                                                              tmp_path):
+    """Empty overlay → _sim_motion_profile() derives the bounds from THIS
+    HOST's config mirror. The trace then REFUSES a move the project never
+    declared a limit for, so the header must name the geometry's source
+    instead of claiming 'the machine geometry the project declares'."""
+    monkeypatch.setattr(mcp_server, "_working_scan_items", lambda: [])
+    cfgdir = tmp_path / "cfgs"
+    cfgdir.mkdir()
+    (cfgdir / "printer.cfg").write_text(_HOST_MIRROR_250, encoding="utf-8")
+    monkeypatch.setattr(mcp_server, "LOCAL_CONFIGS_DIR", cfgdir)
+    monkeypatch.setattr(mcp_server, "_system_config_path",
+                        lambda: tmp_path / "absent")
+    out = _call(macro_text=_PARK_OUT_OF_BOUNDS)
+    # the verdict really did come from the host mirror's bounds...
+    assert "beyond machine limit 0–250" in out, out
+    header = _trace_header(out)
+    assert "THIS HOST's config mirror" in header, header
+    assert "the project declares" not in header, header
+    # ...and the OT-2 note's scope covers motion/geometry verdicts too,
+    # not only section/mux-target ones.
+    note = next(ln for ln in out.splitlines()
+                if ln.startswith("NOTE: hardware sections"))
+    assert "geometry" in note, note
+
+
+def test_overlay_geometry_keeps_the_project_header(monkeypatch):
+    """When the project overlay DOES declare the stepper sections, the
+    bounds are the project's and the existing header stays."""
+    overlay = _HOST_MIRROR_250.replace("250", "300")
+    monkeypatch.setattr(mcp_server, "_working_scan_items",
+                        lambda: [("printer.cfg", overlay)])
+    out = _call(macro_text=_PARK_OUT_OF_BOUNDS)
+    header = _trace_header(out)
+    assert "the machine geometry the project declares" in header, header
+    assert "THIS HOST" not in header, header
+
+
+# ── T-3: a params_* default is not an authoritative invocation ────────────
+
+_PARAM_DEFAULT_MACRO = ("[gcode_macro HOT]\n"
+                        "description: hot\n"
+                        "params_S: 210\n"
+                        "gcode:\n"
+                        "  M104 S{params.S}\n"
+                        "  M140 S{params.BED}\n")
+
+
+def test_params_default_is_not_an_authoritative_invocation():
+    """params_S declares a DEFAULT (the KWC simulation convention), not a
+    caller invocation. Passing the derived dict as `params` made the
+    undeclared BED read a hard 'renders EMPTY' ERROR on validate_macro
+    while simulate_macro gave the honest INFO for the same text — the two
+    surfaces must agree."""
+    out = _validate(_PARAM_DEFAULT_MACRO)
+    assert "renders EMPTY" not in out, out
+    assert "param-dependent" in out, out
+    sim = _call(macro_text=_PARAM_DEFAULT_MACRO)
+    assert "renders EMPTY" not in sim, sim
+    assert "param-dependent" in sim, sim
+    assert "M104 S210" in sim, sim
+
+
+# ── T-6: letter presence is the whole-line args_r split ───────────────────
+
+def test_letter_param_with_a_space_before_its_value_is_present():
+    """Klipper splits the WHOLE line with args_r (gcode.py:201,210-214),
+    so 'M26 S 10' supplies S='10' and the printer RUNS it — the per-token
+    presence test fabricated "missing required parameter 'S='"."""
+    out = _validate("[gcode_macro SDCARD_RESUME]\n"
+                    "description: resume\n"
+                    "gcode:\n"
+                    "  M26 S 10\n")
+    assert "missing required parameter" not in out, out
+
+
+def test_empty_letter_value_is_still_a_missing_parameter():
+    """Guard against over-fixing: 'M26 S' declares nothing to parse, which
+    is the same failure the PR already reported."""
+    out = _validate("[gcode_macro SDCARD_RESUME]\n"
+                    "description: resume\n"
+                    "gcode:\n"
+                    "  M26 S\n")
+    assert "missing required parameter 'S='" in out, out
+    assert "renders EMPTY" in out, out
+
+
+def test_letter_presence_matches_the_render_engine_splitter():
+    """Both surfaces must read the letter grammar identically: the same
+    args_r split the render engine uses at its A-01 fix decides presence
+    here too (a required letter is present when its run's remainder,
+    stripped, is non-empty)."""
+    from parser.macro_render import _KLIPPER_ARGS_R
+
+    cases = [("M26 S10", True), ("M26 S 10", True), ("M106 S 100", True),
+             ("M26 S.25", True), ("M26 S", False), ("M26", False)]
+    for line, want in cases:
+        parts = _KLIPPER_ARGS_R.split(line.upper())
+        present = {parts[i]: parts[i + 1].strip()
+                   for i in range(1, len(parts) - 1, 2)}
+        assert bool(present.get("S")) == want, (line, present)
+        assert McpServer._line_has_param(line, "S") == want, (line, want)
+
+
+# ── T-8: the execution trace is capped, honestly ──────────────────────────
+
+def test_execution_trace_is_capped_and_the_elision_is_announced():
+    """A-R1 bounded the rendered list only: a 300-command body still
+    streamed ~500 output lines because the trace emits one line per
+    command. Cap it with the same announced-elision doctrine."""
+    body = "  G28\n" + "\n".join(
+        f"  G1 X{i % 100} Y{i % 50} F3000" for i in range(300))
+    out = _call(macro_text="[gcode_macro MANY]\ngcode:\n" + body + "\n")
+    trace = out.split("Execution trace", 1)[1]
+    emitted = [ln for ln in trace.splitlines()
+               if re.match(r"  L\d+\b", ln)
+               or ln.startswith(("  Start:", "  Final state"))]
+    assert len(emitted) <= 200, len(emitted)
+    assert len(emitted) >= 199, len(emitted)
+    match = re.search(r"\.\.\. (\d+) further trace lines elided", trace)
+    assert match and int(match.group(1)) > 0, trace
+    # the render cap above it is untouched
+    assert "further lines elided from 301 rendered" in out, out
+
+
+# ── T-9: a failed registry load is retried, never cached ──────────────────
+
+@pytest.fixture()
+def _fresh_registry_cache():
+    mcp_server.McpServer._gcode_registry_cache = None
+    yield
+    mcp_server.McpServer._gcode_registry_cache = None
+
+
+def test_failed_registry_load_is_not_cached(monkeypatch, _fresh_registry_cache):
+    """The except branch used to assign the empty dict to the module cache,
+    disabling required-param checks process-wide even after the artifact
+    came back."""
+    real_load = gcode_registry.load_registry
+    monkeypatch.setattr(gcode_registry, "load_registry", _raise_missing)
+    assert McpServer._gcode_command_registry() == {}
+    assert getattr(mcp_server.McpServer, "_gcode_registry_cache", None) is None, (
+        "the failed load was cached — shape checks stay off forever")
+    # the artifact returns: the NEXT call must retry, not serve the failure
+    monkeypatch.setattr(gcode_registry, "load_registry", real_load)
+    assert McpServer._gcode_command_registry(), "the registry was never retried"
+    assert list(McpServer._missing_required_params("M26")), (
+        "required-param checks stayed disabled after the registry returned")

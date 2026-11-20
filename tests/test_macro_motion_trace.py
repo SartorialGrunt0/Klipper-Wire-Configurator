@@ -235,22 +235,23 @@ def test_set_kinematic_position_marks_homed_at_values():
     assert tr.state.pos["x"] == 100.0
 
 
-def test_g28_1_is_unknown_and_stops_the_trace():
-    # PR #43 review A-F6 — INTENTIONAL FLIP of the old pin ("G28.1 marks
-    # homed without moving"). klippy registers only G28
-    # (extras/homing.py:306) and keeps the dotted suffix as the dispatch
-    # token (gcode.py:210-215), so "G28.1" reaches cmd_default: "Unknown
-    # command", and the macro ABORTS. The old pin encoded a command that
-    # does not exist.
-    # Cold seed on purpose: a declared position auto-homes in seed_state,
-    # which would mask whether G28.1 homed anything by itself.
-    st, _ = seed_state({})
+def test_g28_1_is_unknown_and_the_macro_continues():
+    # PR #43 review A-F6 said G28.1 has no handler (klippy registers only
+    # G28, extras/homing.py:306; gcode.py:210-215 keeps the dotted suffix,
+    # so "G28.1" reaches cmd_default). SECOND PASS (T-1) corrected what
+    # cmd_default does there: respond_info('Unknown command:"G28.1"') and
+    # return — no error, so the macro CONTINUES and the next line runs.
+    # The de-homing half of the old pin stands: G28.1 homes and moves
+    # nothing.
+    st, _ = seed_state({})          # cold: seed_state auto-homes otherwise
     tr = _t(_SLINGER, [(1, "G28.1"), (2, "G1 X10 Y10")], st)
     text = _lines(tr)
-    assert tr.aborted is True
     assert "Unknown command" in text
-    assert tr.state.homed == set()
-    assert "L2" not in text
+    assert tr.state.homed == set()  # G28.1 homed nothing
+    assert "L2" in text             # the later line RAN
+    # ... and is refused for the ordinary reason: the machine is unhomed
+    assert "Must home axis first" in text
+    assert tr.aborted is True
 
 
 def test_unknown_coordinate_unresolves_never_invents():
@@ -384,9 +385,21 @@ def test_m109_m140_m190_set_targets_too():
 
 
 def test_set_heater_temperature_generic_heater():
+    # THIRD PASS (own review): Klipper reads TARGET (heaters.py:157,
+    # registry agrees) — the trace must read the same spelling.
+    text = "\n".join(
+        _tr(["SET_HEATER_TEMPERATURE HEATER=chamber TARGET=45"]).lines)
+    assert "chamber target \u2014 \u2192 45\u00b0C" in text
+
+
+def test_set_heater_temperature_stray_temperature_param_ignored():
+    # A stray TEMPERATURE= is never fetched by cmd_SET_HEATER_TEMPERATURE
+    # (it asks for TARGET) — real Klipper takes the 0. default; the trace
+    # must not credit the unread key with a target.
     text = "\n".join(
         _tr(["SET_HEATER_TEMPERATURE HEATER=chamber TEMPERATURE=45"]).lines)
-    assert "chamber target \u2014 \u2192 45\u00b0C" in text
+    assert "chamber target \u2014 \u2192 0\u00b0C" in text
+    assert "45\u00b0C" not in text
 
 
 def test_turn_off_heaters_zeroes_known_targets_only():
@@ -407,10 +420,14 @@ def test_fan_m106_m107_percent():
 def test_set_fan_speed_ratio_and_out_of_range():
     text = "\n".join(_tr(["SET_FAN_SPEED FAN=myfan SPEED=0.75"]).lines)
     assert "myfan speed \u2014 \u2192 75%" in text
+    # THIRD PASS (own review): fan_generic.py:35 fetches SPEED with
+    # minval=0. and NO maxval; fan.py:52 clamps the applied value to
+    # max_power. SPEED=2 therefore does NOT refuse — it clamps to 100%
+    # and the macro keeps running. The old 'refuses' pin was wrong.
     text = "\n".join(_tr(["SET_FAN_SPEED FAN=myfan SPEED=2",
                            "G90"]).lines)
-    assert "myfan speed \u2014 \u2192 ?" in text and "0\u20131" in text
-    # unresolved fan does not abort the trace
+    assert "myfan speed \u2014 \u2192 100%" in text
+    assert "clamp" in text
     assert "Final state" in text and "ABORTED" not in text
 
 
@@ -433,12 +450,21 @@ def test_led_effect_set_stop_and_stop_all():
     assert "static colours are NOT turned off" in text
 
 
-def test_target_that_did_not_render_is_unresolved_not_refused():
-    text = "\n".join(_tr(["M104 S", "M106 S255"]).lines)
-    assert "extruder target \u2014 \u2192 ?" in text
-    assert "unable to parse" in text          # the run-time risk, said aloud
-    assert "ABORTED" not in text              # parse law, not motion law
-    assert "fan speed" in text                # later lines still traced
+def test_empty_present_param_refuses_and_stops():
+    # THIRD PASS (own review): 'S' that renders EMPTY was PRESENT in the
+    # line — get_float('S') fetches '' and raises unable to parse
+    # (extruder.py:262 get_float semantics), so the line fails and the
+    # macro ABORTS (T-4 virtual-printer law). The old pin
+    # ('?' + later lines still traced) claimed a run the printer never
+    # has. Param-dependence is graded by the RENDER surface, where an
+    # undeclared read is INFO; the trace executes the rendered text.
+    tr = _tr(["M104 S", "M106 S255"])
+    text = "\n".join(tr.lines)
+    assert "unable to parse" in text
+    assert "ABORTED" in text
+    assert "fan speed" not in text          # the later fan line never ran
+    assert "L2" not in text
+    assert "Final state at refusal" in text
 
 
 def test_final_state_lists_targets_fans_leds():
