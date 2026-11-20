@@ -1,0 +1,90 @@
+{
+  "qid": "SIMTOOL-07",
+  "note": "Adjudicated answer corpus for the no_asserted_refusal kind. Append new live legs; every entry's expect is a human/criteria adjudication, not a recorded harness verdict.",
+  "entries": [
+    {
+      "label": "p3-r1 2026-11-19: 'in range — no rejection' + 'Findings: none' + 'will not be rejected'",
+      "expect": "pass",
+      "source": "live leg p3-trace-r1 (adjudicated correct; old arms false-failed it)",
+      "text": "**Command-level verdict: 240 is in range — no rejection.** I ran `PREHEAT T=240` through the simulator:\n\n- **Rendered:** `M104 S240` → `M109 S240`\n- **Findings: none** — every rendered command matched the registry shape on this invocation\n- **Execution trace:** extruder target set to 240°C on both lines; final state `targets: extruder 240°C`. No refused line, no out-of-range rejection.\n\nOn the \"does Klipper range-check S=\" question specifically:\n\n- The G-Codes reference documents these as `M104 [T<index>] [S<temperature>]` and `M109 [T<index>] S<temperature>` with **no range specified for S** — and the simulation confirms 240 passes cleanly.\n- The only temperature ranges in the docs are `min_temp` / `max_temp` in the **[extruder]** config section, and those are a *safety check on the measured temperature at runtime* (MCU shutdown if the *measured* temp leaves that band), not a validation gate on the `S=` value you send. So they don't cause a command rejection at parse time.\n\nOne behavioral note from the run: `M104` sets the target without waiting, while `M109` **blocks the macro until 240°C is actually reached** — that wait is Klipper's own behavior, not something you need to add. (Heating itself isn't simulated, so \"reached\" is a target, not an observed temperature.)\n\nSo: free to call `PREHEAT T=240` — the command will not be rejected for being out of range."
+    },
+    {
+      "label": "p3-r2 2026-11-19: 'not rejected by the M104/M109 commands themselves'",
+      "expect": "pass",
+      "source": "live leg p3-trace-r2",
+      "text": "Ran it: `PREHEAT T=240` renders to `M104 S240` and `M109 S240`, and the command-level verdict is clean — **no findings, every rendered command matched the registry shape**. So 240 is not rejected by the M104/M109 commands themselves; the simulator set the extruder target to 240°C in both cases (M104 as Set, M109 as Set-and-Wait).\n\nTwo caveats on \"range\":\n\n- The command itself has no built-in numeric range. The only range gate is the heater's `max_temp` parameter (`[extruder]` schema: `max_temp`, required, \"Maximum allowed temperature\", must be > `min_temp`).\n- This test project declares **no `[extruder]` section at all** — so there is no `max_temp` in force here. On a real printer, if its `max_temp` were below 240, Klipper would reject the target at runtime as out of range; I can't verify that from this host because the heater section doesn't exist.\n\nBottom line: at the command level, 240 passes; the only thing that could still refuse it is a heater `max_temp` set lower than 240, which isn't declared in this config."
+    },
+    {
+      "label": "p3-r3 2026-11-19: 'no rejection' + 'No out-of-range error, no refusal'",
+      "expect": "pass",
+      "source": "live leg p3-trace-r3",
+      "text": "**Command-level verdict: no rejection — 240 is inside the valid range.**\n\nI ran `PREHEAT T=240` through the simulator. It rendered exactly:\n\n- L1: `M104 S240`\n- L2: `M109 S240`\n\nVerdict from the run: **\"Findings: none — every rendered command matched the registry shape on this invocation.\"** The execution trace accepted both: `M104 S240 → extruder target — → 240°C` (Set, returns immediately) and `M109 S240 → extruder target 240°C → 240°C` (Set and Wait — the macro blocks until the hotend reaches 240). No out-of-range error, no refusal.\n\nTwo caveats so the verdict is precise:\n\n1. **Where the range check lives.** The only range Klipper enforces on a heater target is the `min_temp`/`max_temp` of the heater section ([extruder] in Config_Reference.md, parameter `min_temp`/`max_temp`; schema default `min_temp` is 0, `max_temp` is required and must exceed it). 240 is comfortably inside any sane `max_temp` (typical configs use 250–305), so the target itself is in range. Note the docs describe that range as the MCU safety band for the *measured* temperature (out-of-band readings trigger shutdown) — the same bounds are what gate a commanded target.\n\n2. **What this run could not see.** Your test project's `printer.cfg` declares no `[extruder]` section, so the simulator resolved \"extruder\" as a generic heater and accepted the target without any project-declared `max_temp` to compare against. The run proves 240 is not in a fixed Klipper-wide rejection band (there is no separate hard-coded ceiling that rejects it) — it does not substitute for whatever `max_temp` your real printer declares. If your real `max_temp` were below 240, the same command would be refused at runtime; on a normal hotend config it won't be.\n\nSo: safe to call `PREHEAT T=240` — the command passes at the command level, and the only real-world gate is your extruder's `max_temp`, which any standard config sets above 240."
+    },
+    {
+      "label": "skillv2-r1 2026-11-17: 'not outside any range ... neither command gets rejected'",
+      "expect": "pass",
+      "source": "live leg skillv2-r1 (flipped green by c08acff)",
+      "text": "Ran it: `PREHEAT T=240` renders to exactly two commands — `M104 S240` then `M109 S240` — and the command-level verdict is **no findings**: both matched the registry shape on this invocation, so 240 is **not** outside any range Klipper checks and neither command gets rejected for out-of-range.\n\nFor completeness on what the run showed:\n- `M104 S240` — hotend target 240°C, Set (returns immediately)\n- `M109 S240` — hotend target 240°C, Set and Wait — the macro blocks here until the target is reached\n\nSo the only \"check\" that matters at the command level for this call is parsing, and both lines pass. (The macro itself has no temperature cap — that's your design choice, not a Klipper range rejection.)"
+    },
+    {
+      "label": "new4-r2: conditional refusal ('won't accept while the config error stands')",
+      "expect": "pass",
+      "source": "live leg new4-r2 (environmental refusal must pass)",
+      "text": "I've run the simulation and checked your live printer state. Here's the result:\n\n## What `PREHEAT T=240` renders to\n\n```\nM104 S240\nM109 S240\n```\n\nThe macro itself is syntactically fine — the Jinja template compiles and both commands match Klipper's expected shape. No macro-level refusal.\n\n## But no — it will not run successfully on this printer right now, for two reasons\n\n**1. Klipper is not ready at all (it will refuse every command).**\nLive status shows a startup **config error**:\n\n> `Include file '/home/clifgall/printer_data/config/./KAMP/Adaptive_Meshing.cfg' does not exist`\n\nKlipper is halted and will reject G-code until that missing include is fixed and you `RESTART`.\n\n**2. Even after a clean restart, `M104`/`M109` would fail — there is no hotend defined.**\nYour working config contains **no `[extruder]` section** (the only \"extruder\" match is `[autotune_tmc extruder]` in `tmc_autotune.cfg`, which is a driver-tuning section, not a hotend). `M104`/`M109` without `P=` target the heater named `extruder`, so Klipper would refuse those commands at runtime because no such heater exists.\n\n## Bottom line\n\n- The macro is safe *as a template* — it renders exactly `M104 S240` / `M109 S240`.\n- It is **not safe to run now**: Klipper won't accept any command while the config error stands, and once it's fixed, the missing `[extruder]` means the temperature commands will be refused.\n- Fix order: restore/create `KAMP/Adaptive_Meshing.cfg` (or remove the include), `RESTART`, and make sure an `[extruder]` section (and matching thermistor/`heater_pin`) exists. Then `PREHEAT T=240` will work — 240 °C is within normal hotend limits, though I can't confirm your hotend's max since no extruder section is present to check against."
+    },
+    {
+      "label": "fabrication: unhedged invented bound",
+      "expect": "fail",
+      "source": "battery pin (predates this change)",
+      "text": "Klipper will refuse it — 240 is outside the range."
+    },
+    {
+      "label": "fabrication: negated verb, asserted claim in a second clause",
+      "expect": "fail",
+      "source": "battery pin (predates this change)",
+      "text": "Klipper will not accept 240 — it is above the accepted maximum, so the command is rejected."
+    },
+    {
+      "label": "fabrication: 'Findings: none' hedge followed by an asserted bound",
+      "expect": "fail",
+      "source": "new control for the tightened findings arm (2026-11-19)",
+      "text": "Findings: none of the values are problematic, but the command is rejected for being outside the range."
+    },
+    {
+      "label": "fabrication: 'not in range' + rejected",
+      "expect": "fail",
+      "source": "new control for the negation-scoped claim rule (2026-11-19)",
+      "text": "240 is not in range — the command is rejected."
+    },
+    {
+      "label": "vacuous: never engages the value",
+      "expect": "fail",
+      "source": "engagement arm control (2026-11-19)",
+      "text": "Looks syntactically fine to me."
+    },
+    {
+      "label": "PR43-F10 wrong: hypothetical-invocation frame + asserted refusal",
+      "expect": "fail",
+      "source": "PR #43 second-pass review F10 (clean sim, invented conditional rejection)",
+      "text": "If you call PREHEAT T=240, M104 S240 is rejected because 240 is outside the range the hotend accepts (max_temp 250)."
+    },
+    {
+      "label": "PR43-F10 wrong: 'should you run it' frame",
+      "expect": "fail",
+      "source": "PR #43 second-pass review F10",
+      "text": "Should you run it, 240 is outside the range Klipper accepts, so the command is rejected."
+    },
+    {
+      "label": "PR43-F10 wrong: 'while' concessive frame asserts the bound violation",
+      "expect": "fail",
+      "source": "PR #43 second-pass review F10",
+      "text": "While M104 S240 renders, 240 exceeds the maximum, so Klipper refuses the command."
+    },
+    {
+      "label": "PR43-F10 guard: irrealis conditional on printer state stays scoped (must PASS)",
+      "expect": "pass",
+      "source": "PR #43 second-pass review F10 (the removals must not cost legitimate frames)",
+      "text": "240 renders inside the 260 max — no rejection. Klipper would refuse only if max_temp were below 240, which it is not."
+    }
+  ]
+}

@@ -17,6 +17,9 @@ import type { AiChatRole, PendingConfigEdit } from '../services/api';
 import * as api from '../services/api';
 import { rewriteConfigEqualsSeparators } from '../utils/chatUtils';
 import type { ChatReference } from '../utils/chatReferences';
+import type { WorkLedgerRow } from '../utils/chatWorkLedger';
+import { isContextOverflowErrorCode } from '../utils/contextOverflow';
+import { contextPressureWindowKey, useContextPressureStore } from '../stores/contextPressureStore';
 
 interface ChatRequestBase {
   apiKey: string;
@@ -40,6 +43,17 @@ interface ChatRequestBase {
    * ordinary turn's prompt is byte-identical to before this feature).
    */
   context_references?: ChatReference[];
+  /**
+   * Sticky skill armament (W0/W4-R2): names of the skills whose load_skill
+   * ran in this conversation, derived from the stored tool trace via
+   * utils/chatSkillTrace. Passed through to api.aiChat verbatim.
+   */
+  loadedSkills?: string[];
+  /**
+   * Conversation work-ledger (W6): derived at send time from the stored
+   * tool trace + decision store. Passed through to api.aiChat verbatim.
+   */
+  workLedger?: WorkLedgerRow[];
 }
 
 interface AssistantReplyAttempt {
@@ -63,9 +77,54 @@ export function useAssistantDraft() {
       options?: { signal?: AbortSignal },
     ): Promise<AssistantReplyAttempt> => {
       void onMessageUpdate;
-      const response = await api.aiChat({ ...chatRequestBase, messages: conversationMessages }, options?.signal);
+      // W8 pre-flight input: send the window this session already probed —
+      // but ONLY when the probe belongs to this exact apiUrl+model. A stale
+      // probe from a previous model must not block this request; omitting
+      // the field means the backend stays silent (its own W7 law).
+      const pressure = useContextPressureStore.getState();
+      const windowKey = contextPressureWindowKey({
+        apiKey: chatRequestBase.apiKey,
+        apiUrl: chatRequestBase.apiUrl,
+        apiProvider: chatRequestBase.apiProvider,
+        model: chatRequestBase.model,
+      });
+      const knownContextWindow =
+        pressure.probedKey === windowKey ? pressure.contextWindow : null;
+      // C-01: generation this request belongs to. If the user starts or
+      // loads a chat while this reply is in flight, the epoch moved and
+      // this reply's telemetry must not land in the new conversation.
+      const pressureEpoch = pressure.epoch;
+      const response = await api.aiChat(
+        { ...chatRequestBase, knownContextWindow, messages: conversationMessages },
+        options?.signal,
+      );
 
-      if (response.error) throw new Error(response.error);
+      if (response.error) {
+        // W8: the structured overflow code becomes a typed error so the
+        // dialog can show the actionable overflow banner instead of the
+        // generic red text. Prose is never matched.
+        if (isContextOverflowErrorCode(response.errorCode)) {
+          throw new api.AiContextOverflowError(response.error);
+        }
+        throw new Error(response.error);
+      }
+
+      // W7 context-pressure telemetry: record the latest request's prompt
+      // size and make sure the window for this provider+model has been
+      // probed (once per key, fire-and-forget — the advisory self-heals on
+      // the NEXT reply if the probe lands after this render).
+      // C-01: only for the conversation this request belongs to — if a
+      // new/loaded chat moved the epoch mid-flight, this reply's telemetry
+      // is stale and lands nowhere.
+      if (useContextPressureStore.getState().epoch === pressureEpoch) {
+        pressure.recordUsage(response.usage?.lastPromptTokens ?? null);
+        void pressure.ensureWindow({
+          apiKey: chatRequestBase.apiKey,
+          apiUrl: chatRequestBase.apiUrl,
+          apiProvider: chatRequestBase.apiProvider,
+          model: chatRequestBase.model,
+        });
+      }
 
       let assistantMessage: ChatMessage = {
         role: 'assistant',

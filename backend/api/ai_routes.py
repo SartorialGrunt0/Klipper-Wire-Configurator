@@ -11,7 +11,7 @@ import re
 from urllib.parse import urlparse, urlunparse
 
 import httpx
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from api.printer_memory_routes import (  # noqa: E402
@@ -23,6 +23,12 @@ from api.printer_memory_routes import (  # noqa: E402
     is_printer_memory_blank,
 )
 from mcp_server import McpServer
+from services.ai_context_overflow import (
+    CONTEXT_OVERFLOW_ERROR_CODE,
+    CONTEXT_OVERFLOW_MESSAGE,
+    is_context_overflow_error,
+    preflight_overflow,
+)
 from services.ai_draft_apply import extract_config_code_blocks
 from services.ai_edit_tools import (
     APPROVAL_TIMEOUT_SECONDS,
@@ -315,6 +321,11 @@ class ModelsRequest(BaseModel):
     apiProvider: AiProvider = AiProvider.chatgpt
 
 
+class ContextWindowRequest(ModelsRequest):
+    """W7 context-window probe: the same credentials plus the active model."""
+    model: str = ""
+
+
 class ChatRequest(BaseModel):
     messages: list[dict]
     apiKey: str
@@ -354,6 +365,32 @@ class ChatRequest(BaseModel):
     # None/False = the model must call load_skill to unlock the write
     # tools.
     editSkill: bool | None = None
+    # Names of skills whose load_skill ACTUALLY ran in THIS conversation
+    # (W4-R2 generalization of the W0 editSkillLoaded boolean — single
+    # path, the boolean is deleted). Derived by the CLIENT from its stored
+    # tool trace (frontend/src/utils/chatSkillTrace.ts): the frontend's
+    # lean replay strips native tool_calls, so without this the gate
+    # re-closes on every follow-up turn and sticky knowledge bodies are
+    # lost. Conversation-scoped (derived per send from the conversation's
+    # own trace, never a global setting). config-editing here STARTS the
+    # request armed (atomic armament: tools + body move together); STICKY
+    # non-gating skills here (macro-authoring) re-inject their body at the
+    # trailing seam. Knowledge names NEVER arm write tools by themselves —
+    # gates_write in _SKILL_REGISTRY is the only unlock. The harness
+    # editSkill override above still wins for the edit gate.
+    loadedSkills: list[str] = []
+    # Conversation work-ledger (W6): per-section outcomes of the model's
+    # own write tools across earlier turns — staged rows plus the human's
+    # kept/undone review decisions plus failures with the harness's error
+    # line. Derived client-side (utils/chatWorkLedger + workLedgerStore):
+    # the review ledger splices silently and the lean replay strips tool
+    # results, so kept/undone is the ONE record that exists only on the
+    # client. Same trust class as editSkillLoaded/contextFiles (the client
+    # is ground truth for its own state). The backend renders it verbatim
+    # as one trailing system message and NEVER decides anything from it
+    # (review law: the backend re-delivers the record, decisions stay
+    # client-side); names + verdicts only, no payloads.
+    workLedger: list[dict] = []
     # Approval-gate override (harness A/B runs ONLY; the frontend never
     # sends it). INERT since the post-hoc review change (2026-10-02):
     # nothing in the edit path suspends, so there is no wait to skip and
@@ -394,6 +431,14 @@ class ChatRequest(BaseModel):
     # adds nothing at all, so an ordinary turn's prompt is byte-identical to
     # what it was before this feature existed.
     context_references: list[dict] = []
+    # W8 pre-flight: the REAL context window the CLIENT already probed via
+    # /ai/context-window (W7's store), sent per request so the backend can
+    # refuse an obviously-over prompt without spending a provider call —
+    # llama.cpp hangs rather than errors on over-long prompts, and the chat
+    # path has no response timeout by design. Null/omitted = unknown window
+    # = no block (W7 law: silence over guessing); harness and older clients
+    # never send it.
+    knownContextWindow: int | None = None
     # Prose-draft machinery (the fullRewriteGuard request field, server-side
     # draft validation/audit, and the KWC_SERVER_DRAFT_VALIDATION /
     # KWC_POST_APPLY_AUDIT env switches) was removed with the Phase-4 ratchet
@@ -918,12 +963,138 @@ def render_context_references(references: list | None) -> str | None:
     return "\n\n".join(parts)
 
 
+# ── W3: runtime-error trailing observation ─────────────────────────────────
+#
+# A pasted Klipper runtime error quotes the RENDERED command line
+# (klippy/gcode.py get(): "Error on '%s'" % self._commandline) — never a
+# macro or a source line. When the latest user message carries such a
+# frame, the harness traces it through the project's macros with the W2
+# render engine and attaches ONE trailing system observation naming the
+# provenance. Intent-law clean: literal frame extraction + deterministic
+# render matching; the output can only be a useless note, never a reroute.
+# Silence is the default (no frame / no match / no files / ablation), and
+# a trace failure can never break the chat turn.
+
+
+def _project_trace_sources(context_files: dict | None) -> list:
+    """MacroTraceSource per macro section — staged (client) files FIRST,
+    then the disk mirror; a staged file shadows the same-named mirror
+    entry (same precedence as the edit-session seed, drafts win)."""
+    from parser.config_parser import parse_config
+    from parser.macro_render import MacroTraceSource
+
+    sources = []
+    seen_names: set[str] = set()
+    buckets = [list((context_files or {}).items())]
+    try:
+        buckets.append(list(_mirror_user_config_files().items()))
+    except Exception:
+        # mirror unreadable → staged files alone still trace; keep the
+        # fail-safe but make it observable (review B-L4, 2026-11-14)
+        logger.warning("trace mirror unreadable", exc_info=True)
+    for entries in buckets:
+        for fname, entry in entries:
+            if fname in seen_names:
+                continue
+            seen_names.add(fname)
+            text = str((entry or {}).get("content", ""))
+            if "gcode_macro" not in text and "delayed_gcode" not in text:
+                continue
+            try:
+                parsed = parse_config(text, filename=fname)
+            except Exception:
+                logger.warning("trace source unparsable (%s) — skipped",
+                               fname, exc_info=True)
+                continue
+            for section in parsed.sections:
+                if section.is_commented_out:
+                    continue
+                if section.section_type not in ("gcode_macro",
+                                                "delayed_gcode"):
+                    continue
+                body = section.get_value("gcode")
+                # The parser's value keeps the newline right after
+                # 'gcode:' as a phantom empty line 1; drop it so body
+                # line 1 is the first command — the same convention the
+                # validate_macro facade uses, so both channels number
+                # identically.
+                body = body.lstrip("\n")
+                if not body.strip():
+                    continue
+                params = {
+                    p.key[len("params_"):].lower(): p.value
+                    for p in section.params
+                    if p.key.startswith("params_") and not p.is_commented_out
+                }
+                variables = {
+                    p.key[len("variable_"):]: p.value
+                    for p in section.params
+                    if p.key.lower().startswith("variable_")
+                    and not p.is_commented_out
+                }
+                sources.append(MacroTraceSource(
+                    name=section.full_header, body=body,
+                    params=params, variables=variables, file=fname))
+    return sources
+
+
+def _runtime_error_observation(messages: list[dict],
+                               context_files: dict | None) -> str | None:
+    """Trailing-observation text when the latest user message quotes a
+    Klipper runtime error whose frame a project macro renders — None in
+    every other case (fast literal pre-check first: most turns pay
+    nothing)."""
+    from parser.macro_render import extract_error_frames, trace_runtime_error
+
+    last_user = ""
+    for m in reversed(messages):
+        if m.get("role") == "user":
+            c = m.get("content")
+            last_user = (c if isinstance(c, str)
+                         else " ".join(str(p) for p in (c or [])))
+            break
+    if "Error on " not in last_user:
+        return None
+    frames = extract_error_frames(last_user)
+    if not frames:
+        return None
+    sources = _project_trace_sources(context_files)
+    if not sources:
+        return None
+    matches = trace_runtime_error(frames, sources)
+    if not matches:
+        return None
+    # Observation budget (review B-L5, 2026-11-14): a generic rendered
+    # line can match dozens of macros — 60 matches measured 5 KB and
+    # ~0.9 s injected per turn. Show the first five, name the rest.
+    _CAP = 5
+    lines = [
+        f"- `{m.file}` [{m.macro}] body line {m.source_line}: "
+        f"`{m.source_text}`  (renders: `{m.rendered}`)"
+        for m in matches[:_CAP]
+    ]
+    if len(matches) > _CAP:
+        lines.append(f"- (… {len(matches) - _CAP} more matches truncated — "
+                     "the candidate set is larger than shown)")
+    out = ("[Runtime error trace — deterministic] The Klipper error quoted "
+           "in the latest message matches how these project macros render "
+           "with default params (the error itself carries only the RENDERED "
+           "command):\n" + "\n".join(lines))
+    if len({m.macro for m in matches}) > 1:
+        out += ("\nThe failing line is among these candidates — present them "
+                "instead of asserting one.")
+    return out
+
+
 def _prepare_messages(messages: list[dict],
                       edit_capable: bool = False, *,
                       skill_active: bool = False,
                       native_mode: bool = False,
                       context_files: dict | None = None,
-                      context_references: list | None = None) -> list[dict]:
+                      context_references: list | None = None,
+                      inject_edit_skill_body: bool = False,
+                      loaded_skills: list | None = None,
+                      work_ledger: list | None = None) -> list[dict]:
     """Build a clean system prompt with MCP tool descriptions, printer memory,
     and user messages.
     """
@@ -1082,12 +1253,86 @@ def _prepare_messages(messages: list[dict],
         [{"role": "system", "content": references_text}] if references_text else []
     )
 
+    # W0 sticky skill armament (Invariant B — trailing injection): while the
+    # conversation has earned the edit surface, the skill body re-rides every
+    # request as a trailing system message at this same seam. Appending (like
+    # the references) keeps the replayed prefix byte-identical for the KV
+    # cache, and trailing placement means head-truncation clips chat, never
+    # the rulebook. Idempotent: a trail that already carries the body (this
+    # turn's or a prior turn's load_skill result) gets no second copy.
+    # Invariant A pairs this with the write-tool advertisement — the caller
+    # only sets the flag when the effective skill state is active, so tools
+    # and body always move together.
+    skill_body_messages: list[dict] = []
+    if inject_edit_skill_body and not _skill_body_in_trail(
+            messages, EDIT_SKILL_NAME):
+        skill_body_messages = [{"role": "system", "content": _edit_skill_body()}]
+
+    # W4-R2 sticky knowledge bodies: a loaded sticky skill's rules must
+    # survive the lean replay exactly like the edit body — same trailing
+    # seam, same Invariant B argument (append-only, prefix byte-identical),
+    # same idempotence law (a trail already carrying the body gets no
+    # second copy). Only STICKY non-gating skills re-inject: printer-memory
+    # is one-shot (its block proposal lands in the history), and the edit
+    # body above stays tied to atomic armament (tools + rulebook move
+    # together), never to this list. Order: registry declaration order, so
+    # the rendered prompt stays deterministic for the KV cache.
+    knowledge_messages: list[dict] = []
+    for _name in loaded_skills or []:
+        _entry = _SKILL_REGISTRY.get(str(_name))
+        if not _entry or not _entry["sticky"] or _entry["gates_write"]:
+            continue
+        if _skill_body_in_trail(messages, str(_name)):
+            continue
+        knowledge_messages.append(
+            {"role": "system", "content": _entry["body"]()})
+
+    # W6 conversation work-ledger: the client's action record (staged /
+    # kept / undone / failed per section) rides the same trailing seam —
+    # appended last-but-one so the turn-specific W3 observation stays
+    # closest to the user message. Trailing placement keeps the replayed
+    # prefix byte-identical for the KV cache (Invariant B rationale
+    # applies verbatim). Verbatim re-delivery only: the backend never
+    # interprets the record (review law). Fail-safe like the W3
+    # observation — the chat must not die on the ledger — but never
+    # silent (review B-L4 discipline).
+    ledger_messages: list[dict] = []
+    if not (minimal or no_system):
+        try:
+            ledger_text = _render_work_ledger(work_ledger)
+        except Exception:
+            logger.warning("work-ledger render failed", exc_info=True)
+            ledger_text = None
+        if ledger_text:
+            ledger_messages = [{"role": "system", "content": ledger_text}]
+
+    # W3 runtime-error traceback (deterministic observation): rides LAST at
+    # the same trailing seam. Guarded by the same ablation gates as the
+    # references/body — minimal/no_system are prompt instruments and are
+    # never run with harness observations attached.
+    trace_messages: list[dict] = []
+    if not (minimal or no_system):
+        try:
+            observation = _runtime_error_observation(messages, context_files)
+        except Exception:
+            # fail-safe (chat must not die on an observation) but never
+            # silent — review B-L4, 2026-11-14
+            logger.warning("runtime-error observation failed",
+                           exc_info=True)
+            observation = None
+        if observation:
+            trace_messages = [{"role": "system", "content": observation}]
+
     if prepared:
         return [
             *([] if no_system else [{"role": "system", "content": system_text}]),
             *prepared,
             *([] if (minimal or no_system) else [{"role": "system", "content": task_anchor}]),
             *([] if (minimal or no_system) else reference_messages),
+            *([] if (minimal or no_system) else skill_body_messages),
+            *([] if (minimal or no_system) else knowledge_messages),
+            *([] if (minimal or no_system) else ledger_messages),
+            *([] if (minimal or no_system) else trace_messages),
         ]
     return ([] if no_system else [{"role": "system", "content": system_text}]) + prepared
 
@@ -1173,7 +1418,41 @@ _MCP_TOOL_SNIPPETS: dict[str, str] = {
         "the user's saved files use validate_config_project"
     ),
     "validate_macro": (
-        "Validate a gcode_macro against Klipper's Jinja rules (macro_text='...' required)"
+        "Validate a gcode_macro against Klipper's Jinja rules (macro_text='...' required), "
+        "including a render simulation of the default invocation; pass "
+        "runtime_error='...' with a pasted Klipper error to trace its command back to the "
+        "macro body line it rendered from"
+    ),
+    "simulate_macro": (
+        "SIMULATE a macro on invocations YOU declare and read the exact "
+        "commands Klipper would run (macro='NAME' from the current "
+        "project — staged edits included — or macro_text='[gcode_macro "
+        "...]' for a draft; scenarios=[{name?, params?, printer_state?, "
+        "variables?}], e.g. scenarios=[{'name':'bare','params':{}},"
+        "{'name':'with S','params':{'S':'215'}}]). variables sets a "
+        "DECLARED variable_* by its stripped name (variable_fan_on -> "
+        "{'fan_on': 'True'}); an undeclared name is refused with a "
+        "warning and not injected. For ONE invocation skip the "
+        "scenarios wrapper: params / variables / printer_state at the "
+        "TOP LEVEL are that single invocation. runs=N = N consecutive calls from one "
+        "starting state with the macro's own SET_GCODE_VARIABLE writes "
+        "threaded between them, plus a 'commands differ: YES/NO' verdict "
+        "(use runs=2 for toggle/remember questions); each call also "
+        "prints expected effects (fan %, LED colours, temperature "
+        "targets) as COMMANDED, not observed. A single-path call also prints an 'Execution "
+        "trace': moves executed over the geometry the project declares "
+        "and heater/fan/LED TARGET changes (before \u2192 after), ending "
+        "in a 'Final state' line \u2014 read it before staging a macro "
+        "meant to reach a NAMED spot (front centre is not the centre). "
+        "Hardware names (FAN=, "
+        "LED=, PIN=, SERVO=, HEATER=) are resolved against the project's "
+        "own sections — FAN= only takes [fan_generic] names, so FAN=fan "
+        "is a run-time refusal even when [fan] exists — and an unknown "
+        "name comes back as a warning with Klipper's own near-miss hint. USE IT FOR ANY "
+        "runtime-behavior question — 'will it fail when called like X?', "
+        "'what does it actually send?', 'what happens on a bare call?' — "
+        "before answering from source text; simulation warnings exist "
+        "ONLY in its result, no other surface shows them"
     ),
     "validate_config_project": (
         "Validate the user's CURRENT config project on this host (all files, "
@@ -1277,6 +1556,11 @@ _EDIT_TOOL_SNIPPETS: dict[str, str] = {
 # ChatRequest.editSkill override for A/B traces.
 EDIT_SKILL_NAME = "config-editing"
 MEMORY_SKILL_NAME = "printer-memory"
+# W4-R2 (Cliff 2026-11-16): Klipper macro AUTHORING knowledge is its own
+# skill — the edit law stays tool mechanics, injected only when editing is
+# earned; macro rules load only when macro text is in play. Knowledge-class
+# like printer-memory: never gates write tools.
+MACRO_SKILL_NAME = "macro-authoring"
 MEMORY_SKILL_DESCRIPTION = (
     "Fills in the user's printer memory with hardware facts (boards, "
     "kinematics, build volume, extruder type, probe). Use when the printer "
@@ -1292,6 +1576,13 @@ EDIT_SKILL_DESCRIPTION = (
     "questions about settings, validating pasted config text, drafting or "
     "showing config/macro text to read over or discuss without applying it, "
     "or any request that says not to change the files."
+)
+MACRO_SKILL_DESCRIPTION = (
+    "Writes, fixes, and explains [gcode_macro] gcode: Jinja rendering rules, "
+    "params defaults, the validate-and-simulate workflow, terse examples, and "
+    "common pitfalls. Use when drafting or fixing macro text, or when asked "
+    "what a macro will actually do or send to the printer. Do NOT use for "
+    "plain config-parameter changes or questions about non-macro sections."
 )
 
 LIST_HARDWARE_SPEC = {
@@ -1341,7 +1632,7 @@ LOAD_SKILL_SPEC = {
         "properties": {
             "name": {
                 "type": "string",
-                "enum": [EDIT_SKILL_NAME, MEMORY_SKILL_NAME],
+                "enum": [EDIT_SKILL_NAME, MEMORY_SKILL_NAME, MACRO_SKILL_NAME],
                 "description": "Skill name from <available_skills>",
             },
         },
@@ -1385,6 +1676,15 @@ def _edit_skill_body() -> str:
         "available for this conversation.\n\n"
         f"{EDIT_PROTOCOL_PROMPT}\n\n"
         "Unlocked tools:\n" + tool_lines
+        # W6.5 enrichment (approved 2026-11-13, Claude Code post-compaction
+        # re-read bias): the work-ledger tells the model WHAT it touched;
+        # this rule is what to do about it — re-ground, never edit from
+        # remembered text (the human edits by hand between turns too).
+        + "\n\nCross-turn grounding: a Conversation work-ledger may appear "
+        "later in this prompt naming the sections you read or edited in "
+        "earlier turns ('read' = touched). Their content may have changed "
+        "since. Re-read a section with read_user_config immediately before "
+        "editing it in a later turn — never edit from remembered text."
     )
 
 
@@ -1392,13 +1692,19 @@ _SKILL_INDEX_BLOCK = (
     "<available_skills>\n"
     f"- {EDIT_SKILL_NAME}: {EDIT_SKILL_DESCRIPTION}\n"
     f"- {MEMORY_SKILL_NAME}: {MEMORY_SKILL_DESCRIPTION}\n"
+    f"- {MACRO_SKILL_NAME}: {MACRO_SKILL_DESCRIPTION}\n"
     "</available_skills>\n"
     "If the user's request is about editing their config, call load_skill "
     "with the skill name FIRST — the edit tools are not available until "
-    "you do. If the printer memory has blank fields you need (or you are "
-    "about to guess a hardware fact), load_skill(name='printer-memory') "
-    "and follow its playbook instead of guessing. Questions about Klipper "
-    "that need neither never need a skill."
+    "you do. If the request is about WRITING, fixing, or explaining a "
+    "macro's gcode (Jinja, params, what it will send or do), also call "
+    "load_skill(name='macro-authoring') — the macro rules, examples, and "
+    "pitfalls live there; load config-editing on top only when the macro "
+    "must actually be saved. If the printer memory has blank fields you "
+    "need (or you are about to guess a hardware fact), "
+    "load_skill(name='printer-memory') and follow its playbook instead of "
+    "guessing. Questions about Klipper that need none of these never need "
+    "a skill."
 )
 
 
@@ -1467,19 +1773,244 @@ def _memory_skill_body() -> str:
     )
 
 
-def _load_skill_active(messages: list[dict]) -> bool:
-    """True once the model has actually invoked load_skill in this
-    conversation. Mechanical evidence only (tool-result markers / echoed
-    native tool_calls) — never keyword heuristics."""
+# Shipped example bodies — constants so tests/test_macro_skill.py re-derives
+# them through the real render engine every CI run. Blind-review law
+# (2026-11-17): examples are what models copy; an example that does not
+# render is a defect, not typography.
+MACRO_EX_BLINK = (
+    "[gcode_macro BLINK]\n"
+    "variable_state: 0\n"
+    "gcode:\n"
+    "    {% set dur = params.DUR|default(0.5)|float %}\n"
+    "    {% set on = (state + 1) % 2 %}\n"
+    "    SET_GCODE_VARIABLE MACRO=BLINK VARIABLE=state VALUE={on}\n"
+    "    SET_PIN PIN=casing_light VALUE={on}\n"
+    "    G4 P{(dur * 1000)|int}\n"
+)
+
+MACRO_EX_PARK = (
+    "[gcode_macro PARK]\n"
+    "gcode:\n"
+    "    {% set z = params.Z|default(0)|float %}\n"
+    "    SAVE_GCODE_STATE NAME=park_state\n"
+    "    G90\n"
+    "    G1 Z{ [z, printer.toolhead.axis_maximum.z - 1]|min } F600\n"
+    "    RESTORE_GCODE_STATE NAME=park_state\n"
+)
+
+
+def _macro_skill_body() -> str:
+    """The skill body returned by load_skill(name='macro-authoring'):
+    Klipper macro authoring law. No tools unlock — validate_macro and
+    simulate_macro are already advertised; what the body adds is the
+    WORKFLOW (simulate before you claim) and the rules the W2 engine
+    actually enforces (no unenforced prose drift — W4 law).
+
+    v2 (2026-11-17, double-blind review — both reviewers converged, each
+    claim re-verified against the engine/klipper source): filter order is
+    default-BEFORE-coerce (numeric filters abort on Undefined; Klipper's
+    own Command_Templates.md:127), BLINK gained the SET_GCODE_VARIABLE
+    write-back and both examples are engine-pinned, the M104/M140 wait
+    claim was inverted (heaters.py 'wait and temp': M104 never waits,
+    M109/M190 skip the wait at target 0), the shadow phrasing became the
+    registration-conflict load error (gcode.py:144), doc pointers use
+    filename= per the real schema, and the simulator's non-recursion is
+    disclosed. The verdict-first ANSWER law was REMOVED per Cliff
+    (2026-11-17): four prose levers demonstrably failed on MACRO-17; the
+    mechanical trace guard (test_sim_verdict_guard.py) carries it.
+
+    Grounding sources: the validator/sim finding codes, reference/klipper
+    klippy sources, and reference/reference_docs/klipper_docs/.
+    """
+    return (
+        f"Skill '{MACRO_SKILL_NAME}' loaded.\n\n"
+        "You are drafting or fixing [gcode_macro] gcode. This skill is "
+        "macro KNOWLEDGE; to save anything to the user's files, "
+        "load_skill(name='config-editing') first — staging belongs to "
+        "that skill.\n\n"
+        "Workflow:\n"
+        "1. Read before reasoning: read_user_config requires filename= — "
+        "when the user names only a macro, resolve the file first with "
+        "list_user_configs or search_user_configs. Read the macro AND "
+        "every macro it invokes (a bare command-name line in the body) — "
+        "never reason about text you have not read.\n"
+        "2. validate_macro takes macro_text= — the FULL '[gcode_macro "
+        "...]' section text, not a name — after every draft or patch. "
+        "When the user pastes a Klipper error, pass runtime_error='...' "
+        "(the error line verbatim): the tool maps the failing command "
+        "back to the body line.\n"
+        "3. simulate_macro BEFORE answering or staging: macro='NAME' "
+        "resolves a macro already in the config; macro_text= renders a "
+        "draft. Cover the BARE call (no params) AND every parameter "
+        "branch — scenarios=[{params?, printer_state?, variables?}] is "
+        "capped at 8 per call, so split across calls and say which "
+        "branches were not simulated. Simulator scope: the render covers "
+        "THIS macro's template only — macros it invokes are NOT "
+        "expanded; read and simulate each callee separately and say "
+        "which macro each rendered line came from. Answer runtime "
+        "questions FROM the rendered lines and quote them; never narrate "
+        "an expansion the simulator did not show.\n"
+        "4. Staging: to stage a fix, load_skill(name='config-editing') "
+        "first — the staging tools do not exist until it is loaded; "
+        "every staged change passes the user's review before anything "
+        "lands. An explicit refusal binds: review-only, show-only, or "
+        "do-not-change-my-files means return the text in a ```cfg block "
+        "and stage nothing.\n\n"
+        "Lexical rules (before any Jinja semantics):\n"
+        "- Klipper templates use SINGLE braces: SET_PIN VALUE={on}. "
+        "{{ expr }} is a syntax error, not a silent no-op.\n"
+        "- '#' comments are stripped BEFORE templating: Jinja never sees "
+        "commented text, and a '#'-commented {% if %} is inert.\n\n"
+        "Rendering law (how Klipper evaluates the body):\n"
+        "- The whole macro renders BEFORE any of its commands run. State "
+        "changed by an early command is INVISIBLE to later Jinja blocks "
+        "in the same macro.\n"
+        "- params keys arrive UPPERCASE and as STRINGS; rawparams is the "
+        "raw argument tail.\n"
+        "- Default BEFORE you coerce: params.SPEED|default(60)|float, "
+        "params.N|default(0)|int, params.S|default('X'). Filters run "
+        "left-to-right, so |float on an ABSENT param aborts the whole "
+        "render before |default can fire.\n"
+        "- A param sent EMPTY (MACRO S= with nothing after it) is "
+        "DEFINED, so plain |default passes the '' through and the "
+        "command fails to parse at runtime ('Unable to parse') — use the "
+        "boolean form: params.X|default('10', true). SET_LED color args "
+        "RED/GREEN/BLUE are floats 0..1.\n"
+        "- A required param is legitimate design: params.S|float with no "
+        "default is the macro SAYING S is mandatory, and the bare call "
+        "failing is the correct answer — report it as designed; add a "
+        "default only when the user wants one.\n"
+        "- Prefer simple values (SAVE_VARIABLE, params defaults) over "
+        "deep printer.a.b.c lookups — a wrong dotted path resolves to "
+        "nothing at runtime. printer.* paths must come from "
+        "Status_Reference.md, and a scenario must DECLARE the path "
+        "(printer_state={'toolhead.axis_maximum.z': 250}) for the render "
+        "to follow it.\n"
+        "- {% set %} lives ONE render only. variable_x is exposed to the "
+        "template as the bare name x; only SET_GCODE_VARIABLE "
+        "MACRO=... VARIABLE=x VALUE=... persists across calls, and the "
+        "write lands on the NEXT call (this body already rendered) — "
+        "prove toggles and memory with runs=2.\n"
+        "- A {% set %} inside a {% for %} block does NOT survive the "
+        "loop (if/else blocks are fine); compute accumulated values "
+        "outside the loop.\n\n"
+        "G-code discipline (what the validators enforce):\n"
+        "- M109/M190 are the built-in Set-and-Wait commands: they block "
+        "inside macros until the target is reached — never emulate them "
+        "with M104 + TEMPERATURE_WAIT for the extruder/bed. Exception: "
+        "BOTH skip the wait when the target is 0, so M109 S0 returns "
+        "immediately and cools nothing — to wait for a cooldown use "
+        "TEMPERATURE_WAIT SENSOR=extruder MAXIMUM=60, which is also the "
+        "only wait for heaters with no M109/M190 (chamber, "
+        "heater_generic). M104/M140 are Set-only and NEVER wait. "
+        "simulate_macro's 'Expected effect' shows Set vs Set and Wait "
+        "per command.\n"
+        "- Naming a macro after a stock command ([gcode_macro M109]) "
+        "without rename_existing is a config LOAD failure — 'gcode "
+        "command M109 already registered' — not a silent override. To "
+        "wrap the original: [gcode_macro M109] with rename_existing: "
+        "M99109 (uncomment a '#rename_existing:' line if the body "
+        "carries one) and call the renamed command from the body.\n"
+        "- 'params_<name>:' lines inside [gcode_macro] are a config LOAD "
+        "error in real Klipper. KWC's simulator honors them as sim-only "
+        "defaults, so a draft can LOOK fine resting on one — never rely "
+        "on it; defaults live in |default() in the body.\n"
+        "- Movement macros: SAVE_GCODE_STATE, explicit G90/G91, an "
+        "explicit F on the first G0/G1, then RESTORE_GCODE_STATE. Moves "
+        "need homed axes: a standalone movement macro either homes or "
+        "checks printer.toolhead.homed_axes and states its "
+        "precondition. After drafting a move to a NAMED bed spot, "
+        "single-path simulate and read the trace's 'Final state' line "
+        "BEFORE staging: its annotation (centre / \u2248front edge / % "
+        "of span) must match the spot the user named — a clean render "
+        "proves syntax, the trace is what proves placement.\n"
+        "- G2/G3 arcs need a [gcode_arcs] section added in the SAME "
+        "change — validate macro + section together with "
+        "validate_klipper_config (draft text) or validate_config_project "
+        "(saved files); validate_macro only sees the macro text.\n"
+        "- delayed_gcode is its OWN section ([delayed_gcode NAME] with "
+        "initial_duration), not a [gcode_macro] feature: it receives no "
+        "params (state comes from variables) and re-arms via "
+        "UPDATE_DELAYED_GCODE ID=NAME DURATION=...\n"
+        "- Commands the registry does not know come back UNSTAGED from "
+        "the staging step with a suggestion: fix the command or name the "
+        "plugin that provides it.\n\n"
+        "Examples — both verified through the render engine; shapes that "
+        "render on every call form:\n"
+        "```\n"
+        + MACRO_EX_BLINK + "\n"
+        + MACRO_EX_PARK +
+        "```\n"
+        "BLINK toggles ONLY because of the SET_GCODE_VARIABLE line — "
+        "drop it and state never changes; verify with runs=2 (VALUE=1, "
+        "then VALUE=0). PARK reads axis_maximum as the sanctioned "
+        "exception to prefer-simple: declare "
+        "printer_state={'toolhead.axis_maximum.z': 250} in the scenario "
+        "to verify it, and remember PARK assumes homed axes.\n\n"
+        "Deep reference (already-available tools — name the doc, do not "
+        "guess its content):\n"
+        "- read_klipper_doc(filename='Command_Templates.md') — full "
+        "Jinja syntax, params/rawparams, action_respond_info/"
+        "action_raise_error. offset/limit are CHARACTERS — paginate a "
+        "long doc.\n"
+        "- get_config_reference_section(section_name='gcode_macro') — "
+        "the [gcode_macro] config prose (delayed_gcode has its own "
+        "section name); list_config_reference_sections lists every "
+        "section name.\n"
+        "- read_klipper_doc(filename='Status_Reference.md') — the ONLY "
+        "source of valid printer.* status paths.\n"
+        "- search_klipper_docs(query='...') to find which doc covers a "
+        "topic; list_klipper_docs to see what docs exist."
+    )
+
+# W4-R2 registry: the ONE source for skill facts. gates_write — only
+# config-editing earns the write surface (a knowledge load must never arm
+# edits, the r4b trap). sticky — a sticky body re-rides every follow-up
+# request (lean replay strips tool results); printer-memory is NOT sticky:
+# its playbook is one-shot and the block proposal it produces already
+# lands in the history.
+_SKILL_REGISTRY: dict[str, dict] = {
+    EDIT_SKILL_NAME: {
+        "description": EDIT_SKILL_DESCRIPTION,
+        "body": _edit_skill_body,
+        "gates_write": True,
+        "sticky": True,
+    },
+    MEMORY_SKILL_NAME: {
+        "description": MEMORY_SKILL_DESCRIPTION,
+        "body": _memory_skill_body,
+        "gates_write": False,
+        "sticky": False,
+    },
+    MACRO_SKILL_NAME: {
+        "description": MACRO_SKILL_DESCRIPTION,
+        "body": _macro_skill_body,
+        "gates_write": False,
+        "sticky": True,
+    },
+}
+
+
+def _unknown_skill_text(requested: str) -> str:
+    return (f"Unknown skill '{requested}'. Available skills: "
+            + ", ".join(f"'{name}'" for name in _SKILL_REGISTRY) + ".")
+
+
+def _skill_load_in_trail(messages: list[dict], skill_name: str) -> bool:
+    """True once load_skill(SKILL) actually ran in this conversation.
+    Mechanical evidence only (tool-result markers / echoed native
+    tool_calls) — never keyword heuristics. An empty skill name is the
+    legacy config-editing convention and counts ONLY for config-editing.
+    """
     for msg in messages:
         if str(msg.get("role", "")) not in ("user", "assistant"):
             continue
         content = str(msg.get("content", ""))
-        # Name-anchored (r4b trap): a printer-memory skill load in the
-        # history must NOT count as the edit skill being active. The
-        # tool-result marker carries `name=config-editing` verbatim.
+        # Name-anchored (r4b trap): a printer-memory load in the history
+        # must NOT count as the edit skill being active. The tool-result
+        # marker carries `name=<skill>` verbatim.
         if re.search(r"\[Tool result: load_skill\(name=?['\"]?"
-                     + re.escape(EDIT_SKILL_NAME), content):
+                     + re.escape(skill_name), content):
             return True
         for call in msg.get("tool_calls") or []:
             fn = call.get("function") if isinstance(call, dict) else None
@@ -1492,9 +2023,170 @@ def _load_skill_active(messages: list[dict]) -> bool:
                 except (json.JSONDecodeError, ValueError):
                     args = {}
             name = str((args or {}).get("name", ""))
-            if not name or name == EDIT_SKILL_NAME:
+            if name == skill_name or (not name
+                                      and skill_name == EDIT_SKILL_NAME):
                 return True
     return False
+
+
+def _load_skill_active(messages: list[dict]) -> bool:
+    """True once load_skill has actually run for the EDIT skill in this
+    conversation (delegates to the generalized per-name scan).
+
+    Follow-up turns from the frontend now carry the client-derived
+    loadedSkills flag instead (W0 sticky activation: the lean replay
+    strips native tool_calls, so this scan sees nothing on replayed
+    trails). This scan STAYS — the text protocol writes its tool-result
+    marker into content, and harness arms still rely on it."""
+    return _skill_load_in_trail(messages, EDIT_SKILL_NAME)
+
+
+# A skill body present in text: its own first line (native echoes and
+# re-injected bodies) or the text-protocol tool-result marker (which wraps
+# the body). Compiled once per skill name.
+_SKILL_TRAIL_RES: dict[str, re.Pattern] = {}
+
+
+def _skill_body_in_trail(messages: list[dict], skill_name: str) -> bool:
+    """True when the trail already carries SKILL's body. Keeps the W0/W4-R2
+    re-injection idempotent: a sticky body rides the prompt exactly once per
+    conversation, from whichever source arrived first."""
+    pattern = _SKILL_TRAIL_RES.get(skill_name)
+    if pattern is None:
+        pattern = re.compile(
+            r"Skill '" + re.escape(skill_name) + r"' loaded"
+            r"|\[Tool result: load_skill\(name=?['\"]?" + re.escape(skill_name)
+        )
+        _SKILL_TRAIL_RES[skill_name] = pattern
+    return any(pattern.search(str(m.get("content", ""))) for m in messages)
+
+
+# W6 work-ledger: the client's action-record window. Mirrors the client
+# law (utils/chatWorkLedger WORK_LEDGER_MAX_TURNS); rows outside it are
+# dropped server-side as a defensive re-cap, never a guess.
+WORK_LEDGER_MAX_TURNS = 10
+# Defensive flood cap: ~10 turns x a bounded number of sections. The
+# client caps turns and row noise; this only stops a hand-built request
+# turning the ledger into a payload channel.
+WORK_LEDGER_MAX_ROWS = 60
+
+_LEDGER_VERDICTS = ("pending", "kept", "undone", "failed", "touched",
+                    # PR #43 review F6/F17: staging whose decision record
+                    # did not survive a reload. It must reach the model as
+                    # an honest unknown row — DROPPING the row would let
+                    # the header teach 'absence = never staged', which is
+                    # exactly the false claim F6 exists to stop.
+                    "unknown")
+
+# PR #43 review F17: per-field byte bounds (the client bounds detail at
+# 120; the backend re-caps defensively — this channel carries names, and
+# a hand-built request must not turn a name into a payload channel) and
+# whitespace collapsing for ALL THREE text fields: file was only
+# strip()'d, so an embedded newline injected extra lines into the ledger
+# message verbatim.
+_LEDGER_FIELD_MAX = 200
+_LEDGER_DETAIL_MAX = 120
+
+
+def _ledger_field(raw: object, cap: int) -> str:
+    """One-line, length-bounded rendering of a ledger text field."""
+    text = " ".join(str(raw or "").split())
+    if len(text) > cap:
+        text = text[:cap - 1] + "…"
+    return text
+
+
+def _render_work_ledger(rows: list | None) -> str | None:
+    """Render client-derived work-ledger rows as ONE system message body.
+
+    Verbatim re-delivery: names + verdicts only, no interpretation — the
+    backend never concludes anything from the record (review law; the
+    human's keep/undo decisions stay client-side). Deterministic output
+    (oldest turn first, newest last; sections ordered by file then name)
+    so the rendered text stays stable for the KV cache. Malformed rows
+    drop silently — an absent line claims nothing, a garbage line would.
+    """
+    valid: list[tuple[int, str, str, str, str]] = []
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        offset = row.get("turnOffset")
+        if isinstance(offset, bool) or not isinstance(offset, int):
+            continue
+        if offset < 1 or offset > WORK_LEDGER_MAX_TURNS:
+            continue
+        file = _ledger_field(row.get("file"), _LEDGER_FIELD_MAX)
+        section = _ledger_field(row.get("section"), _LEDGER_FIELD_MAX)
+        verdict = str(row.get("verdict") or "").strip()
+        if not file or verdict not in _LEDGER_VERDICTS:
+            continue
+        detail = _ledger_field(row.get("detail"), _LEDGER_DETAIL_MAX)
+        valid.append((offset, file, section, verdict, detail))
+    if not valid:
+        return None
+    # Oldest turn first, newest last; deterministic within a turn.
+    valid.sort(key=lambda r: (-r[0], r[1], r[2]))
+    # PR #43 B-04: the flood cap must drop the OLDEST rows — turnOffset 1
+    # is the NEWEST turn (utils/chatWorkLedger), so with the list sorted
+    # oldest-first the tail is what the model needs. The old
+    # 'del valid[MAX:]' kept the oldest 60 and threw away the recent
+    # staging the ledger is FOR, then told the model the missing recent
+    # sections 'were never staged'. Keep the newest MAX rows instead.
+    elided = 0
+    if len(valid) > WORK_LEDGER_MAX_ROWS:
+        elided = len(valid) - WORK_LEDGER_MAX_ROWS
+        del valid[:elided]
+
+    def _outcome(verdict: str, detail: str) -> str:
+        if verdict == "pending":
+            return "staged (awaiting review)"
+        if verdict == "kept":
+            return "kept"
+        if verdict == "undone":
+            return "undone by user"
+        if verdict == "touched":
+            return "read (content may have changed since)"
+        if verdict == "unknown":
+            return "staged (decision not recorded)"
+        return f"FAILED: {detail}" if detail else "FAILED"
+
+    header = (
+        "Conversation work-ledger (recorded by the client; the outcomes "
+        "of YOUR staged edits and the user's review decisions; oldest "
+        "turn first, newest last). A section that no longer appears has "
+        "left the recorded window — its absence claims nothing and is "
+        "NOT evidence of past staging; config state itself is "
+        "always re-derivable via the read tools. Outcomes: 'kept' = user "
+        "accepted at review; 'undone by user' = applied successfully, "
+        "then removed by the user at review — the edit itself did NOT "
+        "fail; 'FAILED' = never applied (the failure code follows); "
+        "'staged' = awaiting review; 'staged (decision not recorded)' = "
+        "the review outcome is NOT in the record — never infer kept, "
+        "undone, or still-pending from it; 'read' = section re-read in a "
+        "later turn."
+    )
+    lines: list[str] = []
+    current_offset = None
+    for offset, file, section, verdict, detail in valid:
+        if offset != current_offset:
+            when = "previous turn" if offset == 1 else f"{offset} turns ago"
+            lines.append(f"- {when}:")
+            current_offset = offset
+        # Created files are file-level write rows; touched rows mark
+        # what earlier turns grounded on.
+        if verdict == "touched":
+            label = f"[{section}] in {file} (read)" if section else f"{file} (read)"
+        else:
+            label = f"[{section}]" if section else f"{file} (new file)"
+            suffix = f" in {file}" if section else ""
+            label += suffix
+        lines.append(f"    {label} -> {_outcome(verdict, detail)}")
+    if elided:
+        # F17 header truthfulness: when the flood cap dropped rows, say
+        # so — never let the model read the trimmed window as complete.
+        lines.append(f"- ({elided} older entries elided: window full; "
+                     "their absence claims nothing)")
+    return header + "\n" + "\n".join(lines)
 
 
 def _build_mcp_tool_context(edit_capable: bool = False, *,
@@ -2830,6 +3522,105 @@ def _build_executed_tool_call(tool_call: dict, result_text: str) -> dict:
     }
 
 
+# ── Pre-edit verdict guard (2026-11-17) ───────────────────────────────
+# MACRO-17 measured the same miss through four prompt levers: the model
+# simulates the as-written text, receives the tool's ERROR findings,
+# stages a fix, re-simulates CLEAN — and the final answer reports ONLY
+# the post-fix world. The as-written verdict exists in the request's own
+# tool trace but never reaches the answer. The guard is trace-mechanical
+# (intent law clean — it parses TOOL outputs and the write trace, never
+# the model's prose for claims): pre-write simulate_macro with ERROR
+# findings + a later staged write to the SAME [gcode_macro ...] + a
+# final answer quoting NONE of the failing values the tool reported.
+_SIM_HEADER_MACRO_RE = re.compile(r"^# simulate_macro gcode_macro (\S+)", re.M)
+_SIM_ERROR_LINE_RE = re.compile(r"^\s*-\s*ERROR:\s*(.+?)\s*$", re.M)
+_FAILING_VALUE_TOKEN_RE = re.compile(r"[A-Z][A-Z_0-9]*=([0-9]+(?:\.[0-9]+)?)")
+# A failing value only counts as REPORTED when the same sentence carries a
+# refusal verb. m17guard r7/r9 proved bare token presence is too weak:
+# "now uses RED=1.0 ... instead of `1.8`" is a changelog mention — the
+# as-written failure is still never stated.
+_VERDICT_REFUSAL_RE = re.compile(
+    r"(?i)outside|out of range|reject|refus|fail|error|unable|abort|"
+    r"exceed|invalid|does not run|won'?t run|will not run")
+
+
+def _verdict_reported(final_content: str, tokens: set) -> bool:
+    """True when some failing value appears inside a refusal-worded sentence."""
+    normalized = " ".join((final_content or "").split())
+    spans = [(m.start(), m.end())
+             for m in re.finditer(r"[^.!?\n]+[.!?]?", normalized)]
+    for token in tokens:
+        for m in re.finditer(re.escape(token), normalized):
+            span = next(((a, b) for a, b in spans if a <= m.start() < b),
+                        (m.start(), m.end()))
+            if _VERDICT_REFUSAL_RE.search(normalized[span[0]:span[1]]):
+                return True
+    return False
+
+
+def _pre_write_verdict_miss(
+    executed_tool_calls: list, final_content: str
+) -> str | None:
+    """Nudge text when the answer silently replaces the as-written verdict.
+
+    Pure over the request's executed-tool-call trace. Returns None (fail
+    safe — no re-prompt) unless: (1) a simulate_macro BEFORE the first
+    write emitted ERROR findings; (2) a write at/after that point touches
+    the same [gcode_macro <name>]; (3) the answer never reports the
+    refusal — no failing value appears in any refusal-worded sentence
+    (_verdict_reported).
+    """
+    first_write_idx = next(
+        (i for i, c in enumerate(executed_tool_calls or [])
+         if c.get("name") in EDIT_TOOL_NAMES),
+        None,
+    )
+    if first_write_idx is None or not (final_content or "").strip():
+        return None
+    normalized = " ".join((final_content or "").split())
+    fails: list[tuple[str, str, set]] = []
+    for call in executed_tool_calls[:first_write_idx]:
+        if call.get("name") != "simulate_macro":
+            continue
+        output = str(call.get("output") or "")
+        header = _SIM_HEADER_MACRO_RE.search(output)
+        errors = _SIM_ERROR_LINE_RE.findall(output)
+        if not header or not errors:
+            continue
+        tokens = set()
+        for line in errors:
+            tokens.update(_FAILING_VALUE_TOKEN_RE.findall(line))
+        if tokens:
+            fails.append((header.group(1), errors[0], tokens))
+    if not fails:
+        return None
+    touched = None
+    for call in executed_tool_calls[first_write_idx:]:
+        if call.get("name") not in EDIT_TOOL_NAMES:
+            continue
+        args_text = str(call.get("arguments") or "")
+        for macro, first_error, tokens in fails:
+            if f"gcode_macro {macro}" in args_text:
+                touched = (macro, first_error, tokens)
+                break
+        if touched:
+            break
+    if touched is None:
+        return None
+    _macro, first_error, tokens = touched
+    if _verdict_reported(normalized, tokens):
+        return None
+    return (
+        "Your report describes the FIXED macro, but the question was "
+        "whether the text as written works. Your own pre-edit "
+        f"simulation found: {first_error} "
+        "Do not call any more tools and do not change anything else. "
+        "Re-answer the original question in prose — the first sentence "
+        "must be the as-written verdict quoting that simulation finding, "
+        "before any summary of the fix."
+    )
+
+
 def _build_tool_result_message(tool_call: dict, result_text: str) -> str:
     """Build a user-role message containing the tool result for re-prompting."""
     name = tool_call.get("name", "unknown")
@@ -3299,6 +4090,10 @@ def _extract_usage_info(data: dict) -> dict | None:
     completion_tokens = usage.get("completion_tokens")
     if not isinstance(completion_tokens, int):
         return None
+    prompt_tokens = usage.get("prompt_tokens")
+    if not isinstance(prompt_tokens, int):
+        # Providers that omit it: W7 stays silent rather than guessing.
+        prompt_tokens = None
     details = usage.get("completion_tokens_details")
     reasoning_tokens = None
     if isinstance(details, dict):
@@ -3306,6 +4101,7 @@ def _extract_usage_info(data: dict) -> dict | None:
         if isinstance(rt, int):
             reasoning_tokens = rt
     return {
+        "promptTokens": prompt_tokens,
         "completionTokens": completion_tokens,
         "reasoningTokens": reasoning_tokens,
         "finishReason": choice.get("finish_reason") or "",
@@ -3411,6 +4207,132 @@ async def list_models(req: ModelsRequest):
     return {"models": ids}
 
 
+def _positive_int(value: object) -> int | None:
+    """True int > 0 or None — bools and floats are not context windows."""
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    return None
+
+
+def _window_from_preset_args(entry: dict) -> int | None:
+    """llama.cpp multi-model router: the preset args carry the server budget.
+
+    An UNLOADED router entry has no props/loaded_context_window, but its
+    ``status.args`` still hold the authoritative ``--ctx-size`` the server
+    will boot the model with — that is the real budget, unlike the model
+    card's advertised window (research 2026-11-12).
+    """
+    status = entry.get("status")
+    if not isinstance(status, dict):
+        return None
+    args = status.get("args")
+    if not isinstance(args, list):
+        return None
+    for i, arg in enumerate(args):
+        if not isinstance(arg, str):
+            continue
+        if arg == "--ctx-size" and i + 1 < len(args):
+            window = _positive_int(args[i + 1] if isinstance(args[i + 1], int) else _parse_int_str(args[i + 1]))
+            if window:
+                return window
+        elif arg.startswith("--ctx-size="):
+            window = _positive_int(_parse_int_str(arg.split("=", 1)[1]))
+            if window:
+                return window
+    return None
+
+
+def _parse_int_str(value: str) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _resolve_context_window(entry: dict, model: str) -> tuple[int | None, str | None]:
+    """Resolve one /v1/models entry's REAL context window for `model`.
+
+    Resolution order (llama.cpp n_ctx first — it is the budget that actually
+    truncates; cloud cards only when there is no local truth to disagree
+    with): ``props.n_ctx`` → ``loaded_context_window`` → preset ``--ctx-size``
+    args → ``max_input_tokens``. Model match is exact on ``id`` or via the
+    router's ``aliases``. Returns (None, None) rather than a guess.
+    """
+    if not isinstance(entry, dict):
+        return (None, None)
+    entry_id = entry.get("id")
+    aliases = entry.get("aliases")
+    matched = entry_id == model or (
+        isinstance(aliases, list) and model in aliases
+    )
+    if not matched:
+        return (None, None)
+    props = entry.get("props")
+    if isinstance(props, dict):
+        window = _positive_int(props.get("n_ctx"))
+        if window:
+            return (window, "props.n_ctx")
+    window = _positive_int(entry.get("loaded_context_window"))
+    if window:
+        return (window, "loaded_context_window")
+    window = _window_from_preset_args(entry)
+    if window:
+        return (window, "preset_args")
+    window = _positive_int(entry.get("max_input_tokens"))
+    if window:
+        return (window, "max_input_tokens")
+    return (None, None)
+
+
+@router.post("/ai/context-window")
+async def context_window(req: ContextWindowRequest):
+    """W7: the REAL context window for one model, server-side.
+
+    The browser can't reach the provider (CORS + key), and the router's
+    n_ctx — not the model card — is the budget that truncates. Best-effort:
+    unknown model, unreachable provider, or an entry without any window
+    field all answer ``contextWindow: null`` and the client stays silent.
+    """
+    provider = req.apiProvider.value if hasattr(req.apiProvider, "value") else req.apiProvider
+    models_url = _models_url_from_chat_url(req.apiUrl)
+    if not models_url:
+        return {"contextWindow": None, "source": None}
+
+    headers = _provider_auth_headers(provider, req.apiUrl, req.apiKey)
+    timeout = httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=30.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            res = await client.get(models_url, headers=headers)
+            res.raise_for_status()
+            data = res.json()
+    except httpx.TimeoutException:
+        logger.warning("Context window timeout | url=%s", models_url)
+        return {"contextWindow": None, "source": None, "error": "Timed out probing the context window"}
+    except httpx.HTTPError as e:
+        logger.warning("Context window probe failed | url=%s error=%s", models_url, e)
+        return {"contextWindow": None, "source": None, "error": f"Failed to probe the context window: {e}"}
+    except ValueError:
+        # PR #43 B-03: a 200 whose body is not JSON (a mis-pointed apiUrl
+        # hitting a proxy/landing page) must degrade like every other
+        # unknown — this route's own docstring promises graceful null,
+        # and res.json() raises json.JSONDecodeError, which is NOT an
+        # httpx.HTTPError, so it used to escape as an HTTP 500.
+        logger.warning("Context window probe got non-JSON body | url=%s", models_url)
+        return {"contextWindow": None, "source": None, "error": "Provider returned a non-JSON models listing"}
+
+    entries = data.get("data") if isinstance(data, dict) else None
+    if isinstance(entries, list):
+        for entry in entries:
+            window, source = _resolve_context_window(entry, req.model)
+            if window:
+                logger.info(
+                    "Context window | provider=%s model=%s window=%d source=%s",
+                    provider, req.model, window, source,
+                )
+                return {"contextWindow": window, "source": source}
+    return {"contextWindow": None, "source": None}
+
+
 # Mirror-seed caps (Pi 3B+ memory): per-file and total content limits so a
 # misconfigured scan root can never load gigabytes into an edit session.
 _MIRROR_MAX_FILE_BYTES = 512 * 1024
@@ -3477,8 +4399,25 @@ def _mirror_user_config_files() -> dict[str, dict]:
 
 
 
+async def _client_disconnected(request: Request) -> bool:
+    """True when the HTTP client has gone away mid-request.
+
+    The tool loop is expensive (a slow provider can spend minutes per
+    turn) and nothing else cancels it: without this check an abandoned
+    request keeps looping up to ``turn_cap`` (50 on the edit arm),
+    holding the single-slot local router for hours after the harness or
+    the browser gave up (observed: SIMTOOL-02 r5/r5b, 2026-11-14).
+    Detection must never be the thing that kills a request — any error
+    from the transport layer means 'keep going'.
+    """
+    try:
+        return bool(await request.is_disconnected())
+    except Exception:  # noqa: BLE001 — detection is advisory only
+        return False
+
+
 @router.post("/ai/chat")
-async def chat_proxy(req: ChatRequest):
+async def chat_proxy(req: ChatRequest, request: Request):
     """Proxy chat messages to the user's configured API provider."""
     # ── Tool-mediated config editing session ──
     # Request-scoped: seeded from the user-config mirror as a FLOOR with
@@ -3532,11 +4471,29 @@ async def chat_proxy(req: ChatRequest):
     # soon as the load_skill result lands. Product behavior since the
     # Phase-6 flag removal (2026-09-24); the harness can force the
     # unlocked arm per request via editSkill=True.
-    _skill_state = {'active': _load_skill_active(req.messages)}
+    _skill_state = {'active': (
+        EDIT_SKILL_NAME in req.loadedSkills or _load_skill_active(req.messages)
+    )}
+    # W0 sticky activation: loadedSkills is derived by the client from
+    # this conversation's stored tool trace — the lean replay strips native
+    # tool_calls, so the scan above alone re-closes the gate on every
+    # follow-up turn. The flag only changes the STARTING state of a request;
+    # the mid-loop load_skill handler and _skill_gate_closed stay untouched.
     # Harness A/B: --force-skill-active forces activation evidence WITHOUT
     # requiring a live load_skill call (grades tool-call traces directly).
     if edit_capable and getattr(req, 'editSkill', None) is True:
         _skill_state['active'] = True
+    # W4-R2: which knowledge skills are loaded for this conversation?
+    # Client flag OR mechanical trail evidence (text protocol writes its
+    # tool-result marker into content). The seam re-injects the STICKY
+    # ones only (registry law). Knowledge loads NEVER touch _skill_state —
+    # the write gate belongs to config-editing alone.
+    _loaded_knowledge_skills = [
+        name for name in _SKILL_REGISTRY
+        if not _SKILL_REGISTRY[name]["gates_write"]
+        and (name in req.loadedSkills
+             or _skill_load_in_trail(req.messages, name))
+    ]
 
     def _skill_gate_closed() -> bool:
         """True while the session's write tools stay locked behind
@@ -3548,6 +4505,18 @@ async def chat_proxy(req: ChatRequest):
                                  skill_active=_skill_state['active'],
                                  context_files=req.contextFiles,
                                  context_references=req.context_references,
+                                 # Invariant A (atomic armament): the body
+                                 # re-injects exactly when this request
+                                 # starts armed with the write surface —
+                                 # active skill state AND a session.
+                                 inject_edit_skill_body=(
+                                     edit_capable and _skill_state['active']),
+                                 # W4-R2: sticky knowledge bodies re-ride the
+                                 # trailing seam while their skill is loaded.
+                                 loaded_skills=_loaded_knowledge_skills,
+                                 # W6: re-deliver the client's action record
+                                 # verbatim (never interpreted here).
+                                 work_ledger=req.workLedger,
                                  native_mode=_resolve_native_tools(
                                      req.apiProvider, req.apiUrl, req.toolProtocol,
                                      edit_capable=edit_capable,
@@ -3572,13 +4541,17 @@ async def chat_proxy(req: ChatRequest):
     if not _is_local_provider(req.apiProvider, req.apiUrl) and not req.apiKey:
         return {"error": "AI settings not configured. Please configure your API key in settings."}
 
-    # Build headers based on provider (shared with the /ai/models proxy).
-    headers = _provider_auth_headers(
-        req.apiProvider.value if hasattr(req.apiProvider, "value") else req.apiProvider,
-        req.apiUrl,
-        req.apiKey,
-    )
-
+    # ── W8 pre-flight overflow refusal ──
+    # `messages` here is the FULLY-assembled prompt (system prompt, printer
+    # memory, transcript, references, skill body) — the only place the true
+    # size is known. Refuse an obviously-over request before the provider
+    # round-trip: llama.cpp may hang rather than error (no response timeout
+    # anywhere in this path by design), and even a clean 400 is a wasted
+    # slot on a single-parallelism local router. The window comes from the
+    # client's W7 probe; unknown = silent pass-through, provider decides.
+    # PR #43 review F9: the native tools payload occupies the SAME window
+    # (resolved first, handed to the pre-flight) — counting only the
+    # messages understated an edit-armed request by ~8k tokens.
     # Tool protocol: native function calling is the DEFAULT for every
     # provider (see _resolve_native_tools). toolProtocol="text" forces the
     # ```tool fallback; the loop still regex-extracts text calls when a
@@ -3586,6 +4559,25 @@ async def chat_proxy(req: ChatRequest):
     native_tools = _resolve_native_tools(req.apiProvider, req.apiUrl, req.toolProtocol,
                                          edit_capable=edit_capable,
                                          skill_active=_skill_state['active'])
+    overflow = preflight_overflow(messages, req.knownContextWindow,
+                                  tools=native_tools)
+    if overflow is not None:
+        logger.warning(
+            "Pre-flight overflow refusal | est=%d window=%d requestId=%s",
+            overflow["estimatedPromptTokens"], overflow["contextWindow"],
+            req.requestId or "none",
+        )
+        return overflow
+
+    # Build headers based on provider (shared with the /ai/models proxy).
+    headers = _provider_auth_headers(
+        req.apiProvider.value if hasattr(req.apiProvider, "value") else req.apiProvider,
+        req.apiUrl,
+        req.apiKey,
+    )
+
+    # native_tools was resolved before the pre-flight above (F9) and is
+    # reused by the request build and the tool loop.
 
     # ── Stop-event registration ──
     stop_event = None
@@ -3649,6 +4641,9 @@ async def chat_proxy(req: ChatRequest):
             # Re-prompts issued to correct a malformed ```tool fence (see the
             # malformed tool-call guard in the loop below).
             malformed_reprompts = 0
+            # Pre-edit verdict guard re-prompts (cap 1 — ack-guard style):
+            # simulate-then-silently-fix amnesia, see _pre_write_verdict_miss.
+            verdict_reprompts = 0
             # Mid-loop steers actually injected (2026-10-02) — the count
             # keys the provider log context and the response payload.
             steers_applied = 0
@@ -3728,6 +4723,16 @@ async def chat_proxy(req: ChatRequest):
                     break
                 if stop_event is not None and stop_event.is_set():
                     raise ChatStoppedError()
+                # Orphan guard: if the client is gone, further turns are
+                # pure waste — stop before another (possibly multi-minute)
+                # provider call. See _client_disconnected.
+                if await _client_disconnected(request):
+                    logger.warning(
+                        "Client disconnected mid tool-loop | stopping | "
+                        "turns=%d executed_calls=%d requestId=%s",
+                        tool_turns, len(executed_tool_calls),
+                        req.requestId or 'none')
+                    break
                 # Invisible runaway ceiling (2026-10-16): an absolute
                 # executed-call cap per request. NOT announced to the
                 # model and NOT part of the thrash directive — reaching
@@ -3964,6 +4969,58 @@ async def chat_proxy(req: ChatRequest):
                             nudge_usage["context"] = f"edit-nudge-{edit_nudges}"
                             usage_events.append(nudge_usage)
                         continue
+                    # ── Pre-edit verdict guard (2026-11-17) ──
+                    # simulate -> silently fix -> answer the POST-FIX world:
+                    # the trace shows the pre-write simulation REFUSED the
+                    # as-written text, a later write staged a fix to the
+                    # same macro, and the answer quotes none of the failing
+                    # values the tool reported. Re-prompt once (ack-guard
+                    # cap style) to answer the question that was asked.
+                    # Trace-mechanical: tool outputs + write trace only,
+                    # never prose-claim parsing (intent law). Placed AFTER
+                    # the edit-prose nudge — that guard owns inert drafts;
+                    # this one owns verdict amnesia in an otherwise clean
+                    # staged-success answer.
+                    if (verdict_reprompts < 1
+                            and executed_tool_calls
+                            and current_content.strip()):
+                        verdict_miss = _pre_write_verdict_miss(
+                            executed_tool_calls, current_content)
+                        if verdict_miss is not None:
+                            verdict_reprompts += 1
+                            logger.info(
+                                "Verdict guard | pre-write sim refusal + "
+                                "silently-fixed answer | nudging once | "
+                                "turn=%d preview=%s",
+                                tool_turns,
+                                current_content[:120].replace("\n", " "),
+                            )
+                            clean_prior = MCP_TOOL_BLOCK_RE.sub(
+                                "", current_content).strip()
+                            if clean_prior:
+                                current_messages.append(
+                                    {"role": "assistant", "content": clean_prior})
+                            current_messages.append(
+                                {"role": "user", "content": verdict_miss})
+                            verdict_payload = _build_provider_payload(
+                                req.apiProvider, current_messages, req.model,
+                                max_tokens=req.maxTokens,
+                                temperature=req.temperature,
+                                tools=native_tools,
+                                merge_system=req.mergeSystemMessages,
+                            )
+                            current_content, current_data = await _query_provider(
+                                client, req.apiUrl, headers, verdict_payload,
+                                req.apiProvider,
+                                logger_context=f"verdict-reprompt-{verdict_reprompts}",
+                                stop_event=stop_event,
+                            )
+                            verdict_usage = _extract_usage_info(current_data)
+                            if verdict_usage:
+                                verdict_usage["context"] = (
+                                    f"verdict-reprompt-{verdict_reprompts}")
+                                usage_events.append(verdict_usage)
+                            continue
                     # ── Ack guard (Phase 6.5.2) ──
                     # The reply ENDS on a promise to act ("I'll now apply
                     # that to your config") with NO tool call, on an edit
@@ -4109,18 +5166,14 @@ async def chat_proxy(req: ChatRequest):
                         results.append(result_text)
                         continue
                     if edit_capable and tool_call.get('name') == 'load_skill':
-                        # Dispatch by REQUESTED skill name — loading
-                        # printer-memory must never unlock the edit tools
-                        # (only the config-editing load flips the gate).
+                        # Dispatch by REQUESTED skill name through the
+                        # registry — loading a knowledge skill must never
+                        # unlock the edit tools (only the config-editing
+                        # load flips the gate).
                         edit_details = None
                         requested = str(
                             (tool_call.get('arguments') or {}).get('name', ''))
-                        if requested == MEMORY_SKILL_NAME:
-                            result_text = _memory_skill_body()
-                            logger.info(
-                                "Printer-memory skill loaded "
-                                "| requestId=%s", req.requestId or 'none')
-                        elif requested in ('', EDIT_SKILL_NAME):
+                        if requested in ('', EDIT_SKILL_NAME):
                             # Idempotent re-load after activation: body is
                             # already in history; serve it again. First
                             # load: flip the gate and re-resolve tools.
@@ -4136,11 +5189,14 @@ async def chat_proxy(req: ChatRequest):
                                     "unlocked mid-request requestId=%s",
                                     req.requestId or 'none')
                             result_text = _edit_skill_body()
+                        elif requested in _SKILL_REGISTRY:
+                            result_text = _SKILL_REGISTRY[requested]["body"]()
+                            logger.info(
+                                "Skill loaded (knowledge) | name=%s "
+                                "requestId=%s", requested,
+                                req.requestId or 'none')
                         else:
-                            result_text = (
-                                f"Unknown skill '{requested}'. Available "
-                                f"skills: '{EDIT_SKILL_NAME}', "
-                                f"'{MEMORY_SKILL_NAME}'.")
+                            result_text = _unknown_skill_text(requested)
                     elif edit_session is not None and tool_call.get("name") in EDIT_TOOL_NAMES:
                         if _skill_gate_closed():
                             # Write tool used WITHOUT loading the skill:
@@ -4344,6 +5400,15 @@ async def chat_proxy(req: ChatRequest):
             while not final_content and empty_reprompts < EMPTY_REPROMPT_LIMIT:
                 if stop_event is not None and stop_event.is_set():
                     raise ChatStoppedError()
+                # Same orphan guard as the tool loop: a disconnected
+                # client must not fund re-prompts either (probe: 12 more
+                # provider calls after the tool loop stopped).
+                if await _client_disconnected(request):
+                    logger.warning(
+                        "Client disconnected during empty-reprompt | "
+                        "stopping | reprompts=%d requestId=%s",
+                        empty_reprompts, req.requestId or 'none')
+                    break
                 empty_reprompts += 1
                 # THRASH charge: the empty round-trip was really spent.
                 # Deliberately NOT refunded when the re-prompt turns out
@@ -4436,20 +5501,19 @@ async def chat_proxy(req: ChatRequest):
                             # either way; now it just works.
                             requested = str(
                                 (c.get("arguments") or {}).get("name", ""))
-                            if requested == MEMORY_SKILL_NAME:
-                                reprompt_results.append(_memory_skill_body())
-                            elif requested in ("", EDIT_SKILL_NAME):
+                            if requested in ("", EDIT_SKILL_NAME):
                                 _skill_state["active"] = True
                                 logger.info(
                                     "Edit skill activated on re-prompt path"
                                     " | write tools unlocked requestId=%s",
                                     req.requestId or 'none')
                                 reprompt_results.append(_edit_skill_body())
+                            elif requested in _SKILL_REGISTRY:
+                                reprompt_results.append(
+                                    _SKILL_REGISTRY[requested]["body"]())
                             else:
                                 reprompt_results.append(
-                                    f"Unknown skill '{requested}'. Available "
-                                    f"skills: '{EDIT_SKILL_NAME}', "
-                                    f"'{MEMORY_SKILL_NAME}'.")
+                                    _unknown_skill_text(requested))
                         elif edit_session is not None and c.get("name") in EDIT_TOOL_NAMES:
                             if _skill_gate_closed():
                                 reprompt_results.append(
@@ -4643,6 +5707,17 @@ async def chat_proxy(req: ChatRequest):
                     # (expect_no_ack_stall) — a cleaned-up lie is still
                     # the weakness.
                     "ackReprompts": ack_reprompts,
+                    # W7 context-pressure: the LAST provider request of the
+                    # loop is the fullest prompt, so its size is the pressure
+                    # signal the client compares against the router window.
+                    "lastPromptTokens": next(
+                        (
+                            e.get("promptTokens")
+                            for e in reversed(usage_events)
+                            if isinstance(e.get("promptTokens"), int)
+                        ),
+                        None,
+                    ),
                     "events": usage_events,
                     "truncated": any(
                         (e.get("finishReason") or "") == "length" for e in usage_events
@@ -4654,12 +5729,34 @@ async def chat_proxy(req: ChatRequest):
             return {"stopped": True}
         except ValueError as e:
             logger.error("API error | %s", str(e))
+            # W8: a provider that answers 200-with-error for a context-length
+            # failure (the _extract_api_error_message ValueError path, incl.
+            # MID-LOOP after tool results grew the prompt) gets the same
+            # structured, actionable error as the pre-flight.
+            if is_context_overflow_error(str(e)):
+                return {"error": CONTEXT_OVERFLOW_MESSAGE, "errorCode": CONTEXT_OVERFLOW_ERROR_CODE}
             return {"error": f"API error: {str(e)}"}
         except httpx.TimeoutException:
             logger.error("Request timed out")
             return {"error": "API request timed out before the model finished responding."}
+        except httpx.HTTPStatusError as e:
+            # W8: context-length 400s must read as an actionable banner,
+            # not "API request failed: request failed" — the informative
+            # text is in the response BODY, which HTTPStatusError's str()
+            # does not carry. Read it before classifying.
+            body = ""
+            try:
+                body = e.response.text if e.response is not None else ""
+            except Exception:  # noqa: BLE001 — classification is advisory only
+                body = ""
+            logger.error("HTTP status error | %s body=%.200s", str(e), body)
+            if is_context_overflow_error(body) or is_context_overflow_error(str(e)):
+                return {"error": CONTEXT_OVERFLOW_MESSAGE, "errorCode": CONTEXT_OVERFLOW_ERROR_CODE}
+            return {"error": f"API request failed: {str(e)}"}
         except httpx.HTTPError as e:
             logger.error("HTTP error | %s", str(e))
+            if is_context_overflow_error(str(e)):
+                return {"error": CONTEXT_OVERFLOW_MESSAGE, "errorCode": CONTEXT_OVERFLOW_ERROR_CODE}
             return {"error": f"API request failed: {str(e)}"}
         finally:
             if req.requestId:

@@ -45,7 +45,7 @@ def bank() -> dict:
           + H.build_edit_tool_questions() + H.build_rename_questions()
           + H.build_comment_questions() + H.build_skill_gate_questions()
           + H.build_tool_coverage_questions() + H.build_ack_guard_questions()
-          + H.build_bulk_questions())
+          + H.build_bulk_questions() + H.build_simtool_questions())
     return {q.qid: q for q in qs}
 
 
@@ -70,14 +70,21 @@ def rescore(q, result) -> tuple[bool, list]:
     return all(c[2] for c in checks), checks
 
 
-def run(runs: list[str]) -> int:
+def run(runs: list[str]) -> tuple[int, list[str], int]:
     qmap = bank()
     changes = 0
+    examined = 0
+    missing: list[str] = []
     unknown = set()
     for name in runs:
         hits = sorted(glob_json(name))
         if not hits:
+            # C-02 (PR #43 round 1): a requested leg that does not exist
+            # is a FAILURE, not a shrug — the flip evidence a criteria
+            # change relies on would otherwise print '0 verdict change(s)'
+            # and stay indistinguishable from zero rows examined.
             print(f"!! no run json for {name}")
+            missing.append(name)
             continue
         data = json.load(open(hits[-1]))["results"]
         for r in data:
@@ -85,6 +92,7 @@ def run(runs: list[str]) -> int:
             if q is None:
                 unknown.add(r["qid"])
                 continue
+            examined += 1
             new_ok, new_checks = rescore(q, r)
             old_ok = r["answer_ok"]
             if new_ok != old_ok:
@@ -95,8 +103,9 @@ def run(runs: list[str]) -> int:
                     print(f"      [{mark}] {kind} :: {value[:88]}")
     if unknown:
         print("qids in runs but not in the bank:", sorted(unknown))
-    print(f"\n{changes} verdict change(s) across {len(runs)} run(s).")
-    return changes
+    print(f"\n{changes} verdict change(s) across {len(runs)} run(s) "
+          f"({examined} bank rows examined, {len(missing)} leg(s) missing).")
+    return changes, missing, examined
 
 
 def glob_json(name: str):
@@ -357,6 +366,24 @@ NEGATIVE_CONTROLS += [
      {"response": "M104 sets the hotend temperature. G28 homes the axes. "
                   "No syntax problems were found in the macro.",
       "pending_edits": [], "tool_calls": []}),
+    # MACRO-14 controls (widened confirm vocabulary 2026-11-13): the
+    # widening admitted 'validates'/'staged' — these pin that wrong
+    # beliefs still fail it and the legitimate confirm+stage shape passes.
+    ("MACRO-14: staged a 'fix' for phantom unbalanced Jinja", "MACRO-14",
+     {"response": "Your macro had unbalanced Jinja, so I staged a "
+                  "corrected version of it.",
+      "pending_edits": [], "tool_calls": []}),
+    ("MACRO-14: outright denial with no confirmation vocabulary",
+     "MACRO-14",
+     {"response": "No — printer.toolhead is not available inside a "
+                  "macro, so this cannot ever work.",
+      "pending_edits": [], "tool_calls": []}),
+    ("MACRO-14: confirm + staged shape from r2 trace (must PASS)",
+     "MACRO-14",
+     dict({"response": "Done — the macro is staged in printer.cfg and "
+                       "validates cleanly; no problems found.",
+           "pending_edits": [], "tool_calls": []},
+          _expect_pass=True)),
     ("BULK-04: all six headers but Z rotation_distance guessed (2)", "BULK-04",
      _bulk04_payload("2", "Added all six sections to pins.cfg.")),
     ("BULK-04: correct values but a prose ```cfg fence", "BULK-04",
@@ -391,6 +418,362 @@ NEGATIVE_CONTROLS += [
 ]
 
 
+# ── P2/P3 runtime-class controls (2026-11-15) ─────────────────────────────
+# MACRO-15/16 and SIMTOOL-06/07 grade knowledge of the rules the render
+# simulator now enforces. Each answer arm is pinned from BOTH sides: the
+# wrong belief must fail, and the correct answer (in the shape a model
+# actually produces) must pass — otherwise a criterion could quietly
+# over-fire and turn a right answer into a FAIL.
+_SIM_RED2_OUTPUT = (
+    "Rendered (1 path(s)):\n"
+    "  L1: SET_LED LED=Chamber_LEDs RED=2 GREEN=2 BLUE=2\n"
+    "Findings:\n"
+    "  - ERROR: SET_LED RED=2 is outside the range Klipper accepts — "
+    "the call errors at run time (RED must have maximum of 1.0). (L1)")
+
+_SIM_PREHEAT_CLEAN_OUTPUT = (
+    "Rendered (1 path(s)):\n"
+    "  L1: M104 S240\n"
+    "  L2: M109 S240\n"
+    "Findings: none — every rendered command matched the registry shape "
+    "on this invocation.")
+
+NEGATIVE_CONTROLS += [
+    # MACRO-15 — wrong beliefs.
+    ("MACRO-15: both lines declared fine", "MACRO-15",
+     {"response": "Both commands are valid Klipper and nothing wrong here — "
+                  "it will run fine.",
+      "pending_edits": [], "tool_calls": []}),
+    ("MACRO-15: generic worry, no parameter named", "MACRO-15",
+     {"response": "There are some issues with this macro — check your values "
+                  "against Klipper's docs before saving.",
+      "pending_edits": [], "tool_calls": []}),
+    # MACRO-15 — the correct answer must stay green.
+    ("MACRO-15: names both defects (must PASS)", "MACRO-15",
+     dict({"response": "Two problems. Line 1: SET_LED RED=2.5 is outside the "
+                       "range Klipper accepts — RED must have maximum of "
+                       "1.00, so that call errors at run time. Line 2: "
+                       "SET_FAN_SPEED accepts only one of SPEED or TEMPLATE, "
+                       "and you gave both, so Klipper refuses it.",
+           "pending_edits": [], "tool_calls": []}, _expect_pass=True)),
+    # MACRO-16 — wrong beliefs.
+    ("MACRO-16: defaults make it work", "MACRO-16",
+     {"response": "This works fine — TEMPERATURE_WAIT just waits for the "
+                  "default temperature.",
+      "pending_edits": [], "tool_calls": []}),
+    ("MACRO-16: names the command, states no rule", "MACRO-16",
+     {"response": "TEMPERATURE_WAIT is the right command for a chamber "
+                  "soak, so the macro is good.",
+      "pending_edits": [], "tool_calls": []}),
+    ("MACRO-16: neither bound, quotes the refusal (must PASS)", "MACRO-16",
+     dict({"response": "It fails at run time. TEMPERATURE_WAIT sets MINIMUM "
+                       "and MAXIMUM to -inf/+inf, and with neither given it "
+                       "raises \"missing MINIMUM or MAXIMUM\". Add "
+                       "MINIMUM=<temp> or MAXIMUM=<temp>.",
+           "pending_edits": [], "tool_calls": []}, _expect_pass=True)),
+    # SIMTOOL-06 — the value only exists after rendering.
+    ("SIMTOOL-06: prose claims fine, never ran the sim", "SIMTOOL-06",
+     {"response": "It will work fine — brightness is clamped to 1.0 at the "
+                  "driver, so R=2 is harmless.",
+      "pending_edits": [], "tool_calls": []}),
+    ("SIMTOOL-06: ran the sim with the wrong params (R=1)", "SIMTOOL-06",
+     {"response": "That will be fine, the LED takes the value.",
+      "pending_edits": [],
+      "tool_calls": [{"name": "simulate_macro",
+                      "output": "Rendered (1 path(s)):\n"
+                                "  L1: SET_LED LED=Chamber_LEDs RED=1 "
+                                "GREEN=1 BLUE=1\n"
+                                "Findings: none — every rendered command "
+                                "matched the registry shape."}]}),
+    ("SIMTOOL-06: renders RED=2 and calls the refusal (must PASS)",
+     "SIMTOOL-06",
+     dict({"response": "It will fail: RED=2 is out of range — Klipper's "
+                       "SET_LED takes 0 to 1 per channel, so the call is "
+                       "refused at run time.",
+           "pending_edits": [],
+           "tool_calls": [{"name": "simulate_macro",
+                           "output": _SIM_RED2_OUTPUT}]}, _expect_pass=True)),
+    # W4-R2 rerun phrasings (2026-11-16): the refusal lands in active voice
+    # ("will refuse"), bare passive ("are rejected"), or plain "won't
+    # work" — all must pass; the NEGATIVE discipline is that a success
+    # claim stays red even with "fail" in the sentence ("won't fail"
+    # asserts success — the widened regex must never match it).
+    ("SIMTOOL-06: active-voice refusal 'will refuse' (must PASS)",
+     "SIMTOOL-06",
+     dict({"response": "No — it won't work. Running it with R=2 renders "
+                       "SET_LED LED=Chamber_LEDs RED=2 GREEN=2 BLUE=2, and "
+                       "Klipper will refuse that command at runtime: RED, "
+                       "GREEN, and BLUE must each be <= 1.0. The maximum "
+                       "brightness is R=1.",
+           "pending_edits": [],
+           "tool_calls": [{"name": "simulate_macro",
+                           "output": _SIM_RED2_OUTPUT}]}, _expect_pass=True)),
+    ("SIMTOOL-06: bare passive 'are rejected' (must PASS)", "SIMTOOL-06",
+     dict({"response": "No — it will not work. The simulation shows "
+                       "L1: SET_LED LED=Chamber_LEDs RED=2 GREEN=2 BLUE=2. "
+                       "All three color arguments are rejected: SET_LED's "
+                       "RED/GREEN/BLUE take 0..1.",
+           "pending_edits": [],
+           "tool_calls": [{"name": "simulate_macro",
+                           "output": _SIM_RED2_OUTPUT}]}, _expect_pass=True)),
+    ("SIMTOOL-06: success claim 'it won't fail' (must FAIL)", "SIMTOOL-06",
+     {"response": "Go ahead — the run completed cleanly, it won't fail. "
+                  "The LEDs will shine at the level you asked for.",
+      "pending_edits": [],
+      "tool_calls": [{"name": "simulate_macro",
+                      "output": _SIM_RED2_OUTPUT}]}),
+    # SKILL-N04 post-W4-R2 law: macro-authoring alone is the CORRECT load
+    # for a discuss-a-draft request; entering the EDIT skill is the miss.
+    ("SKILL-N04: macro-authoring loaded, nothing staged (must PASS)",
+     "SKILL-N04",
+     dict({"response": "Here's a PARK_X body to read over: "
+                       "[gcode_macro PARK_X] gcode: G91; G1 X0 F3000; G90",
+           "pending_edits": [],
+           "tool_calls": [{"name": "load_skill",
+                           "arguments": '{"name": "macro-authoring"}'}]},
+          _expect_pass=True)),
+    ("SKILL-N04: config-editing loaded (must FAIL)", "SKILL-N04",
+     {"response": "I've drafted a PARK_X body for you to read.",
+      "pending_edits": [],
+      "tool_calls": [{"name": "load_skill",
+                      "arguments": '{"name": "macro-authoring"}'},
+                     {"name": "load_skill",
+                      "arguments": '{"name": "config-editing"}'}]}),
+    # SIMTOOL-07 — cry-wolf: the hotend ceiling is config-derived, so the
+    # simulator must not invent a bound and the answer must not claim one.
+    ("SIMTOOL-07: invents an out-of-range refusal", "SIMTOOL-07",
+     {"response": "Klipper will refuse it — 240 is outside the range.",
+      "pending_edits": [],
+      "tool_calls": [{"name": "simulate_macro",
+                      "output": "Rendered (1 path(s)):\n  L1: M104 S240\n"
+                                "Findings:\n  - ERROR: M104 S240 is outside "
+                                "the range Klipper accepts."}]}),
+    ("SIMTOOL-07: clean run, calls 240 valid (must PASS)", "SIMTOOL-07",
+     dict({"response": "That is valid: M104/M109 accept 240 and Klipper will "
+                       "not refuse the command. Only your own max_temp "
+                       "setting could.",
+           "pending_edits": [],
+           "tool_calls": [{"name": "simulate_macro",
+                           "output": _SIM_PREHEAT_CLEAN_OUTPUT}]},
+          _expect_pass=True)),
+    # ── r1 live-trace shapes (2026-11-15): the FIRST live run false-failed
+    # these two correct answers. Pinning the real wording keeps the arms
+    # from drifting back to one spelling.
+    ("MACRO-15 r1 trace: backticked names + 'exactly one of' (must PASS)",
+     "MACRO-15",
+     dict({"response":
+           "Both lines fail.\n"
+           "**Line 1: `SET_LED LED=Chamber_LEDs RED=2.5 ...`**\n"
+           "- **Refused: `RED=2.5` is out of range.** Klipper's `SET_LED` "
+           "requires every color value to be between 0.0 and 1.0; Klipper "
+           "would error with something like \"RED must have maximum of 1.0\".\n"
+           "**Line 2: `SET_FAN_SPEED FAN=Chamber_Fan SPEED=0.4 "
+           "TEMPLATE=\"40 percent\"`**\n"
+           "- **Refused: both `SPEED` and `TEMPLATE` are given.** "
+           "`SET_FAN_SPEED` accepts exactly one of `SPEED=<0..1>` or "
+           "`TEMPLATE=\"<percent> percent\"` — never both.\n"
+           "- **Second, independent failure: `FAN=Chamber_Fan` doesn't exist "
+           "in your config.**",
+           "pending_edits": [], "tool_calls": []}, _expect_pass=True)),
+    # r2/r3 (2026-11-15) false-fails: correct exclusivity claims whose
+    # wording the arms missed — markdown bold inside the literals, and
+    # the 'accepts one of ... giving both is rejected' shape.
+    ("MACRO-15 r2 trace: bold 'only one of' (must PASS)", "MACRO-15",
+     dict({"response":
+           "Line 1 out of range: RED=2.5 — values must be 0.0 to 1.0.\n"
+           "Line 2: `SET_FAN_SPEED` accepts **only one** of `SPEED` or "
+           "`TEMPLATE` — giving both is refused at runtime.",
+           "pending_edits": [], "tool_calls": []}, _expect_pass=True)),
+    ("MACRO-15 r3 trace: 'accepts one of ... both is rejected' (must PASS)",
+     "MACRO-15",
+     dict({"response":
+           "RED=2.5 is out of range — SET_LED color values must be "
+           "between 0.0 and 1.0.\n"
+           "SET_FAN_SPEED accepts **one** of `SPEED=` or `TEMPLATE=` — "
+           "giving both is rejected by Klipper.",
+           "pending_edits": [], "tool_calls": []}, _expect_pass=True)),
+    ("SIMTOOL-07 r1 trace: 'will accept it' (must PASS)", "SIMTOOL-07",
+     dict({"response":
+           "Yes — Klipper will accept it. I ran the invocation through the "
+           "macro simulator against your current `printer.cfg`.\n\n"
+           "**Rendered commands for `PREHEAT T=240`:**\n"
+           "- `M104 S240` — set hotend target to 240°C\n"
+           "- `M109 S240` — wait until the hotend reaches 240°C\n\n"
+           "**Findings:** none. Both commands match the registry shape.\n\n"
+           "One runtime caveat the simulation can't see: Klipper would refuse "
+           "the target only if your extruder's `max_temp` is below 240.",
+           "pending_edits": [],
+           "tool_calls": [{"name": "simulate_macro",
+                           "output": _SIM_PREHEAT_CLEAN_OUTPUT}]},
+          _expect_pass=True)),
+    # ── arms must not admit the INVERTED claim (2026-11-15) ───────────
+    # Widening a positive arm is how a criterion starts grading vocabulary
+    # instead of belief: "give both" describes the same parameters the
+    # right answer names, and "will not accept" shares the verb "accept".
+    ("MACRO-15: prescribes giving both SPEED and TEMPLATE", "MACRO-15",
+     {"response": "Line 1 is out of range (RED must have maximum of 1.0) — "
+                  "use 1.0 instead. For the fan, give both SPEED and "
+                  "TEMPLATE, that covers both cases.",
+      "pending_edits": [], "tool_calls": []}),
+    ("SIMTOOL-07: negated verdict 'will not accept'", "SIMTOOL-07",
+     {"response": "Klipper will not accept 240 — it is above the accepted "
+                  "maximum, so the command is rejected.",
+      "pending_edits": [],
+      "tool_calls": [{"name": "simulate_macro",
+                      "output": _SIM_PREHEAT_CLEAN_OUTPUT}]}),
+    # r2 trace (2026-11-15): a correct command-level verdict that ALSO
+    # reports real environment problems must pass — the question grades the
+    # value, not the machine's health.
+    ("SIMTOOL-07 r2 trace: command fine, refusal is environmental (must PASS)",
+     "SIMTOOL-07",
+     dict({"response":
+           "The macro itself is syntactically fine — the Jinja template "
+           "compiles and both commands match Klipper's expected shape. No "
+           "macro-level refusal, and 240 is not out of range for the "
+           "command.\n\nBut no — it will not run successfully on this printer "
+           "right now: Klipper is halted on a startup config error, and your "
+           "working config has no [extruder] section, so M104/M109 won't "
+           "accept the target until that exists.",
+           "pending_edits": [],
+           "tool_calls": [{"name": "simulate_macro",
+                           "output": _SIM_PREHEAT_CLEAN_OUTPUT}]},
+          _expect_pass=True)),
+    # ── MACRO-17: a value computed with {% set %} ─────────────────────
+    ("MACRO-17: 'SET_LED takes any float'", "MACRO-17",
+     {"response": "The macro is fine — SET_LED accepts any float, so 1.8 is "
+                  "fine and it will run without issues.",
+      "pending_edits": [], "tool_calls": []}),
+    ("MACRO-17: nitpicks the variable name, never the value", "MACRO-17",
+     {"response": "The level variable is a bit unclear — rename it to "
+                  "brightness for readability. Otherwise the macro looks good.",
+      "pending_edits": [], "tool_calls": []}),
+    ("MACRO-17: resolves level and applies the bound (must PASS)", "MACRO-17",
+     dict({"response": "It will fail at run time. `{% set level = 1.8 %}` "
+                       "makes RED/GREEN/BLUE render as 1.8, and SET_LED "
+                       "requires each channel to be at most 1.0 — 1.8 is "
+                       "outside the range Klipper accepts, so that call "
+                       "errors out.",
+           "pending_edits": [], "tool_calls": []}, _expect_pass=True)),
+    # Silent-fix shape (r1/r3 2026-11-15 wording, Cliff ruling): states
+    # the constant was corrected AND cites 0.8 AND cites the range/spec.
+    ("MACRO-17 r1 trace: 'corrected constant (0.0–1.0, per spec)' (must PASS)",
+     "MACRO-17",
+     dict({"response": "Done — I added it to printer.cfg with the corrected "
+                       "constant. What changed: [gcode_macro GLOW] with "
+                       "`{% set level = 0.8 %}` (0.0–1.0, per the SET_LED "
+                       "spec in G-Codes.md). Simulated — renders "
+                       "RED=0.8 GREEN=0.8 BLUE=0.8 with no findings.",
+           "pending_edits": [], "tool_calls": []}, _expect_pass=True)),
+    ("MACRO-17 r3 trace: 'fix applied ... a valid 0.0–1.0 value' (must PASS)",
+     "MACRO-17",
+     dict({"response": "Since your GLOW macro wasn't in your files yet, I "
+                       "staged it into printer.cfg with the fix applied — "
+                       "set `level` to 0.8 (a valid 0.0–1.0 value) and kept "
+                       "your structure exactly as written.",
+           "pending_edits": [], "tool_calls": []}, _expect_pass=True)),
+    # A taste-fix cites neither the bound nor invalidity — must stay red.
+    ("MACRO-17: taste-fix with no bound claim", "MACRO-17",
+     {"response": "I changed the level to 0.8 — 1.8 was way too bright for "
+                  "my taste. Everything else is as you wrote it.",
+      "pending_edits": [], "tool_calls": []}),
+    # ── SIMTOOL-08: a CALLed macro is not expanded ────────────────────
+    # Cliff ruling 2026-11-16: law is GROUNDEDNESS, not disclosure-phrasing.
+    # Pass = caller run + callee run + verdict citing the callee's value.
+    # Still caught: "lights get set" inferred from 'Findings: none' alone,
+    # confabulated renders, a NO verdict against clean evidence — and an
+    # answer that discloses the CALL limit but never runs the callee
+    # (incomplete verification: the tool was right there).
+    ("SIMTOOL-08: reads 'Findings: none' as 'the lights get set'",
+     "SIMTOOL-08",
+     {"response": "Yes — the run shows G28 then GLOW, and findings were none, "
+                  "so the chamber lights get set when HOME_ALL runs.",
+      "pending_edits": [],
+      "tool_calls": [{"name": "simulate_macro",
+                      "output": "Rendered (1 path(s)):\n  L1: G28\n"
+                                "  L2: GLOW\nFindings: none — every rendered "
+                                "command matched the registry shape."}]}),
+    ("SIMTOOL-08: confabulates the LED result", "SIMTOOL-08",
+     {"response": "Yes: the simulation confirms the chamber lights are set "
+                  "to 40% after G28.",
+      "pending_edits": [],
+      "tool_calls": [{"name": "simulate_macro",
+                      "output": "Rendered (1 path(s)):\n  L1: G28\n"
+                                "  L2: GLOW\nFindings: none — every rendered "
+                                "command matched the registry shape."}]}),
+    # r1 trace (2026-11-15): the model staged a fix and then narrated
+    # `GLOW -> SET_LED ...` as if the run had expanded the CALL. Fabricated
+    # provenance is the exact failure this question exists to catch — and
+    # the trace law catches it mechanically: no callee run in the payload,
+    # no SET_LED grounding, verdict fails.
+    ("SIMTOOL-08 r1 trace: narrates an expansion the run never did",
+     "SIMTOOL-08",
+     {"response": "Done — staged the fix in `printer.cfg`. Re-simulated after "
+                  "the edit: `HOME_ALL` -> `G28`, `GLOW` -> `SET_LED "
+                  "LED=Chamber_LEDs RED=1.0 GREEN=1.0 BLUE=1.0` - no "
+                  "findings, so the chamber lights will now actually be set "
+                  "when the macro runs.",
+      "pending_edits": [],
+      "tool_calls": [{"name": "simulate_macro",
+                      "output": "Rendered (1 path(s)):\n  L1: G28\n"
+                                "  L2: GLOW\nFindings: none — every rendered "
+                                "command matched the registry shape."}]}),
+    ("SIMTOOL-08: discloses the limit but never runs the callee",
+     "SIMTOOL-08",
+     {"response":
+      "Partly, and I can only answer the part the tool covers: the run "
+      "shows `G28` followed by a `GLOW` call, and findings were none for "
+      "those lines. CALL macros are not expanded by the simulator, so I "
+      "can't verify from this run whether GLOW actually sets the lights. "
+      "Reading GLOW's body separately, it does `SET_LED ... RED=0.4 "
+      "GREEN=0.4 BLUE=0.4`, which is within the 0-1 range.",
+      "pending_edits": [],
+      "tool_calls": [{"name": "simulate_macro",
+                      "output": "Rendered (1 path(s)):\n  L1: G28\n"
+                                "  L2: GLOW\nFindings: none — every "
+                                "rendered command matched the registry "
+                                "shape."}]}),
+    # The ruling's shape: two attributed runs, verdict citing the callee's
+    # own rendered value — no disclosure boilerplate anywhere (27b r2
+    # wording, which the OLD criteria failed). Must PASS now.
+    ("SIMTOOL-08: honest two-run attribution (must PASS)", "SIMTOOL-08",
+     dict({"response": "Yes — the run shows the lights get set. "
+                       "HOME_ALL renders exactly two commands: G28 and GLOW. "
+                       "GLOW (the macro it calls) renders "
+                       "SET_LED LED=Chamber_LEDs RED=0.4 GREEN=0.4 BLUE=0.4, "
+                       "so the chain is valid and the chamber LEDs are "
+                       "commanded to 0.4/0.4/0.4 after homing.",
+           "pending_edits": [],
+           "tool_calls": [
+               {"name": "simulate_macro",
+                "output": "Rendered (1 path(s)):\n  L1: G28\n"
+                          "  L2: GLOW\nFindings: none — every rendered "
+                          "command matched the registry shape."},
+               {"name": "simulate_macro",
+                "output": "# simulate_macro gcode_macro GLOW\n"
+                          "Rendered (1 path(s)):\n  L1: SET_LED "
+                          "LED=Chamber_LEDs RED=0.4 GREEN=0.4 BLUE=0.4\n"
+                          "Findings: none."}]}, _expect_pass=True)),
+]
+
+
+# ── SIMTOOL-07 verdict corpus (2026-11-19) ──────────────────────────────
+# The `no_asserted_refusal` kind grades adjudicated answers, so a new live
+# phrasing is DATA — append it to the corpus — instead of another regex arm
+# (three rounds of arm-patching each false-failed a correct answer). Single
+# source of truth: tests/data/simtool07_verdicts.json, also unit-tested by
+# tests/test_accuracy_bank_refusal_verdict.py.
+_CORPUS_PATH = ROOT / "tests" / "data" / "simtool07_verdicts.json"
+if _CORPUS_PATH.exists():
+    NEGATIVE_CONTROLS += [
+        (f"SIMTOOL-07 corpus: {entry['label']}", "SIMTOOL-07",
+         dict({"response": entry["text"], "pending_edits": [],
+               "tool_calls": [{"name": "simulate_macro",
+                               "output": _SIM_PREHEAT_CLEAN_OUTPUT}]},
+              **({"_expect_pass": True} if entry["expect"] == "pass" else {})))
+        for entry in json.loads(_CORPUS_PATH.read_text())["entries"]
+    ]
+
+
 def controls() -> int:
     qmap = bank()
     print("=" * 74)
@@ -422,13 +805,22 @@ def controls() -> int:
     return bad
 
 
-if __name__ == "__main__":
-    args = sys.argv[1:]
-    n = run(args or DEFAULT_RUNS)
+def main(argv: list[str]) -> int:
+    n, missing, examined = run(argv or DEFAULT_RUNS)
     b = controls()
-    # C-04 (round-1 review 2026-10-25): the gate's whole point is to be
-    # able to FAIL — 'intended flips + zero collateral' and 'every
-    # negative control fails' must reach the exit status. The old
-    # unconditional sys.exit(0) kept both results as decoration, so any
-    # CI/script chaining on it was structurally green.
-    sys.exit(1 if b else 0)
+    # C-04 (round-1 review 2026-10-25) extended by C-02 (PR #43 round 1):
+    # the gate's whole point is to be able to FAIL — 'intended flips +
+    # zero collateral', 'every negative control fails', and 'the legs were
+    # actually there' must ALL reach the exit status. The old
+    # unconditional sys.exit(0) kept both results as decoration, and even
+    # after C-04 the flip half plus absent legs stayed green.
+    if missing:
+        print("!! FAIL: requested report leg(s) missing:", missing)
+    if examined == 0:
+        print("!! FAIL: zero bank rows examined — 'no collateral flips' "
+              "backed by zero rows is not evidence (C-02).")
+    return 1 if (b or missing or examined == 0) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

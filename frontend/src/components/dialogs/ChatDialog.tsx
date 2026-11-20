@@ -24,6 +24,8 @@ import {
   type ApprovalCountdownAnchor,
 } from '../../utils/approvalDiff';
 import { buildChatRequestCredentials } from '../../utils/chatRequestBase';
+import { loadedSkillNames } from '../../utils/chatSkillTrace';
+import { buildWorkLedger } from '../../utils/chatWorkLedger';
 import { selectUnsavedDrafts } from '../../utils/chatContext';
 import { buildReferenceContext, mentionMatches, nodeToReference, referenceLabel, type ChatReference, type MentionSource } from '../../utils/chatReferences';
 import { isNearBottom, nextStickToBottom } from '../../utils/chatScroll';
@@ -56,6 +58,10 @@ import type { ApprovalCard } from '../../services/api';
 import ChatInputBar, { type ChatReferenceChip } from './ChatInputBar';
 import ChatEditRows from './ChatEditRows';
 import ChangeSetBar from './ChangeSetBar';
+import ContextPressureBar from './ContextPressureBar';
+import ContextOverflowBar from './ContextOverflowBar';
+import { useContextPressureStore } from '../../stores/contextPressureStore';
+import { useWorkLedgerStore } from '../../stores/workLedgerStore';
 import { useChangeSetStore } from '../../stores/changeSetStore';
 import {
   applyStagedEdits,
@@ -310,6 +316,39 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     }
   }, [open, docked, settings]);
 
+  // PR #43 review F6 + third pass (L-1/L-2): the message trail persists
+  // across page reloads but kept/undone events are memory-only, so a
+  // reloaded thread that was never explicitly saved would claim
+  // 'awaiting review' for staging decided in the lost session.
+  // Everything restored is inside the no-decision-record zone: those
+  // rows render 'unknown' (absence never claims). A decision made NOW
+  // on a still-open review row beats the boundary — a matching decision
+  // always outranks it (the overlay branch runs before the boundary) —
+  // and loading an explicit save clears it, because that record arrives
+  // with the conversation whole.
+  // L-1: the boundary must be armed when the trail ARRIVES. The trail
+  // lands asynchronously (main.tsx fires loadState() in the same tick
+  // it renders, and the backend file is the source of truth), so a
+  // mount-only effect read an empty store, never armed anything, and
+  // every restored staging reported 'awaiting review'. Watch for the
+  // first non-empty trail that did NOT come from a send in this
+  // session. (A send racing the restore loses its message to the
+  // restore wholesale — pre-existing behavior — and this boot-only
+  // window cannot re-open after that.)
+  // L-2: the newest restored turn carries turnOrdinal == the user
+  // count and the boundary test is strict (`<`), so the boundary is
+  // ONE PAST the count — otherwise the last restored staging keeps
+  // claiming 'awaiting review' for its lost decision.
+  const decisionBoundaryArmedRef = useRef(false);
+  const sentThisSessionRef = useRef(false);
+  useEffect(() => {
+    if (decisionBoundaryArmedRef.current || sentThisSessionRef.current) return;
+    const users = messages.filter((m) => m.role === 'user').length;
+    if (users === 0) return;
+    useWorkLedgerStore.getState().setDecisionTrustFrom(users + 1);
+    decisionBoundaryArmedRef.current = true;
+  }, [messages]);
+
   // ── Auto-scroll to bottom (sticky) ──────────────────────────────
   // Follows new messages AND content growth (approval cards, progress
   // strip, long markdown reflows) while the user is at the bottom.
@@ -458,6 +497,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       // review summary until they are kept or undone.
       appliedStagedRef.current = '';
 
+      // L-1 (third pass): a send means any trail in the store is now
+      // session-authored — its decisions are live, so the no-decision
+      // boundary must never be armed from it.
+      sentThisSessionRef.current = true;
+
       const userMsg = { role: 'user' as const, content: trimmedMessage, hiddenFromUser: options?.hiddenFromUser === true };
       const previousMessages = options?.hiddenFromUser ? [] : messages;
       // On retry the conversation already ends with the failed user message —
@@ -471,6 +515,15 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         newMessages = [...messages.slice(0, options.editIndex), userMsg];
       } else {
         newMessages = options?.retry ? messages : [...previousMessages, userMsg];
+      }
+      // PR #43 review F5: edit-resend TRUNCATES the trail and a hidden
+      // analyze send REPLACES it — both branch the conversation lineage.
+      // Kept/undone events recorded against the old lineage must stop
+      // overlaying rows in the new one (a stale verdict otherwise stamps
+      // a fresh re-staging of the same file+section). One epoch bump per
+      // branch is the whole mechanism; the builder does the matching.
+      if (options?.editIndex !== undefined || options?.hiddenFromUser === true) {
+        useWorkLedgerStore.getState().bumpEpoch();
       }
       // Take the attached context for this message and empty the slots in ONE
       // step. Reading the store and clearing it separately is how the first
@@ -504,10 +557,34 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         // ("AI settings not configured" on a configured provider, live
         // report 2026-09-27). Typed-but-unsaved panel edits were never
         // meant to drive a send anyway.
-        const chatRequestBase = buildChatRequestCredentials(
-          useAiStore.getState().settings,
-          stopRequestId,
-        );
+        const chatRequestBase = {
+          ...buildChatRequestCredentials(
+            useAiStore.getState().settings,
+            stopRequestId,
+          ),
+          // Sticky skill armament (W0): once load_skill(config-editing) ran
+          // anywhere in this conversation's stored tool trace, every further
+          // request re-arms the gate — the backend starts with the skill
+          // active and re-supplies body + write tools together (atomic
+          // armament). Derived at send time, conversation-scoped, never a
+          // global setting. Both this call and the retry-pipeline calls
+          // spread this object, so one derivation covers all.
+          loadedSkills: loadedSkillNames(newMessages),
+          // Conversation work-ledger (W6): what the model staged and how
+          // each section ended (kept/undone/failed) — derived fresh from
+          // the stored tool trace + the decision store at send time,
+          // conversation-scoped. Omitted when empty; the backend renders
+          // it verbatim as the trailing ledger message and never decides
+          // anything from it (review law).
+          workLedger: (() => {
+            const ledger = useWorkLedgerStore.getState();
+            const rows = buildWorkLedger(newMessages, ledger.events, {
+              epoch: ledger.epoch,
+              trustFrom: ledger.decisionTrustFrom ?? undefined,
+            });
+            return rows.length > 0 ? rows : undefined;
+          })(),
+        };
 
         // No context-file picker (2026-10-03): a request carries the editor's
         // UNSAVED DRAFTS and nothing else. Files the user has not touched are
@@ -635,6 +712,17 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
         const stopped = stopController.signal.aborted || err instanceof api.ChatStoppedError;
         if (stopped) {
           // User pressed Stop — keep the user message in history, no error banner.
+        } else if (err instanceof api.AiContextOverflowError) {
+          // W8: the conversation is over the model's window (pre-flight
+          // refusal or mapped provider error). The overflow bar carries the
+          // actionable label — the generic red error would restate it less
+          // usefully — and the bar persists until a new/loaded chat resets
+          // the store. Unrecoverable for the toolbar dot; the user message
+          // stays in history so trimming references and resending works.
+          useContextPressureStore.getState().recordOverflow(err.message);
+          if (!openRef.current) {
+            useAiStore.getState().setChatStatus('error');
+          }
         } else {
           const message = err instanceof Error ? err.message : 'Failed to get response.';
           setError(message);
@@ -1026,7 +1114,13 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const saveCurrentConversation = useCallback(() => {
     const { settings, messages } = useAiStore.getState();
     if (messages.length > 0) {
-      useChatHistoryStore.getState().saveConversation(messages, settings);
+      // W6: the kept/undone events are the only record that cannot be
+      // re-derived from the message trail — they travel with the save.
+      useChatHistoryStore.getState().saveConversation(
+        messages,
+        settings,
+        useWorkLedgerStore.getState().events,
+      );
     }
   }, []);
 
@@ -1035,10 +1129,16 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const handleStartNewChat = useCallback(() => {
     clearMessages();
     useChatReferenceStore.getState().clear();
+    // W7: a new conversation starts a fresh pressure measurement — a label
+    // from the old thread must not follow the user into an empty chat.
+    useContextPressureStore.getState().reset();
     // A new conversation inherits no running change set — the store's own
     // contract (PR #36 review, claim 3). This also bumps the epoch, so an
     // in-flight reply cannot re-seed the previous conversation's review.
     useChangeSetStore.getState().clear();
+    // W6: verdicts are conversation-scoped — a new chat starts with no
+    // action record (no trace, no decisions).
+    useWorkLedgerStore.getState().clear();
   }, [clearMessages]);
 
   const handleNewChatWithSave = useCallback(() => {
@@ -1076,6 +1176,23 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       saveCurrentConversation();
       setMessages(conversation.messages);
       setSettings(conversation.settings);
+      // W7: the loaded thread has not been sent, so any pressure telemetry
+      // from the replaced conversation is stale — silent until the next reply.
+      useContextPressureStore.getState().reset();
+      // W6: restore the thread's kept/undone record alongside its
+      // messages (legacy saves hydrate to empty — trace rows still work).
+      // F5: bump BEFORE hydrate — the replaced thread's events must not
+      // overlay the loaded one, and the restored events are stamped with
+      // the fresh epoch (they arrive with their conversation, trustworthy
+      // as a set). F6: the save carries its decision record whole, so
+      // nothing in the loaded thread is untrusted.
+      // L-1 (third pass): mark the boundary armed too — an explicit
+      // load must not be re-armed by the trail watcher later (the trail
+      // it brings is trustworthy, decisions included).
+      useWorkLedgerStore.getState().bumpEpoch();
+      useWorkLedgerStore.getState().setDecisionTrustFrom(null);
+      decisionBoundaryArmedRef.current = true;
+      useWorkLedgerStore.getState().hydrate(conversation.workLedger ?? []);
     },
     [saveCurrentConversation, setMessages, setSettings],
   );
@@ -1449,6 +1566,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       {/* Post-hoc review summary: the LEDGER — one row per run of
           diff(FRAME, LIVE). Keep or undo a run and it leaves the diff; when
           nothing is left the whole bar goes away (Sir, 2026-10-07). */}
+      {/* W7: context-pressure advisory — one label above the review bar,
+          shown only while the latest request sits at ≥70% of the model's
+          real window (both modal and docked variants). */}
+      <ContextPressureBar />
+      <ContextOverflowBar />
       <ChangeSetBar
         files={ledgerSections}
         onKeepAll={handleKeepAll}

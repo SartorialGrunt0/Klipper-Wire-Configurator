@@ -7,6 +7,8 @@ tools/call, resources, ping).
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 
 import mcp_server  # noqa: E402
@@ -1183,6 +1185,50 @@ def test_validate_macro_missing_header(tmp_path):
     assert "issue(s) found" in out
 
 
+def test_validate_macro_variable_lines_before_gcode(tmp_path):
+    # The canonical toggle pattern puts variable_* lines between
+    # description: and gcode:. The old gcode-key scan gave up at the
+    # first non-description line, so this standard shape fired a bogus
+    # "missing the 'gcode:' key" warning — MACRO-12 trace showed the
+    # model loop-validating the same macro 4x chasing that phantom.
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro TOGGLE_LEDS]\n"
+        "description: toggle the chamber leds\n"
+        "variable_leds_on: 0\n"
+        "variable_last_red: 1\n"
+        "gcode:\n"
+        "    {% if printer['gcode_macro TOGGLE_LEDS'].leds_on %}\n"
+        "        SET_LED LED=Chamber_LEDs RED=0 GREEN=0 BLUE=0\n"
+        "    {% endif %}\n"
+    )})
+    assert "missing the 'gcode:' key" not in out
+
+
+def test_validate_macro_gcode_really_missing_still_warns(tmp_path):
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro NO_BODY]\n"
+        "description: nothing to run\n"
+        "variable_x: 1\n"
+    )})
+    assert "missing the 'gcode:' key" in out
+
+
+def test_validate_macro_indented_gcode_still_warns(tmp_path):
+    # Klipper section keys sit at column 0; an indented "gcode:" is not
+    # a key, so the warning must still fire (the fix must not just
+    # substring-search the whole text).
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro BAD_INDENT]\n"
+        "description: wrong\n"
+        "    gcode:\n"
+        "        G28\n"
+    )})
+    assert "missing the 'gcode:' key" in out
+
+
 def test_validate_macro_unbalanced_jinja(tmp_path):
     server, _ = _server(tmp_path)
     out = _call_tool(server, "validate_macro", {"macro_text": (
@@ -1191,7 +1237,158 @@ def test_validate_macro_unbalanced_jinja(tmp_path):
         "    {% if printer.bed_mesh %}\n"
         "    G28\n"
     )})
-    assert "Unbalanced {% if %}" in out
+    # W1: verdict unchanged (error), wording now comes from the real Jinja
+    # compiler instead of the old substring count.
+    assert "Jinja syntax error" in out
+
+
+def test_validate_macro_commented_jinja_not_counted(tmp_path):
+    """A '#' comment containing '{% if %}' must not report an imbalance.
+
+    The old substring counting scanned raw lines including comments and
+    false-fired here; Klipper strips '#' before templating, so the real
+    compiler sees clean Jinja.
+    """
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro TEST]\n"
+        "description: ok\n"
+        "gcode:\n"
+        "    # {% if printer.x %}\n"
+        "    G28\n"
+        "    G90\n"
+    )})
+    assert "Unbalanced" not in out
+    assert "Jinja syntax error" not in out
+
+
+def test_validate_macro_dashed_block_missing_endif(tmp_path):
+    """'{%- if -%}' (dashed) with no '{% endif %}' is a real syntax error.
+
+    The old check only matched '{% if '/'{%if ' literals and missed the
+    dashed whitespace-control form entirely.
+    """
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro TEST]\n"
+        "gcode:\n"
+        "    {%- if printer.x -%}\n"
+        "    G28\n"
+    )})
+    assert "Jinja syntax error" in out
+    assert "issue(s) found" in out
+
+
+def test_validate_macro_stray_endraw(tmp_path):
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro TEST]\n"
+        "gcode:\n"
+        "    {% endraw %}\n"
+        "    G28\n"
+    )})
+    assert "endraw" in out
+    assert "Jinja syntax error" in out
+
+
+def test_validate_macro_reports_body_line_number(tmp_path):
+    """The compiler's body-relative line rides in the finding."""
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro TEST]\n"
+        "gcode:\n"
+        "    G28\n"
+        "    {% endif %}\n"
+    )})
+    assert "Jinja syntax error" in out
+    assert "line 2" in out
+
+
+@pytest.mark.parametrize("body,expect_error", [
+    ("    G28\n    G90\n", False),
+    ("    {% if printer.x %}\n    G28\n", True),
+    ("    {%- if printer.x -%}\n    G28\n", True),
+    ("    # {% if printer.x %}\n    G28\n", False),
+    ("    {% for i in [1,2] %}\n    M117 hi\n", True),
+    ("    {% raw %}\n    literal {brace}\n", True),
+])
+def test_validate_macro_parity_with_project_validator(tmp_path, body, expect_error):
+    """validate_macro must reach the SAME Jinja verdict as the project
+    validator (which gates save) — one engine, tool never weaker than gate."""
+    from parser.config_parser import parse_config
+    from parser.validator import validate_config
+
+    server, _ = _server(tmp_path)
+    macro_text = "[gcode_macro TEST]\ndescription: parity\n"
+    tool_out = _call_tool(server, "validate_macro", {
+        "macro_text": macro_text + "gcode:\n" + body})
+    tool_bad = "Jinja syntax error" in tool_out
+
+    cfg = parse_config(macro_text + "gcode:\n" + body)
+    result = validate_config(cfg)
+    proj_bad = any("Jinja template error" in e.message for e in result.errors)
+
+    assert tool_bad is expect_error
+    assert proj_bad is expect_error
+
+
+# ── validate_macro: registry required-param presence ──
+
+
+def test_validate_macro_flags_missing_required_param(tmp_path):
+    """SET_LED without LED= is a runtime error in Klipper; the registry
+    (schema v2) knows LED is required, so the tool must flag it with line."""
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro TEST]\n"
+        "description: led ramp\n"
+        "gcode:\n"
+        "    G28\n"
+        "    SET_LED RED=1 GREEN=1 BLUE=1\n"
+    )})
+    assert "missing required parameter" in out
+    assert "LED" in out
+    assert "Line 2" in out
+
+
+def test_validate_macro_required_param_from_jinja_ok(tmp_path):
+    """LED={led_name} keeps the literal 'LED=' after span stripping — the
+    Jinja-supplied value must not be flagged."""
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro TEST]\n"
+        "description: led\n"
+        "gcode:\n"
+        "    SET_LED LED={led_name} RED=1\n"
+    )})
+    assert "missing required parameter" not in out
+
+
+def test_validate_macro_presence_check_optional_and_unknown(tmp_path):
+    """Fully-specified registry commands, optional params omitted, and
+    unknown/custom commands must all stay silent."""
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro TEST]\n"
+        "description: fine\n"
+        "gcode:\n"
+        "    SET_GCODE_VARIABLE MACRO=OTHER VARIABLE=v VALUE=1\n"
+        "    MY_CUSTOM_MACRO_NOARGS\n"
+        "    M104 S200\n"
+    )})
+    assert "missing required parameter" not in out
+
+
+def test_validate_macro_presence_check_gcode_variables(tmp_path):
+    server, _ = _server(tmp_path)
+    out = _call_tool(server, "validate_macro", {"macro_text": (
+        "[gcode_macro TEST]\n"
+        "description: var\n"
+        "gcode:\n"
+        "    SET_GCODE_VARIABLE MACRO=OTHER VALUE=1\n"
+    )})
+    assert "missing required parameter" in out
+    assert "VARIABLE" in out
 
 
 def test_validate_macro_save_restore_state(tmp_path):
@@ -1251,9 +1448,11 @@ def test_tools_list(tmp_path):
     assert "list_user_configs" in names
     assert "list_config_reference_sections" in names
     assert "list_user_config_sections" in names
-    assert len(names) == 20  # +4 live-context tools (2026-09): validate_config_project,
+    assert "simulate_macro" in names  # W4R.3 on-demand simulation
+    assert len(names) == 21  # +4 live-context tools (2026-09): validate_config_project,
     # list_connected_devices, get_section_schema (re-added with typed output —
-    # the old prose-duplicate version was removed), get_klippy_status
+    # the old prose-duplicate version was removed), get_klippy_status;
+    # +1 simulate_macro (2026-11 W4R.3)
 
 
 def test_tools_call_unknown_tool(tmp_path):
@@ -1514,3 +1713,90 @@ def test_search_user_configs_descriptions_advertise_checklist_and_keywords():
     from api.ai_routes import _MCP_TOOL_SNIPPETS
     snip = _MCP_TOOL_SNIPPETS["search_user_configs"]
     assert "REFERENCES" in snip and "keywords=" in snip
+
+
+# ── description: check must be section-bounded (found 2026-11-15) ──────────
+# The check used to scan absolute lines 1..9 of the whole text, so any
+# section ABOVE the macro pushed a real `description:` out of the window and
+# reported the macro as missing one. [neopixel] is the trigger seen in the
+# wild: it is what a real printer.cfg has above a chamber-light macro.
+
+_PROBE_DESC_MACRO = ("[gcode_macro CHAMBER_ON]\n"
+                     "description: turn the chamber lights full white\n"
+                     "gcode:\n"
+                     "    SET_LED LED=Chamber_LEDs RED=1 GREEN=1 BLUE=1\n")
+
+
+def _desc_suggestion(out: str) -> bool:
+    return "missing a 'description:'" in out
+
+
+def test_facade_description_not_missing_when_hardware_precedes_the_macro():
+    cfg = ("[printer]\nkinematics: cartesian\n"
+           "\n[neopixel Chamber_LEDs]\npin: PB1\nchain_count: 30\n\n"
+           + _PROBE_DESC_MACRO)
+    assert not _desc_suggestion(McpServer()._handle_validate_macro(
+        {"macro_text": cfg}))
+
+
+def test_facade_description_still_missing_when_truly_absent():
+    cfg = ("[printer]\nkinematics: cartesian\n\n"
+           "[neopixel Chamber_LEDs]\npin: PB1\nchain_count: 30\n\n"
+           "[gcode_macro CHAMBER_ON]\ngcode:\n"
+           "    SET_LED LED=Chamber_LEDs RED=1 GREEN=1 BLUE=1\n")
+    assert _desc_suggestion(McpServer()._handle_validate_macro(
+        {"macro_text": cfg}))
+
+
+def test_facade_indented_description_is_body_text_not_a_key():
+    # A `description:` indented under gcode: is macro BODY (it becomes a
+    # gcode line), not the section key — the old strip()-based scan
+    # accepted it and suppressed a true finding.
+    cfg = "[gcode_macro CHAMBER_ON]\ngcode:\n    description: not a key\n"
+    assert _desc_suggestion(McpServer()._handle_validate_macro(
+        {"macro_text": cfg}))
+
+
+def test_facade_description_from_the_NEXT_macro_does_not_count():
+    # Section-bounded also means the next macro's description cannot
+    # satisfy this one's check.
+    cfg = ("[gcode_macro A_MACRO]\ngcode:\n    M117 hi\n"
+           "\n[gcode_macro B_MACRO]\ndescription: has one\n"
+           "gcode:\n    M117 hi\n")
+    out = McpServer()._handle_validate_macro({"macro_text": cfg})
+    assert "Macro 'A_MACRO' is missing a 'description:'" in out
+
+
+# ── W3: validate_macro runtime_error traceback ─────────────────────────────
+
+_W3_TRACE_MACRO = (
+    "[gcode_macro BLINK]\n"
+    "description: blink\n"
+    "gcode:\n"
+    '    SET_LED LED=c RED={params.RED|default("")}\n'
+)
+
+
+def test_facade_validate_macro_runtime_error_attaches_provenance():
+    out = McpServer()._handle_validate_macro({
+        "macro_text": _W3_TRACE_MACRO,
+        "runtime_error": ("Transitioning to shutdown:\n"
+                          "Error on 'SET_LED LED=c RED=': unable to parse"),
+    })
+    assert "Runtime error traceback" in out
+    assert "body line 1" in out
+    assert "params.RED" in out  # quotes the SOURCE line, not the frame
+
+
+def test_facade_validate_macro_runtime_error_no_match_says_so():
+    out = McpServer()._handle_validate_macro({
+        "macro_text": _W3_TRACE_MACRO,
+        "runtime_error": "Error on 'G0 X999 F600': unable to parse X",
+    })
+    assert "Runtime error traceback" in out
+    assert "No line of this macro renders" in out
+
+
+def test_facade_validate_macro_without_runtime_error_unchanged():
+    with_arg = McpServer()._handle_validate_macro({"macro_text": _W3_TRACE_MACRO})
+    assert "Runtime error traceback" not in with_arg

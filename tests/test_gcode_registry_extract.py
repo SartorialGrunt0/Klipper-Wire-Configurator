@@ -46,6 +46,15 @@ def test_fixture_extracts_exact_name_set():
         "FAKE_ONE_SHOT",
         # gcode_move.py handlers list + literal alias
         "G1", "G20", "G21", "M82", "SET_GCODE_OFFSET", "G0",
+        # convention-resolved loop handlers + shared-dispatch negative control
+        "SET_GCODE_STATE", "GET_STATE", "DISPATCH_A", "DISPATCH_B",
+        # per-axis loop reads (numeric vs presence)
+        "SET_FAKE_OFFSET", "FAKE_HOME",
+        # guards.py review-F1/F2 policy fixtures
+        "GUARDED", "ALIASED",
+        # delegation.py: same-file method / ctor / ambiguous / axis-prefix
+        "DELEGATE_METHOD", "DELEGATE_CTOR", "DELEGATE_AMBIGUOUS",
+        "DELEGATE_AXIS",
     }
 
 
@@ -76,6 +85,258 @@ def test_fixture_mux_records_gate_key():
     assert set_led["mux_key"] == "LED"
     assert set_led["extra"] == "led"
     assert set_led["requires_sections"] == ["dotstar", "led", "neopixel", "pca9533"]
+
+
+def test_fixture_extracts_param_types_and_required():
+    """W1 task 1.2: handler gcmd.get_* calls become typed params.
+
+    The mux key LED stays required; the handler's own calls add type +
+    default. Bare get('LABEL') (no default) is required; get_int with a
+    None default is optional.
+    """
+    mod = _load_extractor()
+    registry = mod.extract_registry(FAKE_TREE)
+    params = registry["commands"]["SET_LED"]["params"]
+    assert params["LED"] == {"required": True}
+    assert params["RED"] == {"type": "float", "required": False, "default": 0.0}
+    assert params["INDEX"] == {"type": "int", "required": False,
+                               "default": None, "minval": 1}
+    assert params["SYNC"] == {"type": "bool", "required": False, "default": True}
+    assert params["LABEL"] == {"type": "str", "required": True}
+
+
+# ── review F1/F2: required policy + gcmd-receiver restriction ──────────────
+
+def test_fixture_guarded_reads_are_never_required():
+    """F1 (skew_correction:119-120 / manual_stepper:129 / servo:71 shape):
+    a name read only via test-then-read or inside an if/elif/else action
+    chain is NOT required — the command runs fine without it, and the
+    old last-call-wins policy false-FAILed every valid invocation
+    (18 of the 24 corpus errors)."""
+    mod = _load_extractor()
+    registry = mod.extract_registry(FAKE_TREE)
+    params = registry["commands"]["GUARDED"]["params"]
+    for name in ("LOAD", "SAVE", "FALLBACK"):
+        assert params[name]["required"] is False, name
+
+
+def test_fixture_gcmd_alias_harvested_non_receivers_dropped():
+    """F2 (heaters.py:374 became a REQUIRED TEMPERATURE_WAIT DEBUGOUTPUT):
+    only the gcmd parameter (through assignment aliases) is a param
+    source; self.printer.get_start_args().get(...) is a dict lookup."""
+    mod = _load_extractor()
+    registry = mod.extract_registry(FAKE_TREE)
+    params = registry["commands"]["ALIASED"]["params"]
+    assert params["MUST"] == {"type": "int", "required": True}  # via alias
+    assert "DEBUGOUTPUT" not in params
+    assert params["DELAY"] == {"type": "float", "required": False,
+                               "default": 1.0}
+
+
+# ── loop registrations: the `cmd_` convention ──────────────────────────────
+
+def test_fixture_loop_getattr_resolves_handler_by_convention():
+    """klippy/extras/gcode_move.py:22-27 registers its handler table as
+    `func = getattr(self, 'cmd_' + cmd); register_command(cmd, func)`.
+    The second argument is a LOCAL, so every command in that loop carried
+    no handler and therefore no params — SAVE/RESTORE_GCODE_STATE,
+    SET_GCODE_OFFSET, M220/M221 among them. The `cmd_<NAME>` name IS the
+    convention, so the handler is derivable."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(FAKE_TREE)["commands"]
+    state = cmds["SET_GCODE_STATE"]["params"]
+    assert state["NAME"] == {"type": "str", "required": False,
+                             "default": "default"}
+    assert state["MOVE"] == {"type": "int", "required": False, "default": 0}
+    assert state["MOVE_SPEED"] == {"type": "float", "required": False,
+                                    "above": 0.0}
+    assert cmds["GET_STATE"]["params"] == {
+        "INDEX": {"type": "int", "required": False, "default": 1,
+                  "minval": 0},
+        "SPEED": {"type": "float", "required": False, "default": 1.0,
+                  "above": 0.0},
+        "OFFSET": {"type": "float", "required": False, "default": 0.0,
+                   "minval": -1, "maxval": 1}}
+
+
+def test_fixture_shared_dispatch_handler_not_attributed():
+    """A loop that registers ONE handler for several names (gcode.py's
+    builtin dispatch) must not hand that handler's params to each name."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(FAKE_TREE)["commands"]
+    for name in ("DISPATCH_A", "DISPATCH_B"):
+        assert "params" not in cmds[name], cmds[name]
+        assert cmds[name]["extra"] == "gcode_move"
+
+
+@pytest.mark.skipif(not REAL_KLIPPY.is_dir(), reason="reference klipper absent")
+def test_real_tree_gcode_move_loop_params_present():
+    """The real Klipper tree: the gcode_move handler table's params are the
+    ones a start macro actually writes (M220/M221 S=, SET_GCODE_OFFSET)."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(REAL_KLIPPY)["commands"]
+    for name in ("M220", "M221"):
+        assert cmds[name]["params"]["S"]["type"] == "float", name
+        assert cmds[name]["params"]["S"]["required"] is False, name
+    offset = cmds["SET_GCODE_OFFSET"]["params"]
+    assert offset["MOVE"] == {"type": "int", "required": False, "default": 0}
+    assert offset["MOVE_SPEED"]["type"] == "float"
+    assert cmds["SAVE_GCODE_STATE"]["params"]["NAME"]["default"] == "default"
+
+
+def test_fixture_axis_loop_names_are_typed():
+    """A numeric per-axis read names its params from the loop literal:
+    `gcmd.get_float(axis)` / `get_float(axis + '_ADJUST')` over XYZE is how
+    SET_GCODE_OFFSET, BED_MESH_OFFSET and G92 read every parameter they
+    have. Each axis is independently optional — the caller passes a subset."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(FAKE_TREE)["commands"]
+    params = cmds["SET_FAKE_OFFSET"]["params"]
+    assert set(params) == {"X", "Y", "Z",
+                           "X_ADJUST", "Y_ADJUST", "Z_ADJUST"}, params
+    assert params["Y"] == {"type": "float", "required": False}
+    assert params["Z_ADJUST"] == {"type": "float", "required": False}
+
+
+def test_fixture_presence_axis_loop_is_not_typed():
+    """G28's `gcmd.get(axis)` is a PRESENCE read: `G28 X Y` is canonical and
+    carries no value, so typing X/Y/Z would fabricate 'renders EMPTY' on
+    working configs. Only numeric getters may be expanded."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(FAKE_TREE)["commands"]
+    assert "params" not in cmds["FAKE_HOME"], cmds["FAKE_HOME"]
+
+
+@pytest.mark.skipif(not REAL_KLIPPY.is_dir(), reason="reference klipper absent")
+def test_real_tree_per_axis_params_present_and_g28_safe():
+    mod = _load_extractor()
+    cmds = mod.extract_registry(REAL_KLIPPY)["commands"]
+    offset = cmds["SET_GCODE_OFFSET"]["params"]
+    for axis in ("X", "Y", "Z", "E"):
+        assert offset[axis] == {"type": "float", "required": False}, axis
+    assert offset["Z_ADJUST"]["type"] == "float"
+    assert {"X", "Y"} <= set(cmds["BED_MESH_OFFSET"]["params"])
+    assert {"X", "Y", "Z", "E"} <= set(cmds["G92"]["params"])
+    # G28 reads its axes with a presence check — must stay untyped.
+    assert not cmds["G28"].get("params"), cmds["G28"]
+
+
+@pytest.mark.skipif(not REAL_KLIPPY.is_dir(), reason="reference klipper absent")
+def test_real_tree_guarded_families_not_required():
+    """The four exact F1/F2 false-FAILs from probe p4 must be gone."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(REAL_KLIPPY)["commands"]
+    skew = cmds["SKEW_PROFILE"]["params"]
+    assert not any(skew[n]["required"] for n in ("LOAD", "SAVE", "REMOVE"))
+    assert cmds["SET_SERVO"]["params"]["ANGLE"]["required"] is False
+    ms = cmds["MANUAL_STEPPER"]["params"]
+    assert ms["MOVE"]["required"] is False
+    tw = cmds["TEMPERATURE_WAIT"]["params"]
+    assert "DEBUGOUTPUT" not in tw
+    # preserved-correct entries (the SET_LED assertion of plan 2.2):
+    led = cmds["SET_LED"]["params"]
+    assert led["LED"]["required"] is True
+    assert led["RED"] == {"type": "float", "required": False, "default": 0.0,
+                          "minval": 0.0, "maxval": 1.0}
+
+
+def test_fixture_literal_bounds_recorded_dynamic_ones_not():
+    """v4: Klipper's own range refusals ride the param entry, but only when
+    the limit is a LITERAL. `maxval=self.count` is a config value, so the
+    check would be a guess — the key must be absent, not defaulted."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(FAKE_TREE)["commands"]
+    state = cmds["GET_STATE"]["params"]
+    assert state["INDEX"]["minval"] == 0
+    assert "maxval" not in state["INDEX"], state["INDEX"]
+    assert state["SPEED"]["above"] == 0.0
+    assert state["OFFSET"] == {"type": "float", "required": False,
+                               "default": 0.0, "minval": -1, "maxval": 1}
+
+
+# ── same-file delegation (round 2) ─────────────────────────────────────────
+# A handler that hands its gcmd to another callable in the same file hides its
+# parameters there: `obj.method(gcmd)`, a constructor that reads in __init__,
+# or a module-level function. Params found this way are ALWAYS optional — a
+# helper may be invoked with a synthetic command, so claiming one is required
+# would produce a false "missing parameter" error.
+
+
+def test_fixture_same_file_method_delegation():
+    mod = _load_extractor()
+    cmds = mod.extract_registry(FAKE_TREE)["commands"]
+    assert cmds["DELEGATE_METHOD"]["params"] == {
+        "PROBE_SPEED": {"type": "float", "required": False, "above": 0.0},
+        "SAMPLES": {"type": "int", "required": False, "default": 1,
+                    "minval": 1},
+        "SAMPLES_RESULT": {"type": "str", "required": False,
+                           "default": "average"},
+    }
+
+
+def test_fixture_constructor_hand_off_reads_init():
+    mod = _load_extractor()
+    cmds = mod.extract_registry(FAKE_TREE)["commands"]
+    assert cmds["DELEGATE_CTOR"]["params"] == {
+        "MANUAL_SPEED": {"type": "float", "required": False,
+                         "default": 5.0}}
+
+
+def test_fixture_ambiguous_method_is_refused_not_guessed():
+    """`ambiguous` is defined by two classes: resolving it would need type
+    inference, and attributing the wrong class's reads fabricates params."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(FAKE_TREE)["commands"]
+    assert "params" not in cmds["DELEGATE_AMBIGUOUS"], \
+        cmds["DELEGATE_AMBIGUOUS"]
+
+
+def test_fixture_axis_prefix_names_expand_from_literal_constructors():
+    """'PREFIX_' + self.axis.upper(), with one object built per literal axis."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(FAKE_TREE)["commands"]
+    params = cmds["DELEGATE_AXIS"]["params"]
+    assert set(params) == {"SHAPER_KIND_X", "SHAPER_KIND_Y", "SHAPER_KIND_Z"}
+    assert all(p["type"] == "str" and p["required"] is False
+               for p in params.values())
+
+
+@pytest.mark.skipif(not REAL_KLIPPY.is_dir(), reason="reference klipper absent")
+def test_real_tree_probe_family_params_come_from_the_helpers():
+    """The probe family reads through helper objects; the registry must carry
+    those params, all optional (the helpers supply config-derived defaults)."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(REAL_KLIPPY)["commands"]
+    probe_expected = {"PROBE_SPEED", "LIFT_SPEED", "SAMPLES",
+                      "SAMPLE_RETRACT_DIST", "SAMPLES_TOLERANCE",
+                      "SAMPLES_TOLERANCE_RETRIES", "SAMPLES_RESULT"}
+    assert set(cmds["PROBE"]["params"]) == probe_expected
+    assert set(cmds["PROBE_CALIBRATE"]["params"]) == probe_expected | {"SPEED"}
+    for name in ("BED_TILT_CALIBRATE", "DELTA_CALIBRATE", "Z_TILT_ADJUST",
+                 "QUAD_GANTRY_LEVEL"):
+        params = cmds[name]["params"]
+        assert probe_expected <= set(params), (name, sorted(params))
+        assert not any(p["required"] for p in params.values()), name
+
+
+@pytest.mark.skipif(not REAL_KLIPPY.is_dir(), reason="reference klipper absent")
+def test_real_tree_input_shaper_has_the_z_variants():
+    """input_shaper builds AxisInputShaper('z'), so SHAPER_*_Z ARE read.
+    (An earlier inventory claimed otherwise and was wrong.)"""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(REAL_KLIPPY)["commands"]
+    params = cmds["SET_INPUT_SHAPER"]["params"]
+    for axis in ("X", "Y", "Z"):
+        assert f"SHAPER_TYPE_{axis}" in params
+        assert f"SHAPER_FREQ_{axis}" in params
+        assert f"DAMPING_RATIO_{axis}" in params
+
+
+def test_fixture_schema_version_bumped():
+    mod = _load_extractor()
+    assert mod.SCHEMA_VERSION == 4
+    registry = mod.extract_registry(FAKE_TREE)
+    assert registry["schema_version"] == 4
 
 
 def test_fixture_gcode_builtin_has_no_gate():
@@ -138,6 +399,40 @@ def test_real_tree_count_band():
     not (REAL_KLIPPY / "klippy").is_dir(),
     reason="reference/klipper tree not present",
 )
+def test_real_tree_optional_mux_key_when_registered_with_none():
+    """A mux key registered with a literal None VALUE is optional: gcode.py
+    _cmd_mux then reads it with a default. Missing it made the registry
+    demand EXTRUDER/DISPLAY and the simulator false-ERROR the canonical
+    single-extruder `SET_PRESSURE_ADVANCE ADVANCE=.05` and
+    `SET_DISPLAY_GROUP GROUP=printing`."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(REAL_KLIPPY)["commands"]
+    assert cmds["SET_PRESSURE_ADVANCE"]["params"]["EXTRUDER"]["required"] is False
+    assert cmds["SET_DISPLAY_GROUP"]["params"]["DISPLAY"]["required"] is False
+    # ...while a key only ever registered with a NAME stays required.
+    assert cmds["SET_FAN_SPEED"]["params"]["FAN"]["required"] is True
+    assert cmds["SYNC_EXTRUDER_MOTION"]["params"]["EXTRUDER"]["required"] is True
+
+
+@pytest.mark.skipif(
+    not (REAL_KLIPPY / "klippy").is_dir(),
+    reason="reference/klipper tree not present",
+)
+def test_real_tree_scans_extras_subpackages():
+    """extras/display/ is a subpackage; a non-recursive glob missed
+    SET_DISPLAY_GROUP and the save gate told users it "is not a Klipper
+    command"."""
+    mod = _load_extractor()
+    cmds = mod.extract_registry(REAL_KLIPPY)["commands"]
+    assert "SET_DISPLAY_GROUP" in cmds
+    assert cmds["SET_DISPLAY_GROUP"]["extra"] == "display"
+    assert cmds["SET_DISPLAY_GROUP"]["requires_sections"] == ["display"]
+
+
+@pytest.mark.skipif(
+    not (REAL_KLIPPY / "klippy").is_dir(),
+    reason="reference/klipper tree not present",
+)
 def test_real_tree_source_rev_recorded():
     mod = _load_extractor()
     registry = mod.extract_registry(REAL_KLIPPY)
@@ -173,7 +468,7 @@ def test_artifact_schema_shape():
     if not ARTIFACT.is_file():
         pytest.skip("artifact not generated yet")
     data = json.loads(ARTIFACT.read_text())
-    assert data["schema_version"] == 1
+    assert data["schema_version"] == 4
     assert isinstance(data["commands"], dict) and data["commands"]
     entry = data["commands"]["SET_LED"]
     assert set(entry) >= {"extra", "requires_sections", "requires_mode",

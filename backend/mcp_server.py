@@ -17,9 +17,11 @@ reference directory.
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
+import shlex
 import sys
 from collections import Counter
 from contextvars import ContextVar
@@ -1142,14 +1144,29 @@ class McpServer:
             {
                 "name": "validate_macro",
                 "description": (
-                    "Validate a gcode_macro against Klipper's Jinja rules. "
-                    "Checks Jinja syntax (balanced {% if %}/{% endif %} and "
-                    "{% for %}/{% endfor %} blocks), save/restore state pairing, "
-                    "temperature commands, macro structure, and potential problems. "
+                    "Validate a gcode_macro with the real Klipper Jinja "
+                    "engine (the same compiler that gates config saves): full "
+                    "template syntax checking with error line numbers, plus "
+                    "registry-driven required-parameter presence (e.g. SET_LED "
+                    "without LED= fails at runtime), plus a render "
+                    "simulation of the DEFAULT invocation: the body is "
+                    "rendered with printer state UNKNOWN, the section's "
+                    "params_* defaults, and its own variable_* entries as "
+                    "top-level template names (Klipper semantics), and the "
+                    "RENDERED commands are "
+                    "validated — catches Jinja that compiles fine but "
+                    "expands to an empty or unparseable value (Klipper: "
+                    "'unable to parse'). Also checks save/restore "
+                    "state pairing, temperature commands, macro structure, "
+                    "and potential problems. "
                     "When bed dimensions are supplied (bed_x/bed_y/max_z), also "
                     "checks moves for out-of-bounds targets and no-go zone hits "
                     "(including path crossings between consecutive moves). "
-                    "Does NOT simulate full machine state."
+                    "Never claims to know runtime values: unknown-state "
+                    "dependencies are reported as info, not errors. When "
+                    "runtime_error carries a pasted Klipper error, its "
+                    "quoted command is matched against this macro's "
+                    "rendered lines and source provenance is attached."
                 ),
                 "inputSchema": {
                     "type": "object",
@@ -1157,6 +1174,10 @@ class McpServer:
                         "macro_text": {
                             "type": "string",
                             "description": "The full macro text including the [gcode_macro ...] header through to the end of the gcode section",
+                        },
+                        "runtime_error": {
+                            "type": "string",
+                            "description": "Optional: a Klipper runtime error quoted verbatim (an \"Error on '<command>': ...\" line); its command frame is matched against the macro's rendered lines and the body-line provenance is reported",
                         },
                         "bed_x": {
                             "type": "number",
@@ -1193,6 +1214,139 @@ class McpServer:
                         },
                     },
                     "required": ["macro_text"],
+                },
+            },
+            {
+                "name": "simulate_macro",
+                "description": (
+                    "Simulate a gcode_macro on DECLARED invocations and "
+                    "return what Klipper would actually send to the "
+                    "command parser: the RENDERED command lines (body-line "
+                    "numbered), every finding, and which values stayed "
+                    "<unknown>. USE IT FOR RUNTIME-BEHAVIOR QUESTIONS: "
+                    "'will this macro fail when called like X?', 'what "
+                    "does it actually send to the printer?', 'what "
+                    "happens on a bare call with no S= before I answer "
+                    "the user'. Args: macro='NAME' resolves the section "
+                    "from the working state (staged edits win over disk) "
+                    "or this host's config files; macro_text='...' "
+                    "simulates a full [gcode_macro ...] section you wrote "
+                    "or are about to write (works before the edit "
+                    "exists). scenarios=[{name?, params?, "
+                    "printer_state?, variables?}] (max 8) — params are "
+                    "the invocation's command-line parameters (merged "
+                    "OVER the section's params_* defaults: a KWC "
+                    "convention, not a Klipper runtime feature); "
+                    "printer_state declares dotted Klipper status paths "
+                    "as real values ({'toolhead.homed_axes': 'xyz', "
+                    "'extruder.temperature': 205.0}) — everything you "
+                    "do not declare is <unknown>, never guessed; "
+                    "variables set a DECLARED variable_* value and must "
+                    "use the stripped name — Klipper publishes "
+                    "variable_fan_on as fan_on, so {'fan_on': 'True'} is "
+                    "the state, never {'variable_fan_on': ...}; a name "
+                    "the section does not declare is refused with a "
+                    "warning and NOT injected. For ONE invocation skip the scenarios "
+                    "wrapper: params / variables / printer_state at the "
+                    "TOP LEVEL of the call are that one invocation "
+                    "(scenarios is only for comparing independent "
+                    "states). runs=N models N CONSECUTIVE "
+                    "calls from one starting state, threading the macro's "
+                    "own SET_GCODE_VARIABLE writes between calls (Klipper "
+                    "renders a body before executing it, so a write shows "
+                    "up on the NEXT call) and printing a "
+                    "'Sequence: ... commands differ: YES/NO' verdict — use "
+                    "runs=2 for any 'does this toggle / does it remember' "
+                    "question, never two independent scenarios (they "
+                    "prove branches, not state). Every call also reports "
+                    "'Expected effect (commanded, not observed)': fan "
+                    "percent, LED colours, temperature TARGETS, console "
+                    "text — so you can check the outcome matches the "
+                    "intent, not merely that it renders. Motion commands "
+                    "additionally run through the 'Execution trace': the "
+                    "rendered lines execute over a simple motion model — "
+                    "position after every move annotated against the "
+                    "geometry the project DECLARES ([stepper] bounds, "
+                    "home/endstops), un-homed and soft-limit moves shown "
+                    "as REFUSED (a refused line aborts), heater/fan/LED "
+                    "commands showing their TARGET changing before \u2192 "
+                    "after (targets only \u2014 never a current "
+                    "temperature), and a 'Final "
+                    "state' line \u2014 read it before claiming a macro "
+                    "reaches where the user asked (front centre is not "
+                    "the centre). Heat lines say "
+                    "'Set' vs 'Set and Wait': M104/M140 return "
+                    "immediately, while M109/M190 BLOCK the macro until "
+                    "the target is reached — the wait works inside "
+                    "macros (it is Klipper's own cmd_M104 with wait=True; "
+                    "the 'M109 does not block in a macro' belief is "
+                    "Marlin lore), except Klipper skips the wait when "
+                    "S=0. Pure blocking waits (TEMPERATURE_WAIT, G4, "
+                    "M400) are listed too. Do NOT add a manual "
+                    "TEMPERATURE_WAIT after M109/M190 to 'make it wait'. "
+                    "Hardware names (FAN=, LED=, PIN=, SERVO=, HEATER=) "
+                    "are resolved "
+                    "against the sections THIS project declares: FAN= "
+                    "only takes [fan_generic] names (FAN=fan is refused at "
+                    "run time even when [fan] exists), and an unknown name "
+                    "returns Klipper's own 'not valid for' warning with a "
+                    "near-miss. With no scenarios "
+                    "the DEFAULT invocation renders (params_* defaults, "
+                    "printer state unknown; branches on undeclared "
+                    "state render BOTH ways) and NO invocation is "
+                    "declared: a param read without a params_* default is "
+                    "reported as param-dependent, never fabricated as an "
+                    "error — declare params (even {}) to grade one call. "
+                    "Renders longer than 200 lines per scenario are "
+                    "elided with the elided count stated (read the "
+                    "config for the full expansion). Limits it states on "
+                    "every "
+                    "result: it renders the TEMPLATE only — CALL macros "
+                    "are not recursed; the 'Execution trace' executes a "
+                    "simple motion model only (speeds and dwell do not "
+                    "run; heater/fan/LED report TARGETS while heating "
+                    "itself does not run; probing and other Z-movers "
+                    "make Z unresolved, "
+                    "they do not fake a position); heating and delays do "
+                    "not execute (waiting commands are reported as "
+                    "waiting under 'Expected effect', nothing pauses)."
+                ),
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "macro": {
+                            "type": "string",
+                            "description": "Existing macro name (bare NAME, or [gcode_macro NAME]) — working state first, then this host's config files",
+                        },
+                        "macro_text": {
+                            "type": "string",
+                            "description": "Full [gcode_macro NAME] section text (header + gcode: body) for macros that do not exist yet",
+                        },
+                        "scenarios": {
+                            "type": "array",
+                            "maxItems": 8,
+                            "description": "Invocations to simulate, each rendered independently: {name?: 'hotend-only home', params?: {'S': '215'}, printer_state?: {'toolhead.homed_axes': 'xyz'}, variables?: {'speed': '50'}}. Omit for one default-invocation render.",
+                            "items": {"type": "object"},
+                        },
+                        "params": {
+                            "type": "object",
+                            "description": "SHORTHAND for a single invocation: same as scenarios=[{params: {...}}]. Use params/variables/printer_state at the top level when you have ONE state to test; use scenarios=[...] only to compare independent states. Do not pass both.",
+                        },
+                        "printer_state": {
+                            "type": "object",
+                            "description": "SHORTHAND for a single invocation: dotted Klipper status paths as declared values, e.g. {'toolhead.homed_axes': 'xyz', 'extruder.temperature': 205.0}.",
+                        },
+                        "variables": {
+                            "type": "object",
+                            "description": "SHORTHAND for a single invocation: a DECLARED variable_* by its stripped name, e.g. {'fan_on': 'True'} for variable_fan_on.",
+                        },
+                        "runs": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 6,
+                            "description": "Consecutive calls from ONE starting state (max 6), threading this macro's own SET_GCODE_VARIABLE writes between them. Use runs=2 for toggle / remember-state / 'call it twice' questions: the result then reports each call and a 'commands differ: YES/NO' verdict, which independent scenarios cannot give you.",
+                        },
+                    },
                 },
             },
             {
@@ -1363,6 +1517,7 @@ class McpServer:
             "calculate_rotation_distance": self._handle_calculate_rotation_distance,
             "generate_macro_template": self._handle_generate_macro_template,
             "validate_macro": self._handle_validate_macro,
+            "simulate_macro": self._handle_simulate_macro,
             "validate_config_project": self._handle_validate_config_project,
             "list_connected_devices": self._handle_list_connected_devices,
             "get_section_schema": self._handle_get_section_schema,
@@ -3013,6 +3168,137 @@ class McpServer:
             f"Adjust park coordinates, temperatures, and purge distances to match your printer geometry."
         )
 
+    @staticmethod
+    def _extract_gcode_body(lines: list[str]) -> str | None:
+        """Extract the gcode body text from macro section lines.
+
+        Mirrors how the config parser (and Klipper's configparser) reads a
+        'gcode:' value: an inline value ('gcode: G28') is the whole body;
+        otherwise the body is the indented continuation lines following the
+        bare 'gcode:' key, ending at the first dedented non-blank line.
+        Returns None when there is no 'gcode:' key (a separate finding).
+        """
+        gcode_idx = None
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith("gcode:") or stripped.startswith("gcode :"):
+                gcode_idx = i
+                break
+        if gcode_idx is None:
+            return None
+        inline = lines[gcode_idx].split(":", 1)[1]
+        # PR #43 review (coverage): an inline value ('gcode: G28') does NOT
+        # end the option — configparser treats the indented lines that
+        # follow as MORE of the same value. Returning only the inline part
+        # checked a body shorter than the one Klipper actually runs (a
+        # defect on a continuation line was invisible).
+        parts: list[str] = [inline] if inline.strip() else []
+        for line in lines[gcode_idx + 1:]:
+            if not line.strip() or line[:1] in (" ", "\t"):
+                parts.append(line)
+            else:
+                break
+        return "\n".join(parts)
+
+    @staticmethod
+    def _gcode_command_registry() -> dict[str, dict]:
+        """Command map of the generated registry, loaded once per process.
+
+        Review T-9: a FAILED load is NOT cached. The artifact can appear
+        later (a generator run, a repaired checkout), and caching the
+        empty dict disabled every required-param check for the rest of the
+        process — the checks came back only on restart. Absence disables
+        the checks for THIS call and the next call retries.
+        """
+        cache = getattr(McpServer, "_gcode_registry_cache", None)
+        if cache is not None:
+            return cache
+        try:
+            from services.gcode_registry import load_registry
+            cache = load_registry().get("commands", {})
+        except Exception:
+            return {}  # absent/corrupt artifact: presence checks off, retry next call
+        McpServer._gcode_registry_cache = cache
+        return cache
+
+    @staticmethod
+    def _line_has_param(line: str, pname: str) -> bool:
+        """Does this command line carry ``pname``, in either grammar?
+
+        Extended (multi-char) params are spelled 'NAME=value'. A
+        traditional letter command has no '=' grammar at all: Klipper
+        splits the line with gcode.py's args_r ('([A-Z_]+|[A-Z*])'), so
+        'M26 S10' declares S='10', 'M26 S-5' declares S='-5' and
+        'M26 S.25' declares S='.25'. PR #43 review A-F8: the
+        NAME=-only test fabricated "missing required parameter 'S='" for
+        a line the printer accepts.
+
+        Review T-6: args_r runs over the WHOLE line, not per whitespace
+        token — 'M26 S 10' supplies S='10' and the printer runs it — so
+        presence is decided by the same splitter the render engine uses
+        at its A-01 fix (parser/macro_render.py), keeping both surfaces
+        identical. The command's own run pairs with the command text
+        ('M26' -> M:'26') and is not a parameter. A present-but-empty
+        value ('M26 S') supplies nothing and stays a missing-parameter
+        verdict, and an '='-prefixed value ('M104 S=0') is not a letter
+        value either — Klipper's letter grammar never consumes '='.
+        """
+        if re.search(rf"(?:^|\s){re.escape(pname)}=", line, re.IGNORECASE):
+            return True
+        if len(pname) != 1:
+            return False
+        from parser.macro_render import _KLIPPER_ARGS_R
+        letter = pname.upper()
+        parts = _KLIPPER_ARGS_R.split(line.upper())
+        # i == 1 is the command's own run; parameters start at i == 3.
+        for i in range(3, len(parts) - 1, 2):
+            if parts[i] != letter:
+                continue
+            value = parts[i + 1].strip()
+            if value and not value.startswith("="):
+                return True
+        return False
+
+    @classmethod
+    def _missing_required_params(cls, gcode_body: str | None):
+        """Yield (param_name, body_line_no, command_token) for registry
+        commands missing a required parameter."""
+        if not gcode_body:
+            return
+        commands = cls._gcode_command_registry()
+        if not commands:
+            return
+        from services.gcode_registry import (
+            _CMD_TOKEN_RE, _COMMENT_RE, NON_COMMAND_TOKENS,
+            _logical_lines, _strip_jinja_inline,
+        )
+        for line_no, raw in _logical_lines(gcode_body):
+            # Klipper strips '#' at config-read and ';' at run time; both
+            # happen before the line is parsed into command + params.
+            line = _COMMENT_RE.sub("", raw.split("#", 1)[0]).strip()
+            if not line or line.startswith("{%"):
+                continue
+            line = _strip_jinja_inline(line)
+            if not line.strip():
+                continue
+            token = line.split()[0].upper()
+            if not _CMD_TOKEN_RE.match(token) or token in NON_COMMAND_TOKENS:
+                continue
+            entry = commands.get(token)
+            if not entry:
+                continue
+            for pname, pdef in sorted(entry.get("params", {}).items()):
+                if not pdef.get("required"):
+                    continue
+                # Klipper param tokens are 'NAME=value' for extended
+                # params and the bare letter form ('S10') for traditional
+                # commands — both count as supplied.
+                if cls._line_has_param(line, pname):
+                    continue
+                yield pname, line_no, token
+
     def _handle_validate_macro(self, args: dict[str, Any]) -> str:
         """Validate a Klipper gcode_macro for common structural issues."""
         macro_text = args.get("macro_text", "")
@@ -3028,50 +3314,149 @@ class McpServer:
 
         issues: list[dict[str, str]] = []  # {severity, message}
         lines = macro_text.split("\n")
-        # Non-comment code lines used by several checks below so comments
-        # cannot trigger false positives.
-        code_lines = [ln.strip() for ln in lines
+        header_match = re.search(r"\[gcode_macro\s+(\S+)\]", macro_text)
+
+        # PR #43 B-02: every structural check below is BOUNDED to the
+        # macro's OWN section (header line to the next column-0 '[' line).
+        # Unbounded scans read a LATER section's 'gcode:' body and reported
+        # ITS lines as errors of the named macro (a false ERROR about text
+        # that macro does not contain — the model then 'fixes' the wrong
+        # section) and suppressed the named macro's true 'missing gcode:'
+        # warning. With no header at all there is no section to bound to;
+        # the header error below is the verdict and the legacy whole-text
+        # scope stays (mirrors the previous behavior for bare bodies).
+        if header_match:
+            header_line_idx = macro_text[:header_match.start()].count("\n")
+            section_lines: list[str] = []
+            for line in lines[header_line_idx + 1:]:
+                if line.startswith("["):
+                    break
+                section_lines.append(line)
+        else:
+            section_lines = list(lines)
+        # Non-comment code lines of THIS section, used by the checks below
+        # so comments cannot trigger false positives.
+        code_lines = [ln.strip() for ln in section_lines
                       if ln.strip() and not ln.strip().startswith("#")]
         code_text = "\n".join(code_lines)
 
         # ── 1. Check section header ──
-        header_match = re.search(r"\[gcode_macro\s+(\S+)\]", macro_text)
         if not header_match:
             issues.append({"severity": "error", "message": "Missing or invalid [gcode_macro <name>] header."})
         else:
             macro_name = header_match.group(1)
-            # Check gcode: key
-            for line in lines[1:]:
-                stripped = line.strip()
-                if stripped.startswith("gcode:") or stripped.startswith("gcode :"):
-                    break
-                if stripped and not stripped.startswith("#") and not stripped.startswith("description:"):
-                    issues.append({"severity": "warning", "message": f"Macro '{macro_name}' is missing the 'gcode:' key. A gcode_macro must have a 'gcode:' section with the commands to run."})
-                    break
+            # Check gcode: key — Klipper section keys sit at column 0.
+            # Collect the top-level keys of THIS section and test
+            # membership. The previous scan stopped at the first
+            # non-description line (false "missing" warning on the
+            # canonical variable_* toggle pattern — the chat model then
+            # loop-validated the same macro chasing the phantom, MACRO-12
+            # trace) and accepted an indented "gcode:" as a key because it
+            # stripped before checking (missed the real defect).
+            top_level_keys = set()
+            for line in section_lines:
+                key_match = re.match(r"([A-Za-z_][A-Za-z0-9_-]*)\s*:", line)
+                if key_match:
+                    top_level_keys.add(key_match.group(1).lower())
+            if "gcode" not in top_level_keys:
+                issues.append({"severity": "warning", "message": f"Macro '{macro_name}' is missing the 'gcode:' key. A gcode_macro must have a 'gcode:' section with the commands to run."})
 
-            # Check description:
-            has_description = any(line.strip().startswith("description:") for line in lines[1:10])
+            # Check description: — section-bounded, and only top-level keys
+            # of THIS macro count. The previous window scanned absolute
+            # lines 1..9 of the whole text, so any section above the macro
+            # (e.g. a [neopixel] block in a real printer.cfg) pushed the
+            # real `description:` out of range and reported a macro that
+            # HAS one as missing it (found 2026-11-15 while building the
+            # MACRO-15 fixture).
+            has_description = any(
+                re.match(r"description\s*:", ln, re.IGNORECASE)
+                for ln in section_lines)
             if not has_description:
                 issues.append({"severity": "info", "message": f"Macro '{macro_name}' is missing a 'description:' field. Adding one makes the macro self-documenting."})
 
-        # ── 2. Jinja2 template balance ──
-        # Check {% raw %}...{% endraw %} pairs
-        raw_starts = [i for i, line in enumerate(lines) if "{% raw %}" in line or "{%- raw -%}" in line or "{%raw%}" in line]
-        raw_ends = [i for i, line in enumerate(lines) if "{% endraw %}" in line or "{%- endraw -%}" in line or "{%endraw%}" in line]
-        if len(raw_starts) != len(raw_ends):
-            issues.append({"severity": "error", "message": f"Unbalanced {{% raw %}} / {{% endraw %}} blocks ({len(raw_starts)} starts, {len(raw_ends)} ends)."})
+        # ── 2. Jinja2 template compile (the real Klipper engine) ──
+        # Same env, same Klipper-style comment stripping, same compile entry
+        # as the project validator that gates save (parser/validator.py
+        # _validate_macro_jinja) — imported, not re-implemented, so this tool
+        # can never drift weaker than the save gate. Substring block-counting
+        # (raw/if/for) used to live here: it false-fired on '{% if %}' inside
+        # comments, missed the dashed '{%- if -%}' form, and could not see any
+        # other syntax error. The compiler subsumes all of it and adds
+        # message + body-relative line.
+        from parser.validator import _compile_macro_template, _strip_inline_comments
 
-        # Check {% if %}...{% endif %} pairs (rough count)
-        if_opens = sum(1 for line in lines if "{% if " in line or "{%if " in line)
-        if_closes = sum(1 for line in lines if "{% endif %}" in line or "{%endif%}" in line)
-        if if_opens != if_closes:
-            issues.append({"severity": "error", "message": f"Unbalanced {{% if %}} / {{% endif %}} blocks ({if_opens} opens, {if_closes} closes)."})
+        gcode_body = self._extract_gcode_body(section_lines)
+        if gcode_body is not None and gcode_body.strip():
+            compile_error = _compile_macro_template(_strip_inline_comments(gcode_body))
+            if compile_error is not None:
+                message, body_lineno = compile_error
+                issues.append({
+                    "severity": "error",
+                    "message": f"Jinja syntax error at gcode body line {body_lineno}: {message}",
+                })
 
-        # Check {% for %}...{% endfor %} pairs
-        for_opens = sum(1 for line in lines if "{% for " in line or "{%for " in line)
-        for_closes = sum(1 for line in lines if "{% endfor %}" in line or "{%endfor%}" in line)
-        if for_opens != for_closes:
-            issues.append({"severity": "error", "message": f"Unbalanced {{% for %}} / {{% endfor %}} blocks ({for_opens} opens, {for_closes} closes)."})
+        # ── 2b. Registry required-parameter presence ──
+        # Schema v2 registry params: commands whose params Klipper reads
+        # without a default (gcmd.get('NAME')) are required at runtime.
+        # Lines are scanned exactly like the gcode_registry command scanner
+        # (logical-line joining, comment + Jinja span stripping), so
+        # 'LED={led}' keeps its literal 'LED=' and is never flagged.
+        # Known false-positive class, accepted at warning severity: a command
+        # whose ENTIRE param set is Jinja-built ('SET_LED {led_args}').
+        for pname, line_no, token in self._missing_required_params(gcode_body):
+            issues.append({
+                "severity": "warning",
+                "message": (
+                    f"Line {line_no}: '{token}' is missing required parameter "
+                    f"'{pname}=' — Klipper raises an error when this line runs."
+                ),
+            })
+
+        # ── 2c. Render simulation (the W2 engine, same one the save-gate
+        # validation pass runs): render the body the way Klipper would on a
+        # DEFAULT invocation — printer state UNKNOWN, params from the
+        # section's params_* defaults, the macro's own variable_* entries
+        # as top-level template names (Klipper's cmd(): kwparams starts
+        # from self.variables), unknown conditions both arms — and
+        # validate the RENDERED commands. Catches Jinja that compiles fine
+        # but expands to an empty/unparseable value ('SET_LED ... RED=',
+        # Klipper: 'unable to parse'), which no compile-time check can see.
+        sim_params = {}
+        sim_variables = {}
+        if gcode_body is not None and gcode_body.strip():
+            from parser.macro_render import simulate_macro
+            # PR #43 B-02 same class: params_*/variable_* defaults come
+            # from THIS section only — a sibling macro's params_* must not
+            # answer this macro's reads.
+            for raw in section_lines:
+                stripped_raw = raw.strip()
+                if stripped_raw.startswith("params_"):
+                    key, _, value = stripped_raw.partition(":")
+                    sim_params[key.strip()[len("params_"):].lower()] = value.strip()
+                elif stripped_raw.lower().startswith("variable_"):
+                    key, _, value = stripped_raw.partition(":")
+                    sim_variables[key.strip()[len("variable_"):]] = value.strip()
+            simulation = simulate_macro(
+                # PR #43 review A-F4 + T-3: a params_*-derived dict is a
+                # DECLARED DEFAULT (the KWC simulation convention that
+                # documents the invocation a macro expects — NOT a Klipper
+                # runtime mechanism and NOT a caller invocation), so it
+                # rides as declared_defaults with params=None. Passing it as
+                # `params` made the derived dict authoritative: an undeclared
+                # bare-call read became a hard 'renders EMPTY' ERROR here
+                # while simulate_macro reported the same text as INFO
+                # param-dependent. An explicit empty default (params_X with
+                # no value) still rides every call and still errors.
+                gcode_body, None, variables=sim_variables,
+                declared_defaults=sim_params,
+                sections=self._sim_project_sections())
+            for finding in simulation.findings:
+                where = f"Line {finding.source_line}: " if finding.source_line else ""
+                issues.append({
+                    "severity": finding.severity,
+                    "message": f"{where}rendered default invocation — {finding.message}",
+                })
+
 
         # ── 3. Save/restore state pairing ──
         save_count = len(re.findall(r"SAVE_GCODE_STATE", code_text))
@@ -3261,12 +3646,100 @@ class McpServer:
                             break
 
 
+        # ── 2d. Runtime-error traceback (W3): when the caller pastes a
+        # Klipper runtime error alongside the macro, match its quoted
+        # command frame against this macro's rendered default invocation
+        # and attach source provenance. Literal-text extraction only —
+        # an observation channel, never a re-grade of the macro.
+        trace_section = ""
+        runtime_error = str(args.get("runtime_error") or "").strip()
+        if runtime_error and gcode_body is not None and gcode_body.strip():
+            from parser.macro_render import (MacroTraceSource,
+                                             extract_error_frames,
+                                             trace_runtime_error)
+            frames = extract_error_frames(runtime_error)
+            if frames:
+                hn = re.search(r"\[gcode_macro\s+(\S+)\]", macro_text)
+                matches = trace_runtime_error(frames, [MacroTraceSource(
+                    name=hn.group(1) if hn else "macro",
+                    body=gcode_body, params=sim_params,
+                    variables=sim_variables)])
+                if matches:
+                    trace_section = (
+                        "\n### Runtime error traceback\n"
+                        "The quoted error's command matches this macro "
+                        "rendered with default params:")
+                    for m in matches:
+                        trace_section += (
+                            f"\n- rendered from body line {m.source_line}: "
+                            f"`{m.source_text}`")
+                else:
+                    trace_section = (
+                        "\n### Runtime error traceback\n"
+                        "No line of this macro renders to the quoted error "
+                        "command — the failing line may live in another "
+                        "macro or come from a non-default invocation.")
+
         # ── 7. Build result ──
+        # Dedupe the same-line double report (review B-L6, 2026-11-14):
+        # the static 2b required-param pass and the post-render pass
+        # both fire on e.g. `G1 E5` (static: missing 'F='; rendered:
+        # G1 with E and no feedrate). The rendered finding is the
+        # value-aware one — keep it, drop the static twin. Only an
+        # EXACT same-command+param coincidence is dropped; everything
+        # else the static pass saw stays.
+        rendered = [i for i in issues
+                    if "rendered default invocation" in i["message"]]
+
+        _param_in_render = (
+            re.compile(r"Parameter (\w+) renders EMPTY"),
+            re.compile(r"Parameter (\w+)=\S* does not parse"),
+            re.compile(r"missing required parameter (\w+)"),
+        )
+
+        def _rendered_params(msg: str) -> set[str]:
+            return {g for rx in _param_in_render
+                    for m in rx.finditer(msg) for g in m.groups()}
+
+        def _quoted(msg: str) -> str:
+            q = re.search(r"'([^']*)'", msg)
+            return q.group(1) if q else ""
+
+        def _static_twin(issue: dict) -> bool:
+            msg = issue["message"]
+            # (a) legacy G1 no-feedrate static line check: drop it only
+            # when the post-render finding names the SAME rendered
+            # command (round-2 D4: a substring 'without feedrate' test
+            # dropped genuine static findings from other lines).
+            if msg.startswith("Extrusion move without feedrate:"):
+                want = _quoted(msg)
+                return bool(want) and any(
+                    _quoted(r["message"]) == want for r in rendered)
+            # (b) 2b required-param twin on the SAME line + command, and
+            # only when the rendered finding itself names that PARAM
+            # (substring tests let 'Z' match 'TESTZ' — round-2 D4).
+            m = re.match(r"Line (\d+): '(\S+)' is missing required "
+                         r"parameter '([A-Za-z0-9_]+)='", msg)
+            if not m:
+                return False
+            line, cmd, pname = m.groups()
+            for r in rendered:
+                rmsg = r["message"]
+                if not rmsg.startswith(f"Line {line}: "):
+                    continue
+                first = _quoted(rmsg).split()
+                if not first or first[0].upper() != cmd.upper():
+                    continue
+                if pname in _rendered_params(rmsg):
+                    return True
+            return False
+        issues[:] = [i for i in issues if not _static_twin(i)]
         if not issues:
             return (
                 f"## Macro validation: No issues found\n\n"
                 f"The macro passed all basic checks. For a full gcode simulation with machine state "
                 f"tracking, movement validation, and zone checking, use the Macro Designer in the app."
+                + trace_section
             )
 
         errors = [i for i in issues if i["severity"] == "error"]
@@ -3290,10 +3763,913 @@ class McpServer:
                 parts.append(f"- {i_item['message']}")
             parts.append("")
 
+        if trace_section:
+            parts.append(trace_section)
+            parts.append("")
+
         parts.append("---")
         parts.append("For a full gcode simulation with machine state tracking, use the Macro Designer in the app.")
 
         return "\n".join(parts)
+
+    # ── W4R.3: on-demand macro simulation (W4R decision D3) ──────────────
+
+    _SIM_SCENARIO_CAP = 8
+    _SIM_RUN_CAP = 6
+    # A-R1: emitted render lines per scenario (the engine's own work cap is
+    # 5000 lines PER path; 8 scenarios × 5000 lines is a 12 MB tool call).
+    # Elision is always announced on the face of the output.
+    _SIM_RENDER_LINE_EMIT_CAP = 200
+    _SIM_LIMITS = (
+        "Limits: this renders the TEMPLATE only — CALL macros are not "
+        "recursed. The 'Execution trace' runs the RENDERED lines over a "
+        "simple motion model: position, homing, and soft limits "
+        "execute; speeds, dwell, and heating progress do not; "
+        "heater/fan/LED lines update TARGETS as commanded (targets only, "
+        "never a current temperature); and probing or "
+        "other Z-movers make Z unresolved rather than fake a position "
+        "(waiting commands appear under 'Expected effect' as Set / Set "
+        "and Wait / blocking waits, but nothing actually pauses). "
+        "The effect list assumes no line errors: on the real printer a "
+        "refused line — bad parameter, unhomed move, out-of-range target, "
+        "cold extrude — ABORTS the macro; later lines never run "
+        "(virtual printer, 2026-11-15; motion trace, 2026-11-18). "
+        "Anything not declared in a scenario stayed <unknown>: never "
+        "present a rendered value as a printer fact.")
+
+    def _sim_extract_section(self, text: str, want_name: str | None = None):
+        """(full_header, gcode_body, params_defaults, variables) for the
+        first (or named) gcode_macro section in config TEXT, or None.
+        Same extraction as the validator harness / MacroTraceSource:
+        params_* / variable_* options, commented-out entries excluded,
+        the parser's phantom empty body line 1 dropped so numbering
+        matches the validate_macro facade."""
+        from parser.config_parser import parse_config
+        try:
+            cfg = parse_config(text, "sim.cfg")
+        except Exception:
+            return None
+        for sec in cfg.sections:
+            if sec.is_commented_out or sec.section_type != "gcode_macro":
+                continue
+            if want_name and sec.section_name.lower() != want_name.lower():
+                continue
+            body = (sec.get_value("gcode") or "").lstrip("\n")
+            if not body.strip():
+                continue
+            params = {
+                p.key[len("params_"):].lower(): p.value
+                for p in sec.params
+                if p.key.startswith("params_") and not p.is_commented_out
+            }
+            variables = {
+                p.key[len("variable_"):]: p.value
+                for p in sec.params
+                if p.key.lower().startswith("variable_")
+                and not p.is_commented_out
+            }
+            return sec.full_header, body, params, variables
+        return None
+
+    def _find_macro_owner(self, macro_name: str) -> Path | None:
+        """First config file on this host containing [gcode_macro
+        macro_name] (case-insensitive; same scan scope as
+        read_user_config's resolver). Duplicates are a user-config
+        problem — first hit wins and the output labels the file, so the
+        model can see which one it simulated."""
+        want = macro_name.lower()
+        for scan_dir in (LOCAL_CONFIGS_DIR, _system_config_path()):
+            if not scan_dir.is_dir():
+                continue
+            try:
+                files = sorted(p for p in scan_dir.rglob("*.cfg")
+                               if not is_backup_config_file(p.name))
+            except OSError:
+                continue
+            for path in files:
+                try:
+                    text = path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                if "[gcode_macro" not in text:
+                    continue
+                if self._sim_extract_section(text, want) is not None:
+                    return path
+        return None
+
+    def _sim_project_sections(self, diagnostics: dict | None = None) -> "frozenset[str] | None":
+        """Lowercased section headers of the project as chat sees it.
+
+        Working state first (staged/draft wins — the same precedence the
+        macro lookup uses), then this host's config files. Returns None
+        when absence is NOT decidable: an include we cannot resolve means
+        the hardware list may be incomplete, and an incomplete list must
+        never produce a "this hardware does not exist" verdict.
+
+        ``diagnostics`` (optional, filled in place) reports which inventory
+        the answer came from — output-truth: the host fallback describes
+        THIS HOST, not necessarily the project under discussion, and the
+        caller must say so.
+        """
+        _HDR = re.compile(r"^\[([^\]\n]+)\]\s*(?:#.*)?$", re.M)
+        _INC = re.compile(r"^\[include\s+([^\]\n]+)\]\s*(?:#.*)?$", re.M)
+        texts: list[tuple[str, str]] = []
+        names: set[str] = set()
+        overlay_names: set[str] = set()
+        overlay = _working_scan_items()
+        overlay_mode = bool(overlay)
+        if overlay:
+            for path, content in overlay:
+                texts.append((path, content))
+                names.add(str(path).replace("\\", "/").rsplit("/", 1)[-1].lower())
+            overlay_names = set(names)
+            disk_names = self._sim_disk_config_names()
+            names |= disk_names
+        else:
+            for scan_dir in (LOCAL_CONFIGS_DIR, _system_config_path()):
+                if not scan_dir.is_dir():
+                    continue
+                try:
+                    files = sorted(p for p in scan_dir.rglob("*.cfg")
+                                   if not is_backup_config_file(p.name))
+                except OSError:
+                    continue
+                for path in files:
+                    try:
+                        texts.append((path.name, path.read_text(
+                            encoding="utf-8", errors="replace")))
+                    except OSError:
+                        return None
+                    names.add(path.name.lower())
+        if not texts:
+            return None
+        if diagnostics is not None:
+            diagnostics["inventory"] = "overlay" if overlay_mode else "host"
+        sections: set[str] = set()
+        # PR #43 B-05: in overlay mode the `sections` inventory is built
+        # ONLY from overlay texts, so "a file we can see" means an overlay
+        # file — NOT the disk-name union. An include resolving to a file
+        # that exists only on disk (the mirror skips files over the 512 KB
+        # per-file cap, so a big project yields exactly this partial
+        # overlay) contributes no sections; judging hardware absence from
+        # that is a verdict from an incomplete inventory, which this
+        # function's own law forbids. Disk-only include → undecidable.
+        visible_names = overlay_names if overlay_mode else names
+        for _name, text in texts:
+            for target in _INC.findall(text):
+                for piece in re.split(r"[\s,]+", target.strip()):
+                    base = piece.replace("\\", "/").rsplit("/", 1)[-1].lower()
+                    if base and base not in visible_names:
+                        return None   # include we cannot see → undecidable
+            for header in _HDR.findall(text):
+                header = header.strip()
+                if header.lower().startswith("include "):
+                    continue
+                if header:
+                    sections.add(" ".join(header.lower().split()))
+        return frozenset(sections)
+
+    def _sim_motion_profile(self, diagnostics: dict | None = None):
+        """Machine bounds/home for the Execution trace, from the same
+        working-state-first scan the sim already uses. Partial or
+        missing stepper data yields a silent profile — the trace would
+        rather stay quiet than invent geometry.
+
+        ``diagnostics`` (optional, filled in place) reports WHOSE geometry
+        this is: ``inventory`` is 'overlay' when the project/overlay
+        sections supplied the texts, 'host' when the working overlay was
+        empty and THIS HOST's config mirror did, and 'none' when nothing
+        was readable. Output-truth: a host-derived profile makes the trace
+        refuse moves against the host machine's limits, and the caller
+        must say so (review T-2).
+        """
+        from parser.macro_trace import derive_motion_profile
+        texts: list[str] = []
+        overlay = _working_scan_items()
+        if overlay:
+            texts = [content for _path, content in overlay]
+        else:
+            for scan_dir in (LOCAL_CONFIGS_DIR, _system_config_path()):
+                if not scan_dir.is_dir():
+                    continue
+                try:
+                    files = sorted(p for p in scan_dir.rglob("*.cfg")
+                                   if not is_backup_config_file(p.name))
+                except OSError:
+                    continue
+                for path in files:
+                    try:
+                        texts.append(path.read_text(encoding="utf-8",
+                                                    errors="replace"))
+                    except OSError:
+                        pass
+        if diagnostics is not None:
+            diagnostics["inventory"] = ("overlay" if overlay
+                                        else "host" if texts
+                                        else "none")
+        return derive_motion_profile(texts)
+
+    @staticmethod
+    def _sim_disk_config_names() -> set[str]:
+        """Bare filenames of this host's config files, for include
+        resolution when the working state is the project of record."""
+        names: set[str] = set()
+        for scan_dir in (LOCAL_CONFIGS_DIR, _system_config_path()):
+            if not scan_dir.is_dir():
+                continue
+            try:
+                for path in scan_dir.rglob("*.cfg"):
+                    if not is_backup_config_file(path.name):
+                        names.add(path.name.lower())
+            except OSError:
+                continue
+        return names
+
+    def _handle_simulate_macro(self, args: dict[str, Any]) -> str:
+        """Render a macro on declared invocations and report what
+        Klipper would execute (W4R pivot: warnings/info live HERE, not
+        in ambient validation — decision D3)."""
+        from parser.macro_render import simulate_macro
+        from parser.macro_trace import seed_state
+
+        source = None
+        origin = ""
+        macro_text = str(args.get("macro_text") or "").strip()
+        macro_name = str(args.get("macro") or "").strip()
+        if macro_text:
+            fenced = re.findall(
+                r"```(?:cfg|yaml|toml|text)?\s*\n(.*?)```", macro_text,
+                re.DOTALL)
+            if fenced:
+                macro_text = "\n\n".join(b.strip() for b in fenced)
+            source = self._sim_extract_section(macro_text)
+            if source is None:
+                return ("macro_text must contain a complete "
+                        "[gcode_macro NAME] section — header plus its "
+                        "gcode: body — not a bare body fragment.\n\n"
+                        + self._SIM_LIMITS)
+            origin = "provided text"
+        elif macro_name:
+            bare = macro_name.strip().strip("[]")
+            if bare.lower().startswith("gcode_macro"):
+                bare = bare.split(None, 1)[-1] if " " in bare else bare
+            # Working state FIRST: staged/draft content shadows disk
+            # (same precedence every chat read tool uses).
+            for path, content in _working_scan_items():
+                source = self._sim_extract_section(content, bare)
+                if source is not None:
+                    origin = f"working state ({path})"
+                    break
+            if source is None:
+                resolved = self._find_macro_owner(bare)
+                if resolved is not None:
+                    try:
+                        text = resolved.read_text(encoding="utf-8",
+                                                  errors="replace")
+                    except OSError:
+                        text = ""
+                    source = self._sim_extract_section(text, bare)
+                    if source is not None:
+                        origin = f"disk ({resolved.name})"
+            if source is None:
+                return (f"No [gcode_macro {bare}] found in the working "
+                        "state or the config files on this host. Paste the "
+                        "section with macro_text='...' to simulate it "
+                        "anyway.\n\n" + self._SIM_LIMITS)
+        else:
+            return ("Provide macro='NAME' for an existing macro, or "
+                    "macro_text='[gcode_macro ...] ...' for one that does "
+                    "not exist yet.\n\n" + self._SIM_LIMITS)
+
+        sec_header, body, default_params, default_vars = source
+
+        scenarios_raw = args.get("scenarios")
+        if isinstance(scenarios_raw, str):
+            # Tool channels stringify arrays; recover before refusing.
+            try:
+                scenarios_raw = json.loads(scenarios_raw)
+            except (json.JSONDecodeError, TypeError):
+                return ("scenarios must be a JSON array of "
+                        "{name?, params?, printer_state?, variables?}.\n\n"
+                        + self._SIM_LIMITS)
+        truncated = False
+        # Single-invocation shorthand: params / variables / printer_state
+        # at the top level ARE the one implicit scenario, so the common
+        # call is {"macro": "X", "params": {...}} instead of a one-element
+        # scenarios array (measured: 4 of the 5 SIMTOOL questions need
+        # exactly one invocation per call).
+        shorthand = {k: args.get(k)
+                     for k in ("params", "variables", "printer_state")
+                     if args.get(k) is not None}
+        if shorthand:
+            bad_short = next((k for k, v in shorthand.items()
+                              if not isinstance(v, dict)), None)
+            if bad_short is not None:
+                return (f"Top-level '{bad_short}' must be an object of "
+                        "key→value, e.g. params={'S': '215'}.\n\n"
+                        + self._SIM_LIMITS)
+            if scenarios_raw is not None:
+                return ("Pass either scenarios=[...] or the top-level "
+                        "params/variables/printer_state shorthand, not "
+                        "both — one invocation shape per call.\n\n"
+                        + self._SIM_LIMITS)
+            scenarios_raw = [shorthand]
+        if scenarios_raw is None:
+            scenarios_raw = [{}]
+        if not isinstance(scenarios_raw, list) or not scenarios_raw:
+            return ("scenarios must be a non-empty list (or omitted).\n\n"
+                    + self._SIM_LIMITS)
+        if len(scenarios_raw) > self._SIM_SCENARIO_CAP:
+            scenarios_raw = scenarios_raw[:self._SIM_SCENARIO_CAP]
+            truncated = True
+
+        # ── sequence mode (runs) ─────────────────────────────────────
+        # `runs: N` = N CONSECUTIVE invocations from one starting state,
+        # threading the macro's own SET_GCODE_VARIABLE writes between
+        # them. Klipper renders a body completely BEFORE executing any of
+        # its lines, so a write can only affect the NEXT call — exactly
+        # what this models. State is discarded when the call returns: the
+        # tool models a config, not a live printer, and every result must
+        # be reproducible from its own declared assumptions.
+        runs = 1
+        runs_raw = args.get("runs")
+        if runs_raw not in (None, ""):
+            try:
+                runs = int(runs_raw)
+            except (TypeError, ValueError):
+                return (f"runs must be an integer 1..{self._SIM_RUN_CAP} — "
+                        "how many times in a row the macro is called.\n\n"
+                        + self._SIM_LIMITS)
+            runs = max(1, min(runs, self._SIM_RUN_CAP))
+        if runs > 1 and len(scenarios_raw) > 1:
+            return ("runs models CONSECUTIVE calls from ONE starting state — "
+                    "pass a single scenario (or none) with runs=N. Use "
+                    "scenarios for independent states.\n\n" + self._SIM_LIMITS)
+
+        out: list[str] = [
+            f"# simulate_macro {sec_header}",
+            f"Source: {origin}. Body renders per scenario; line numbers "
+            "are gcode-body lines.",
+        ]
+        # Hardware the loaded project declares, for mux-target verdicts:
+        # None = the files cannot decide absence (unresolved include) and
+        # the engine stays silent rather than inventing a missing fan.
+        sections_diag: dict[str, str] = {}
+        sections = self._sim_project_sections(sections_diag)
+        # Geometry provenance (review T-2): with an empty working overlay
+        # the motion profile is derived from THIS HOST's config mirror, so
+        # a REFUSED/soft-limit verdict below describes the host machine —
+        # the trace header must name the source instead of claiming 'the
+        # machine geometry the project declares'.
+        profile_diag: dict[str, str] = {}
+        profile = self._sim_motion_profile(profile_diag)
+        host_geometry = (profile_diag.get("inventory") == "host"
+                         and bool(getattr(profile, "bounds", None)))
+        if sections and sections_diag.get("inventory") == "host":
+            # PR #43 review output-truth (sections fallback): with an empty
+            # working overlay the inventory came from THIS HOST's config
+            # mirror, so a "no [fan_generic] section exists" verdict
+            # describes the host machine — say so instead of letting it
+            # read as the project's. The same fallback feeds the motion
+            # profile, so motion/geometry verdicts are in scope too.
+            out.append(
+                "NOTE: hardware sections came from THIS HOST's config mirror "
+                "— the conversation working overlay was empty, so "
+                "section/mux-target and motion/geometry verdicts below "
+                "describe the host config, not necessarily the project "
+                "under discussion.")
+        if truncated:
+            out.append(f"(scenario list truncated to the cap of "
+                       f"{self._SIM_SCENARIO_CAP})")
+        # PR #43 review A-F4 (no-invocation law): a params dict is an
+        # AUTHORITATIVE invocation — an empty one makes every undeclared
+        # {params.X} read render EMPTY, which is a real Klipper error only
+        # when a call was actually declared. The caller declared one when
+        # it passed the params key itself (top-level shorthand, even {}) or
+        # listed scenarios (each scenario IS a Klipper call, and Klipper
+        # always passes a params dict on a call). Otherwise params=None:
+        # reads without a declared value stay param-dependent INFO, never
+        # fabricated errors.
+        invocation_declared = (args.get("scenarios") is not None
+                               or args.get("params") is not None)
+        for idx, sc in enumerate(scenarios_raw, 1):
+            name = f"scenario-{idx}"
+            if not isinstance(sc, dict):
+                # Name the offending field for the model instead of
+                # silently simulating {} (review B-L3, 2026-11-14).
+                out.append("")
+                out.append(f"## {name}")
+                out.append(f"ERROR: scenario #{idx} is {type(sc).__name__}, "
+                           "expected an object with optional keys "
+                           "name / params / printer_state / variables — "
+                           "this scenario was NOT simulated.")
+                continue
+            name = str(sc.get("name") or name)
+            # Members must be mappings: a stringified `params` used to
+            # raise AttributeError inside the dispatcher (round-2 D3).
+            bad = next(((f, type(sc.get(f)).__name__) for f in
+                        ("params", "printer_state", "variables")
+                        if sc.get(f) is not None
+                        and not isinstance(sc.get(f), dict)), None)
+            if bad is not None:
+                out.append("")
+                out.append(f"## {name}")
+                out.append(f"ERROR: scenario #{idx} field '{bad[0]}' is "
+                           f"{bad[1]}, expected an object of key→value — "
+                           "this scenario was NOT simulated.")
+                continue
+            params = dict(default_params)
+            for k, v in (sc.get("params") or {}).items():
+                params[str(k).lower()] = str(v)
+            # A scenario variable can only exist at run time if the
+            # SECTION declares it: Klipper publishes `variable_<name>` as
+            # `<name>` (gcode_macro.py strips the prefix; option names are
+            # lowercased at config parse) and SET_GCODE_VARIABLE refuses
+            # any name outside that set. Injecting anything else renders a
+            # fiction — the SIMTOOL-02 r7 leg "passed" a dead toggle by
+            # declaring `variable_fan_on` against a macro that declared
+            # `fan_on`, and the phantom made both branches look distinct.
+            # Skip the name, keep the render Klipper-true, and say so.
+            declared_vars = {str(k).lower() for k in default_vars}
+            variables = dict(default_vars)
+            undeclared_vars: list[str] = []
+            for k, v in (sc.get("variables") or {}).items():
+                key = str(k)
+                if key.lower() not in declared_vars:
+                    undeclared_vars.append(key)
+                    continue
+                variables[key] = str(v)
+            state = {str(k): v for k, v in (sc.get("printer_state") or {}).items()}
+
+            seq_vars = dict(variables)
+            cmd_sets: list[tuple[str, ...]] = []
+            motion_seed = None
+            # A-F4: the section's params_* defaults are the KWC simulation
+            # convention for documenting the invocation defaults a macro
+            # EXPECTS — not a Klipper runtime mechanism (klippy's
+            # gcode_macro reads only gcode/description/rename_existing/
+            # variable_*; an unknown params_X option is a config ERROR, per
+            # validator.py) — and never a caller declaration. They ride
+            # every simulated call as declared_defaults; `params` becomes
+            # the INVOCATION — None when the caller declared none.
+            call_params = params if invocation_declared else None
+            for run_no in range(1, runs + 1):
+                label = name if runs == 1 else f"call {run_no}"
+                result = simulate_macro(body, call_params,
+                                        variables=seq_vars,
+                                        printer_state=state,
+                                        declared_defaults=default_params,
+                                        sections=sections)
+                # Motion threading: consecutive calls share a printer, so
+                # a resolved trace's final position seeds the next call —
+                # same law as the SET_GCODE_VARIABLE threading below.
+                if motion_seed is not None:
+                    seed_for_call = motion_seed
+                    trace_note = f"carried from call {run_no - 1}"
+                else:
+                    seed_for_call = seed_state(state)[0]
+                    trace_note = ""
+                tr = self._sim_emit_call(
+                    out, label, result, call_params,
+                    state if runs == 1 else None,
+                    seq_vars if runs > 1 else None,
+                    undeclared_vars, declared_vars,
+                    profile, seed_for_call, trace_note,
+                    host_geometry=host_geometry)
+                if tr is not None:
+                    motion_seed = tr.state
+                if runs == 1:
+                    continue
+                cmd_sets.append(self._sim_command_set(result))
+                if run_no == runs:
+                    break
+                # Thread this call's own variable writes into the next one.
+                if result.variants_rendered > 1:
+                    out.append(f"  → state NOT threaded: call {run_no} "
+                               f"rendered {result.variants_rendered} paths "
+                               "(state ambiguous) — later calls start from "
+                               "the same state.")
+                    break
+                changes, notes = self._sim_thread_variables(
+                    result, sec_header, declared_vars, seq_vars)
+                for note in notes:
+                    out.append(f"  - INFO: {note}")
+                if changes:
+                    out.append(f"  → state after call {run_no}: "
+                               + ", ".join(changes))
+                else:
+                    out.append(f"  → state after call {run_no}: unchanged — "
+                               "no SET_GCODE_VARIABLE for this macro "
+                               "rendered, so a repeat call takes the same "
+                               "branch.")
+            if len(cmd_sets) >= 2:
+                out.append("")
+                if cmd_sets[0] != cmd_sets[1]:
+                    changed = max(len(set(cmd_sets[1]) - set(cmd_sets[0])),
+                                  len(set(cmd_sets[0]) - set(cmd_sets[1])), 1)
+                    out.append("Sequence: call 2 vs call 1 -> commands "
+                               f"differ: YES ({changed} line(s) changed)")
+                else:
+                    out.append("Sequence: call 2 vs call 1 -> commands "
+                               "differ: NO (identical command set — the "
+                               "macro does not persist state, so every call "
+                               "takes the same branch)")
+
+        out.append("")
+        out.append("---")
+        out.append(self._SIM_LIMITS)
+        return "\n".join(out)
+
+    # ── simulate_macro: emission + sequence-state helpers ─────────
+
+    @staticmethod
+    def _sim_emit_call(out: list[str], label: str, result,
+                       params: "dict | None", printer_state: dict | None,
+                       variables: dict | None,
+                       undeclared_vars: list[str],
+                       declared_vars: set[str],
+                       profile=None, motion_seed=None,
+                       trace_note: str = "", host_geometry: bool = False):
+        """One invocation's block: declared assumption → rendered lines →
+        execution trace → expected effect → findings. Returns the
+        motion-trace result (None when no trace ran) so sequence mode can
+        thread position into the next call."""
+        out.append("")
+        out.append(f"## {label}")
+        if params is None:
+            # A-F4: never echo a params dict the caller did not declare.
+            declared = ["params: none (no invocation declared — reads "
+                        "without a declared value stay param-dependent)"]
+        else:
+            declared = [f"params: {params}"]
+        if printer_state:
+            declared.append(f"printer_state: {printer_state}")
+        if variables:
+            declared.append(f"variables: {variables}")
+        out.append("Declared: " + "; ".join(declared))
+
+        out.append(f"Rendered ({result.variants_rendered} path(s)):")
+        if result.rendered:
+            # A-R1: the engine caps work at 5000 lines PER path; eight
+            # scenarios therefore stream megabytes in one tool result. Cap
+            # the EMITTED lines here and announce the elision — never a
+            # silent truncation (F17 doctrine).
+            shown = result.rendered[:McpServer._SIM_RENDER_LINE_EMIT_CAP]
+            for line in shown:
+                ln = f"  L{line.source_line}" if line.source_line else "  L?"
+                tag = f" [path {line.variant}]" \
+                    if result.variants_rendered > 1 else ""
+                out.append(f"{ln}: {line.text}{tag}")
+            elided = len(result.rendered) - len(shown)
+            if elided:
+                out.append(
+                    f"  ... {elided} further lines elided from "
+                    f"{len(result.rendered)} rendered — read the config for "
+                    "the full expansion")
+        elif any(f.code == "macro_jinja_syntax" for f in result.findings):
+            out.append("  (nothing rendered — the body did NOT compile; "
+                       "see the Jinja error below)")
+        else:
+            out.append("  (0 commands on this invocation — the body "
+                       "compiled but produced no gcode: a branch reached "
+                       "an empty arm, or it only assigns variables)")
+
+        tr = None
+        if result.rendered:
+            if result.variants_rendered > 1:
+                out.append(f"Execution trace skipped: "
+                           f"{result.variants_rendered} render paths — no "
+                           "single execution sequence (same law as "
+                           "sequence threading).")
+            elif profile is not None:
+                from parser.macro_trace import seed_state, trace_motion
+                tr = trace_motion(
+                    [(line.source_line, line.text)
+                     for line in result.rendered],
+                    profile,
+                    motion_seed if motion_seed is not None
+                    else seed_state({})[0],
+                    start_note=trace_note)
+                # T-2: name the geometry's SOURCE. A host-mirror profile
+                # makes the limit verdicts below describe this machine, not
+                # the project's — "the geometry the project declares" would
+                # be a false claim about someone else's printer.
+                geometry = (
+                    "geometry from THIS HOST's config mirror — the "
+                    "project/overlay declares no stepper sections; limits "
+                    "may differ from the project's machine"
+                    if host_geometry else
+                    "moves execute over the rendered lines against the "
+                    "machine geometry the project declares")
+                trace_tail = ("heater/fan/LED lines report TARGETS as "
+                              "commanded; feedrate, waiting, and heating "
+                              "progress are not modelled")
+                out.append(f"Execution trace ({geometry}; {trace_tail}):")
+                # T-8: one trace line per rendered command means a long
+                # body streams hundreds of lines. Cap the EMITTED detail
+                # and announce the elision — same doctrine as the rendered
+                # list above (the trace itself still ran every line).
+                shown = tr.lines[:McpServer._SIM_RENDER_LINE_EMIT_CAP]
+                out.extend("  " + t for t in shown)
+                elided = len(tr.lines) - len(shown)
+                if elided:
+                    elision = (f"  ... {elided} further trace lines elided "
+                               f"from {len(tr.lines)} traced — the trace ran "
+                               "every rendered line; only the emitted detail "
+                               "is capped")
+                    out.append(elision)
+
+        if result.variants_rendered > 1:
+            # PR #43 review output-truth (effect path tags): the rendered
+            # lines above are path-tagged; untagged effects would read the
+            # alternative arms as ONE commanded sequence. Tag every effect
+            # with the path it comes from — the same convention.
+            by_path: dict[int, list[str]] = {}
+            for line in result.rendered:
+                by_path.setdefault(line.variant, []).append(line.text)
+            effects: list[str] = []
+            for vi in sorted(by_path):
+                for eff in McpServer._sim_effect_lines(by_path[vi]):
+                    effects.append(f"{eff} [path {vi}]")
+        else:
+            effects = McpServer._sim_effect_lines(
+                [line.text for line in result.rendered])
+        if effects:
+            out.append("Expected effect (commanded, not observed):")
+            if result.variants_rendered > 1:
+                out.append("  (paths are alternatives — only ONE executes; "
+                           "each effect is tagged with the path that "
+                           "commands it)")
+            for eff in effects[:8]:
+                out.append(f"  - {eff}")
+            if len(effects) > 8:
+                out.append(f"  - … {len(effects) - 8} more")
+
+        scenario_warnings = [
+            (f"  - WARNING: scenario variable '{k}' is not declared by "
+             "this macro — "
+             "Klipper publishes variable_<name> to the "
+             "template as <name>"
+             + (f" (declared here: {', '.join(sorted(declared_vars))})"
+                if declared_vars
+                else " (this macro declares no variable_* entries)")
+             + f", so '{k}' is undefined at run time and was NOT "
+               "injected. Declare the stripped name (no 'variable_' "
+               "prefix) to simulate that state.")
+            for k in undeclared_vars
+        ]
+        if result.findings or scenario_warnings:
+            out.append("Findings:")
+            out.extend(scenario_warnings)
+            for f in sorted(result.findings,
+                            key=lambda x: (x.severity != "error",
+                                           x.severity != "warning")):
+                loc = f" (L{f.source_line})" if f.source_line else ""
+                out.append(f"  - {f.severity.upper()}: {f.message}{loc}")
+        else:
+            out.append("Findings: none — every rendered command "
+                       "matched the registry shape on this "
+                       "invocation.")
+        if any(f.code == "gcode_registry_unavailable"
+               for f in result.findings):
+            # A-F9: the positive verdict above must NEVER be what this
+            # call says when the registry never loaded — the shape checks
+            # did not run, so "no shape findings" is not a clean render.
+            out.append("Shape checks SKIPPED - command registry unavailable: "
+                       "the rendered commands were NOT verified against the "
+                       "command registry (absence of shape findings here is "
+                       "not evidence of a clean render).")
+        if result.unknown_accesses:
+            out.append("Still <unknown> (NOT simulated, never "
+                       "guessed): "
+                       + ", ".join(sorted(set(result.unknown_accesses))))
+        return tr
+
+    @staticmethod
+    def _sim_command_set(result) -> tuple[str, ...]:
+        """Identity of one invocation for the sequence verdict: source
+        line + whitespace-collapsed command. Line numbers count — the
+        same command from a different branch is a different path."""
+        return tuple(
+            f"L{line.source_line}:" + " ".join(line.text.split())
+            for line in result.rendered)
+
+    @staticmethod
+    def _sim_thread_variables(result, sec_header: str,
+                              declared_vars: set[str],
+                              state: dict) -> tuple[list[str], list[str]]:
+        """Apply this call's own SET_GCODE_VARIABLE writes to `state`.
+
+        Klipper mutates the section's variable dict at RUN time
+        (gcode_macro.py cmd_SET_GCODE_VARIABLE) and the body is fully
+        rendered first, so a write visible here only affects the NEXT
+        invocation. Only writes that Klipper would actually accept are
+        followed: MACRO names this section, VARIABLE is one it declares,
+        VALUE parses as a Python literal. Everything else is reported,
+        never guessed."""
+        names = sec_header.split()
+        macro = (names[-1] if names else "").strip("[]").lower()
+        changes: list[str] = []
+        notes: list[str] = []
+        for line in result.rendered:
+            text = line.text.split(";")[0].strip()
+            if not text.upper().startswith("SET_GCODE_VARIABLE"):
+                continue
+            params: dict[str, str] = {}
+            try:
+                lexer = shlex.shlex(text.split(None, 1)[1], posix=True)
+                lexer.whitespace_split = True
+                for arg in lexer:
+                    key, sep, val = arg.partition("=")
+                    if sep:
+                        params[key.upper()] = val
+            except (ValueError, IndexError):
+                notes.append("a rendered SET_GCODE_VARIABLE could not be "
+                             "parsed — state not followed")
+                continue
+            target = (params.get("MACRO") or "").strip().strip('"').lower()
+            var = (params.get("VARIABLE") or "").strip().strip('"')
+            val = params.get("VALUE")
+            if target != macro:
+                continue
+            if var.lower() not in declared_vars:
+                notes.append(f"SET_GCODE_VARIABLE writes undeclared "
+                             f"variable '{var}' — Klipper rejects that "
+                             "name; state not followed")
+                continue
+            if val is None:
+                notes.append(f"SET_GCODE_VARIABLE {var} rendered without "
+                             "VALUE — state not followed")
+                continue
+            try:
+                ast.literal_eval(val)
+            except (ValueError, SyntaxError):
+                notes.append(f"SET_GCODE_VARIABLE {var} VALUE={val} is not "
+                             "a literal — state not followed")
+                continue
+            state[var.lower()] = val
+            changes.append(f"{var} := {val}")
+        return changes, notes
+
+    @staticmethod
+    def _sim_heat_effect(kind: str, waits_requested: bool,
+                         s: str | None) -> str:
+        """`Set` vs `Set and Wait` — the distinction the dogfood showed was
+        invisible (M104/M140 and M109/M190 rendered as identical target
+        lines, so the simulation could not show that M109 ALREADY blocks:
+        cmd_M109 is cmd_M104 with wait=True, kinematics/extruder.py:277,
+        in macros too — the 'M109 does not wait in a macro' belief is
+        Marlin lore). The one real skip: set_temperature waits only
+        `if wait and temp` (heaters.py:365), so S=0 never blocks; a
+        non-literal S cannot decide it, and the effect line says so."""
+        shown = s if s is not None else "?"
+        if not waits_requested:
+            return (f"{kind} target {shown}C — Set (does not wait; "
+                    "heating not simulated)")
+        numeric = None
+        if s is not None:
+            try:
+                numeric = float(s)
+            except ValueError:
+                numeric = None
+        if numeric is not None and numeric <= 0:
+            return (f"{kind} target {shown}C — Set (NO wait even though "
+                    "this is the waiting command: Klipper skips the wait "
+                    "when S=0 — heaters.py 'if wait and temp')")
+        if numeric is None:
+            return (f"{kind} target {shown}C — Set and Wait, UNLESS the "
+                    "target resolves to 0 (Klipper skips the wait when "
+                    "S=0; the rendered S is not a literal number, so "
+                    "this cannot be decided here)")
+        return (f"{kind} target {shown}C — Set and Wait (the macro "
+                "BLOCKS here until reached; heating itself not "
+                "simulated)")
+
+    @staticmethod
+    def _sim_wait_effect(detail: str, caveat: str) -> str:
+        return (f"Wait (blocking) — {detail} ({caveat}; the wait itself "
+                "is not simulated)")
+
+    @staticmethod
+    def _sim_effect_lines(lines: list[str]) -> list[str]:
+        """What the rendered commands ASK the printer to do.
+
+        Not an execution model: no clamps (max_power / off_below /
+        kick_start), no motion, no heating. It exists so the caller can
+        check "did I get what I wanted" (fan 100%, LED red, hotend
+        target 200C) instead of only "did it render without errors"."""
+        out: list[str] = []
+
+        def as_pct_of_255(raw: str) -> str:
+            try:
+                return f"{float(raw) / 2.55:.0f}%"
+            except ValueError:
+                return "an unknown speed"
+
+        def as_pct_of_one(raw: str) -> str:
+            try:
+                return f"{float(raw) * 100:.0f}%"
+            except ValueError:
+                return "an unknown speed"
+
+        for raw in lines:
+            text = raw.split(";")[0].strip()
+            if not text:
+                continue
+            token = text.split()[0].upper()
+            from parser.macro_render import _is_traditional_gcode
+            traditional = _is_traditional_gcode(token)
+            params: dict[str, str] = {}
+            try:
+                lexer = shlex.shlex(text[len(token):], posix=True)
+                lexer.whitespace_split = True
+                for arg in lexer:
+                    if traditional:
+                        # Klipper's letter-param grammar never consumes
+                        # '=' (gcode.py args_r split) — 'S=220' is value
+                        # '=220' and the real printer raises "unable to
+                        # parse =220" (live-proven .164). Mirror that:
+                        # '=' stays IN the value.
+                        if len(arg) > 1 and arg[0].isalpha():
+                            params[arg[0].upper()] = arg[1:]
+                        continue
+                    key, sep, val = arg.partition("=")
+                    if sep:
+                        params[key.upper()] = val
+                    elif len(key) > 1 and key[0].isalpha():
+                        # Traditional letter params: M104 S200, M106 S255.
+                        params[key[0].upper()] = key[1:]
+            except ValueError:
+                continue
+            if traditional:
+                bad = next(((k, v) for k, v in params.items()
+                            if "=" in v), None)
+                if bad is not None:
+                    k, v = bad
+                    fix = (f" — write {k}{v[1:]} not {k}={v[1:]}"
+                           if v.startswith("=") else
+                           " — there is no 'KEY=value' grammar here; "
+                           "spell the plain letter form (G4 P<ms>, "
+                           "M109 S<temp>)")
+                    out.append(
+                        f"{token} WILL BE REJECTED on the real printer — "
+                        f"letter-style commands take no '=' in "
+                        f"parameters (Klipper raises 'unable to parse "
+                        f"{v}'){fix} — no effect happens")
+                    continue
+            if token == "M106":
+                out.append("part-cooling fan ([fan]) commanded to "
+                           + as_pct_of_255(params.get("S", "255")))
+            elif token == "M107":
+                out.append("part-cooling fan ([fan]) commanded to 0%")
+            elif token == "SET_FAN_SPEED" and params.get("FAN"):
+                out.append(f"fan '{params['FAN']}' commanded to "
+                           + as_pct_of_one(params.get("SPEED", "0")))
+            elif token in ("M104", "M109"):
+                out.append(McpServer._sim_heat_effect(
+                    "hotend", token == "M109", params.get("S")))
+            elif token in ("M140", "M190"):
+                out.append(McpServer._sim_heat_effect(
+                    "bed", token == "M190", params.get("S")))
+            elif token == "TEMPERATURE_WAIT":
+                bounds = ", ".join(
+                    f"{k}={params[k]}"
+                    for k in ("MINIMUM", "MAXIMUM") if k in params)
+                out.append(McpServer._sim_wait_effect(
+                    f"sensor '{params.get('SENSOR', '?')}' reaches "
+                    + (bounds or "the commanded bound"),
+                    "pure wait — sets no target"))
+            elif token == "G4":
+                dwell = (f"{params['P']} ms" if "P" in params
+                         else f"{params['P1']} s" if "P1" in params
+                         else "an unknown duration")
+                out.append(McpServer._sim_wait_effect(
+                    f"dwell {dwell}", "timed delay"))
+            elif token == "M400":
+                out.append(McpServer._sim_wait_effect(
+                    "all queued moves complete before the next command",
+                    "motion queue sync"))
+            elif token == "SET_LED" and params.get("LED"):
+                cols = " ".join(f"{c}={params[c]}"
+                                for c in ("RED", "GREEN", "BLUE", "WHITE")
+                                if c in params)
+                out.append(f"LED '{params['LED']}' set to "
+                           f"{cols or '(no colour params)'}")
+            elif token == "SET_GCODE_VARIABLE" and params.get("VARIABLE"):
+                out.append(f"per-macro state {params['VARIABLE']} := "
+                           f"{params.get('VALUE', '?')} (applies to the "
+                           "NEXT call)")
+            elif token == "M117":
+                rest = text.split(None, 1)
+                if len(rest) > 1:
+                    # NOT a console line (virtual printer 2026-11-15): M117
+                    # sets display_status.message and prints nothing to
+                    # gcode_store — RESPOND below is the console one.
+                    out.append(f"display message: {rest[1]}")
+            elif token == "RESPOND" and params.get("MSG"):
+                out.append("console message: "
+                           + params["MSG"].strip('"'))
+        return out
 
     # ── Printer Memory ────────────────────────────────────────────
 

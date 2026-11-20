@@ -128,6 +128,24 @@ class ValidationResult:
             "errors": [e.to_dict() for e in self.errors],
         }
 
+    def human_to_dict(self) -> dict:
+        """D1 boundary in ONE place: render-simulation advisories
+        (warning/info severity, sim-origin codes) never reach a
+        human-facing validation response, and the has_errors/
+        has_warnings flags are RECOMPUTED from the filtered list
+        (review B-L2/C-F5: to_dict() would ship flags counting the
+        filtered-out advisories — stale dots in the issues panel).
+        Sim ERRORS pass: a broken rendered shape is a true defect."""
+        from parser.macro_render import is_sim_advisory
+        d = self.to_dict()
+        kept = [e for e in d["errors"]
+                if not is_sim_advisory(e.get("code", ""),
+                                       e.get("severity", ""))]
+        d["errors"] = kept
+        d["has_errors"] = any(e["severity"] == "error" for e in kept)
+        d["has_warnings"] = any(e["severity"] == "warning" for e in kept)
+        return d
+
 
 @dataclass(frozen=True)
 class PinUse:
@@ -892,6 +910,73 @@ def _validate_macro_jinja(section: ConfigSection, result: ValidationResult) -> N
     ))
 
 
+def _simulate_macro_render(section: ConfigSection, result: ValidationResult) -> None:
+    """W2 render-simulation pass (parser/macro_render.py): render the body
+    with the section's DECLARED state (params_* defaults ride every
+    Klipper invocation; no single invocation is claimed) and validate the
+    RENDERED commands.
+
+    Catches what both compile-time layers provably cannot: Jinja that
+    compiles fine but EXPANDS to garbage — the field repro
+    ``SET_LED ... RED={params.red}`` rendering ``RED=`` (Klipper:
+    'unable to parse') is a deterministic error here, while reads of
+    UNDECLARED params are param-dependent info (3.1) and unknown
+    printer-state values stay info (the simulation never claims to know
+    runtime values). Findings rebase body-relative lines onto the gcode
+    param line, same convention as _validate_macro_jinja. Runs only with
+    the registry gate on (gcode_registry=True): the command verdicts are
+    registry-driven, and the flag doubles as the documented vacuity lever.
+    """
+    from parser.macro_render import simulate_macro
+
+    body_param = _TEMPLATE_SECTION_BODIES[section.section_type]
+    gcode_param = section.get_param(body_param)
+    if gcode_param is None or not gcode_param.value.strip():
+        return
+    params = {
+        param.key[len("params_"):].lower(): param.value
+        for param in section.params
+        if param.key.startswith("params_") and not param.is_commented_out
+    }
+    # The macro's own variable_* entries are template context on every
+    # invocation (gcode_macro.py cmd(): kwparams = dict(self.variables))
+    # — omitting them false-flags the canonical variable-based toggle.
+    variables = {
+        param.key[len("variable_"):]: param.value
+        for param in section.params
+        if param.key.lower().startswith("variable_")
+        and not param.is_commented_out
+    }
+    simulation = None
+    try:
+        simulation = simulate_macro(gcode_param.value,
+                                    declared_defaults=params,
+                                    variables=variables)
+    except Exception:  # noqa: BLE001 — round-2 D7
+        # Belt-and-braces: the engine contains its own render failures,
+        # but a future non-Exception path (or a bug in splicing/alias/
+        # shape helpers) must never take down validation of every other
+        # section. Loud, never silent.
+        logging.getLogger(__name__).warning(
+            "render simulation crashed for %s — section skipped",
+            section.full_header, exc_info=True)
+    if simulation is None:
+        return
+    for finding in simulation.findings:
+        # The body value carries a leading newline (everything after
+        # 'gcode:'), so value line 1 is the remainder of the key line:
+        # file line = key line + value line - 1.
+        result.errors.append(ValidationError(
+            severity=finding.severity,
+            section=section.full_header,
+            param=body_param,
+            message=finding.message,
+            line_number=(gcode_param.line_number + finding.source_line - 1
+                         if finding.source_line else gcode_param.line_number),
+            code=finding.code,
+        ))
+
+
 def _validate_neopixel_color_order(section: ConfigSection, result: ValidationResult) -> None:
     """Validate neopixel.color_order entries are permutations of RGB or RGBW.
 
@@ -1097,6 +1182,12 @@ def validate_config(config: ConfigFile, *, gcode_registry: bool = True) -> Valid
         if sec_type in _MACRO_TEMPLATE_SECTIONS or sec_type in _DISPLAY_TEMPLATE_SECTIONS:
             _validate_macro_jinja(section, result)
 
+        # W2 render simulation for the gcode family only: display
+        # templates render UI text, not commands, so rendered-command
+        # verdicts do not apply to them.
+        if gcode_registry and sec_type in _MACRO_TEMPLATE_SECTIONS:
+            _simulate_macro_render(section, result)
+
         # neopixel.color_order: each entry must be a permutation of RGB or
         # RGBW (extras/neopixel.py:33-37). It is a per-chain list, not a plain
         # enum, so it gets a dedicated check.
@@ -1272,17 +1363,32 @@ def validate_config(config: ConfigFile, *, gcode_registry: bool = True) -> Valid
                     and param_coverage.has_record(sec_type)
                     and not param_coverage.param_known(sec_type, param.key.lower())
                 )
+                _unknown_msg = (
+                    f"Unknown parameter '{param.key}' for section [{sec_type}] "
+                    "— Klipper reads no such option here and will refuse to "
+                    "start with this config."
+                    if grounded else
+                    f"Unknown parameter '{param.key}' for section [{sec_type}]."
+                )
+                if param.key.lower().startswith("params_"):
+                    # `params_<NAME>` is NOT a Klipper macro option
+                    # (gcode_macro reads only gcode / description /
+                    # rename_existing / variable_*; an unread option is a
+                    # load error at configfile.py:440). The ERROR is
+                    # correct parity — the message must teach the two
+                    # spellings that actually work.
+                    _pname = param.key[len("params_"):].upper()
+                    _unknown_msg += (
+                        f" '{param.key}' is not a Klipper parameter-default "
+                        f"option: read the value as {{params.{_pname}}} and "
+                        "give it a fallback with |default('...') in the "
+                        "gcode body, or have the caller pass it "
+                        f"({_pname}=...).")
                 result.errors.append(ValidationError(
                     severity="error" if grounded else "warning",
                     section=section.full_header,
                     param=param.key,
-                    message=(
-                        f"Unknown parameter '{param.key}' for section [{sec_type}] "
-                        "— Klipper reads no such option here and will refuse to "
-                        "start with this config."
-                        if grounded else
-                        f"Unknown parameter '{param.key}' for section [{sec_type}]."
-                    ),
+                    message=_unknown_msg,
                     line_number=param.line_number,
                     code="unknown_param",
                 ))

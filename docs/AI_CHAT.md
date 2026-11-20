@@ -38,6 +38,7 @@ hoping the model is careful.
    - [Failed firmware restart analysis](#failed-firmware-restart-analysis)
 4. [Design](#design)
    - [Request lifecycle](#request-lifecycle)
+   - [Conversation work-ledger](#conversation-work-ledger)
    - [Tools](#tools)
    - [Edit operations](#edit-operations)
    - [Validation and kickbacks](#validation-and-kickbacks)
@@ -45,7 +46,7 @@ hoping the model is careful.
    - [Honesty guards](#honesty-guards)
 5. [Appendix](#appendix)
    - [Accuracy testing](#accuracy-testing)
-   - [Question bank](#question-bank-111-questions)
+   - [Question bank](#question-bank-130-questions)
    - [Current model results](#current-model-results)
    - [Known failure families](#known-failure-families)
    - [Running the harness](#running-the-harness)
@@ -205,6 +206,29 @@ which replies with the minimal fix staged as a normal reviewable edit.
 5. **You review after the fact.** Keep/Undo as described above; Save remains
    the only path to disk.
 
+### Conversation work-ledger
+
+Conversation replay to the model is deliberately lean prose: tool results
+evaporate at request end, and the Keep/Undo review is a silent splice — so
+on a follow-up turn the model cannot see what it staged last turn, whether
+an edit failed, or whether **you undid it**. The work-ledger closes exactly
+that gap.
+
+- **Derived on the client, sent as data.** Per section: `staged` (awaiting
+  your review), `kept`, `undone by user`, `FAILED` (with the harness's own
+  error line), plus `read` markers for sections earlier turns grounded on.
+  The kept/undone verdicts exist nowhere else — the backend never sees
+  review decisions and this record is the only channel.
+- **One trailing system message, verbatim.** The backend renders the rows
+  and re-delivers them without interpretation — decisions stay client-side
+  by the review law; the ledger is a record, never a verdict the server
+  forms. Names and verdicts only: no payloads, and the raw tool results are
+  deliberately **not** replayed (staleness poisoning + window cost — config
+  state is re-derivable live via the read tools).
+- **Bounded:** ~10 turns, oldest dropped; the edit-skill body pairs it with
+  the rule "re-read a touched section immediately before editing it in a
+  later turn."
+
 ### Tools
 
 The model sees three layers: MCP tools, one chat-layer tool, and the
@@ -238,16 +262,44 @@ guesses parameters:
 | `validate_klipper_config` | Validate a draft snippet you haven't staged. |
 | `validate_config_project` | Validate your whole loaded project (the save-gate engine). |
 | `validate_macro` | Check a `gcode_macro` against Klipper's Jinja rules — unbalanced blocks, unknown commands, missing homing. |
+| `simulate_macro` | Run a macro on invocations **you declare** (params, printer-state, variables — up to 8 scenarios) and read the exact commands Klipper would execute, with each line's provenance. `runs=N` renders N **consecutive** calls from one starting state, threading the macro's own `SET_GCODE_VARIABLE` writes from one call to the next and printing a `commands differ: YES/NO` verdict — the only way to check that a toggle actually toggles. Each call also reports `Expected effect (commanded, not observed)`: fan percent, LED colours, temperature **targets**, console text. The grounding tool for runtime-behavior questions: it renders the template only — called macros are not recursed, and motion, waits, and heating produce no observable output — so a scenario run is never a printer fact. For a single invocation, `params` / `variables` / `printer_state` may sit at the top level of the call instead of being wrapped in `scenarios`; `scenarios` is for comparing independent states. A body that does not compile under Klipper's delimiters is an **error** finding, not a silent empty render — expressions are single-brace `{value}`, so `{{ value }}` is reported by name. |
 | `generate_macro_template` | Structured templates (PAUSE/PRINT_START/etc.) with include-flags. |
 | `detect_board` | Identify the likely board from a config snippet or pin layout. |
 | `calculate_rotation_distance` | Steps/mm math for belts and leadscrews. |
 | `list_connected_devices` / `get_klippy_status` | Real serial/CAN devices; live Klipper state (ready / startup error / shutdown) — used before edits that depend on whether the printer is even up. |
+
+**Gate visibility — law A (2026-11-14)**: render-simulation findings are
+consumed on three tiers. Passive surfaces (the human validation feed, the
+native load path, the AI delta gate) show only STATICALLY-DECIDABLE
+findings — ones that follow from the file text and hold under EVERY
+invocation: empty/garbage declared `params_*` defaults, broken literal
+lines. Reads of undeclared params are PARAM-DEPENDENT (info) without a
+declared invocation, never verdicts. The delta gate additionally admits
+sim findings only at error severity. The full finding set exists only
+where simulation was explicitly requested — `validate_macro`'s full
+report and `simulate_macro`'s per-scenario output, each labeled with the
+declared invocation. Nothing in this tier can move a printer: the
+simulator renders templates and never sends gcode.
 
 **The edit layer is skill-gated**: write tools are advertised only after the
 model calls `load_skill(name='config-editing')`, which injects the edit
 protocol, op shapes, and laws for that session. The gate is model-triggered
 by design — no UI toggle, no intent classifier — and a matching
 `printer-memory` skill guards profile writes.
+
+**Skills are knowledge-class too** (W4-R2): `macro-authoring` carries Klipper
+macro authoring law — the read → `validate_macro` → `simulate_macro` workflow,
+Jinja/params rendering rules (only what the engines enforce), M109/M190
+set-and-wait semantics, enforced pitfalls, and named doc pointers. It loads
+on demand for macro drafting/fixing/explanation and NEVER unlocks write
+tools — `config-editing` is the sole gate-flipper (`_SKILL_REGISTRY` is the
+single source for skill facts). Multiple skills coexist in one conversation:
+the request carries `loadedSkills` (names whose `load_skill` actually ran,
+derived client-side from the stored tool trace), and loaded STICKY skills —
+the edit law and `macro-authoring` — re-inject their bodies at the trailing
+seam so they survive the lean replay; `printer-memory` is one-shot by
+design. Activation is bank-graded by the `SKILL-M` family: macro requests
+must load the skill, plain param edits must not pay for it.
 
 ### Edit operations
 
@@ -401,12 +453,18 @@ Design laws earned the hard way:
   (`scripts/validate_criteria_offline.py`) before the bank changes, and only
   the touched qids need re-running.
 
-### Question bank (111 questions)
+### Question bank (130 questions)
+
+<!-- C-04 (PR #43): this header used to say 119 while main() concatenated
+families adding ~11 more. The count here is the qid set main() builds
+WITHOUT --include-memory (130; 133 with the 3 MEMORY rows added), re-derived
+from the builders whenever a family changes. -->
 
 | Family | Coverage |
 | :--- | :--- |
 | Core Tools (Q01–Q20, minus retired Q09) | Docs lookups, example configs, validation, calculations, edit routing. |
-| Macro Authoring (MACRO-01..07, 09–11, minus retired MACRO-08) | Authoring, editing, fixing, templates, `validate_macro` checks. |
+| Macro Authoring (MACRO-01..07, 09–17, minus retired MACRO-08) | Authoring, editing, fixing, templates, `validate_macro` checks; 12–14 add the runtime render class (a macro that compiles but renders a broken command); 15–17 grade the as-written verdict on out-of-range / contradictory / boundary-rule params (16 = at-least-one-bound rule, 17 = literal values beyond `SET_LED`'s bound, re-cut without the set-tag reinterpretation hatch). |
+| Sim Tool (SIMTOOL-01..08) | `simulate_macro` tool-use compliance: runtime claims grounded in declared runs; SIMTOOL-02 grades tool-trace artifacts for a state-persisting toggle (`SET_GCODE_VARIABLE MACRO=…` in the staged body) plus a `runs` sequence whose second call renders differently — independent scenarios prove branches, never the transition; guarded-param regression pin; review-only negative control; 06 = parameter out-of-range at run time (declared runs, not template reasoning); 07 = negative control, config-derived limits are not invented; 08 = honesty, a `CALL`ed macro is not expanded. |
 | Trident Configs (TRIDENT-01..16) | Real Trident configs (read/edit/delete/manage, cross-file edits, the `idle_timeout` multi-LED case). Read-only context. |
 | Harness (HARNESS-01, 03, minus retired HARNESS-02) | Self-checks: criteria that must reject a wrong staged artifact. |
 | Edit Cases (MINIDIFF-01..04) | Staged-edit cases: `level_bed` adaptive mode, `max_accel`, pin edits, `pressure_advance`. |
@@ -414,7 +472,7 @@ Design laws earned the hard way:
 | Setup (SETUP-01..05) | New sections with no existing home (firmware_retraction, idle_timeout, arcs, save_variables, respond). |
 | Live Routing (LIVE-01..07) | Routes between project validator / draft validation / devices / schema / reference / Klippy status. |
 | Edit Tools (EDIT-01..06) | `config_edit` param edit, anchored gcode edit, cross-file pin edit, new file + `add_include`, pure Q&A stages nothing, `!` polarity kept on uncomment. |
-| Skill Gate (SKILL-01..05, N01..04) | `config-editing` must load before any write path — and must NOT load on Q&A, how-to, pasted-text validation, or discuss-a-draft. |
+| Skill Gate (SKILL-01..05, N01..04, M01..M05) | `config-editing` must load before any write path — and must NOT load on Q&A, how-to, pasted-text validation, or discuss-a-draft. M01..M05 grade `macro-authoring` activation: macro drafts and macro fixes load it, macro Q&A does not. |
 | Tool Coverage (TOOL-01..08) | One case per shipped tool. |
 | Rename (RENAME-01..03) | Header keeps the `gcode_macro` family; stale callers repaired. |
 | Comment (COMMENT-01..06) | Whole-section comment/uncomment, single-line via `patch_section`, rename+uncomment combo. |
@@ -424,8 +482,11 @@ Design laws earned the hard way:
 
 ### Current model results
 
-All rows are the **current** bank (111 questions) at temperature 1.0, native
-protocol, edit tools on, against the same backend. Ranges span the full-bank
+All rows were measured on the **111-question** bank of that date at
+temperature 1.0, native protocol, edit tools on, against the same
+backend (the bank now stands at 130 default / 133 with the MEMORY rows
+after the MACRO-15..17, SIMTOOL-06..08 and SKILL-M additions of
+2026-11-14..17). Ranges span the full-bank
 runs closest to the shipped build; single-run deltas inside the range are
 noise, not ranking.
 

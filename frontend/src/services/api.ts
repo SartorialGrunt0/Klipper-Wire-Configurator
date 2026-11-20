@@ -7,6 +7,7 @@ import type {
   SectionSchema,
 } from '../types/config';
 import type { ChatReference } from '../utils/chatReferences';
+import type { WorkLedgerRow } from '../utils/chatWorkLedger';
 
 const BASE_URL = (import.meta.env.VITE_API_URL as string | undefined) || '/api';
 
@@ -910,7 +911,39 @@ export interface AiChatRequest {
    * ordinary turn's prompt is byte-identical to before this feature).
    */
   context_references?: ChatReference[];
+  /**
+   * Names of the skills whose load_skill actually ran in this conversation
+   * (derived client-side from the stored tool trace — utils/chatSkillTrace).
+   * Conversation-scoped sticky armament (W4-R2 generalization of the old
+   * editSkillLoaded boolean): names whose load_skill actually ran —
+   * 'config-editing' starts the backend gate open and re-injects the edit
+   * body with the write tools (atomic armament); sticky knowledge skills
+   * ('macro-authoring') re-inject their body at the trailing seam and
+   * NEVER arm write tools. Harness `editSkill` (backend-only field) still
+   * wins for the edit gate.
+   */
+  loadedSkills?: string[];
+  /**
+   * Conversation work-ledger (W6): per-section outcomes of the model's
+   * write tools — staged rows plus kept/undone decisions plus failures
+   * with the harness's own error line (derived client-side from the
+   * stored tool trace + workLedgerStore, utils/chatWorkLedger). Names +
+   * verdicts only — no payloads. The backend renders it verbatim as one
+   * trailing system message and never interprets it (review law).
+   * Omitted when empty.
+   */
+  workLedger?: WorkLedgerRow[];
+  /**
+   * W8 pre-flight: the model's REAL context window already probed this
+   * session via /ai/context-window (contextPressureStore). Lets the
+   * backend refuse an obviously-over prompt without a provider round-trip
+   * (llama.cpp hangs instead of erroring there). Omitted/null when the
+   * probe hasn't settled or doesn't match this exact apiUrl+model — the
+   * backend then never blocks (W7 law: silence over guessing).
+   */
+  knownContextWindow?: number | null;
 }
+
 
 export interface AiToolCallDetail {
   name: string;
@@ -921,12 +954,44 @@ export interface AiToolCallDetail {
   outputTruncated?: boolean;
 }
 
+/** One provider call inside a /ai/chat run (W7 keeps promptTokens for pressure). */
+export interface AiChatUsageEvent {
+  promptTokens?: number | null;
+  completionTokens: number;
+  reasoningTokens?: number | null;
+  finishReason: string;
+  /** Which leg of the loop produced it ('initial', 'steer-N', 'retry', …). */
+  context?: string;
+}
+
+export interface AiChatUsage {
+  completionTokens: number;
+  reasoningTokens: number;
+  ackReprompts?: number;
+  /** Prompt tokens of the LAST provider call that reported usage. */
+  lastPromptTokens?: number | null;
+  events: AiChatUsageEvent[];
+  truncated: boolean;
+}
+
 export interface AiChatResponse {
   content?: string;
   error?: string;
+  /**
+   * W8: structured error kind on the /ai/chat error payload. Currently
+   * only 'context_overflow' (pre-flight refusal or mapped provider
+   * context-length error) — the banner keys on THIS, never on the prose.
+   */
+  errorCode?: string;
   stopped?: boolean;
   mcpToolTurns?: number;
   mcpToolNames?: string[];
+  /**
+   * Per-request provider usage (W7): `lastPromptTokens` is the prompt size
+   * of the LATEST provider call in the loop — the context-pressure signal.
+   * Null/undefined whenever a provider omits usage.prompt_tokens.
+   */
+  usage?: AiChatUsage;
   /** Executed tool calls with arguments + output, in execution order. */
   toolCalls?: AiToolCallDetail[];
   /** Number of empty-response re-prompts the backend performed before content. */
@@ -1040,9 +1105,51 @@ export class ChatStoppedError extends Error {
   }
 }
 
+/**
+ * W8: thrown when the backend answers the structured context-overflow
+ * error (its own pre-flight refusal, or a provider context-length error it
+ * mapped). Typed so ChatDialog can show the actionable overflow banner
+ * instead of the generic red error text — the two share no prose matching.
+ */
+export class AiContextOverflowError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AiContextOverflowError';
+  }
+}
+
 export interface ListModelsResponse {
   models: string[];
   error?: string;
+}
+
+/** Credentials shape for the W7 context-window probe (same as /ai/models). */
+export interface ContextWindowCredentials {
+  apiKey: string
+  apiUrl: string;
+  /** Provider id ('openai-compatible', 'chatgpt', …) — the backend validates. */
+  apiProvider: string;
+  model: string;
+}
+
+/**
+ * Probe the provider for the model's REAL context window (router n_ctx,
+ * not the model card). Best-effort by contract: any failure answers null
+ * and the caller stays silent rather than guessing a budget.
+ */
+export async function fetchContextWindow(creds: ContextWindowCredentials): Promise<number | null> {
+  try {
+    const res = await fetch('/ai/context-window', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(creds),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { contextWindow?: number | null };
+    return typeof data.contextWindow === 'number' && data.contextWindow > 0 ? data.contextWindow : null;
+  } catch {
+    return null;
+  }
 }
 
 /**

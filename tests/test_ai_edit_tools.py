@@ -2538,11 +2538,18 @@ def _led_cfg():
 
 
 def _set_color_call(cmd='SET_LED_COLOR'):
+    # SET_LED_COLOR keeps the LED args; the corrected SET_PIN must carry
+    # ITS required params (PIN/VALUE) — the W2 render simulation flags
+    # 'SET_PIN LED=...' as a definite runtime failure (PIN is required),
+    # and this test is about the unknown-command round-trip, not about
+    # staging an invalid line.
+    tail = ('LED=led_strip RED=1 GREEN=0 BLUE=0' if cmd == 'SET_LED_COLOR'
+            else 'PIN=led_strip VALUE=1')
     return {'name': 'config_edit', 'arguments': {
         'file': 'printer.cfg', 'op': 'patch_section',
         'section': 'gcode_macro PARK',
         'old_text': '    G91',
-        'new_text': f'    G91\n    {cmd} LED=led_strip RED=1 GREEN=0 BLUE=0'}}
+        'new_text': f'    G91\n    {cmd} {tail}'}}
 
 
 def test_unknown_gcode_kicked_back_once_not_staged():

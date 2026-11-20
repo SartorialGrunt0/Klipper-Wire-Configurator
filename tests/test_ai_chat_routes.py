@@ -788,6 +788,143 @@ def test_list_models_route_graceful_error(monkeypatch):
     assert 'Failed to list models' in body['error']
 
 
+# ── /ai/context-window probe (W7) ──────────────────────────────────────
+#
+# The advisory must hinge on the ROUTER's real budget (n_ctx), never the
+# model card's advertised window. These pin the resolution order on the
+# exact /v1/models shapes llama.cpp (single + multi-model router) and the
+# cloud providers emit.
+
+
+def _context_window(entry: dict, model: str = 'test-model'):
+    return ai_routes._resolve_context_window(entry, model)
+
+
+def test_context_window_prefers_props_n_ctx():
+    # Newer llama.cpp exposes props.n_ctx on the /v1/models entry.
+    window, source = _context_window(
+        {'id': 'test-model', 'props': {'n_ctx': 32768}, 'loaded_context_window': 8192},
+        'test-model',
+    )
+    assert (window, source) == (32768, 'props.n_ctx')
+
+
+def test_context_window_falls_back_to_loaded_context_window():
+    window, source = _context_window(
+        {'id': 'test-model', 'loaded_context_window': 8192}, 'test-model',
+    )
+    assert (window, source) == (8192, 'loaded_context_window')
+
+
+def test_context_window_reads_router_preset_args_when_unloaded():
+    # llama.cpp multi-model router: the model is unloaded, but the preset
+    # args carry the server-side budget (--ctx-size). Still the truth.
+    window, source = _context_window(
+        {
+            'id': 'test-model',
+            'status': {'value': 'unloaded', 'args': ['--model', '/x.gguf', '--ctx-size', '256000']},
+        },
+        'test-model',
+    )
+    assert (window, source) == (256000, 'preset_args')
+
+
+def test_context_window_matches_ctx_size_equals_form():
+    window, _ = _context_window(
+        {'id': 'test-model', 'status': {'args': ['--ctx-size=65536']}}, 'test-model',
+    )
+    assert window == 65536
+
+
+def test_context_window_cloud_max_input_tokens():
+    # OpenAI/Anthropic entries advertise max_input_tokens — for cloud that
+    # IS the budget (no local n_ctx to disagree with it).
+    window, source = _context_window(
+        {'id': 'test-model', 'max_input_tokens': 200000}, 'test-model',
+    )
+    assert (window, source) == (200000, 'max_input_tokens')
+
+
+def test_context_window_rejects_nonsense_values():
+    assert _context_window({'id': 'test-model', 'props': {'n_ctx': 0}}, 'test-model') == (None, None)
+    assert _context_window({'id': 'test-model', 'loaded_context_window': -5}, 'test-model') == (None, None)
+    assert _context_window({'id': 'test-model'}, 'test-model') == (None, None)
+
+
+def test_context_window_matches_router_aliases():
+    # The router serves 'default' as an alias of the long model id.
+    window, _ = _context_window(
+        {'id': 'google/gemma-4-12B', 'aliases': ['default'], 'props': {'n_ctx': 256000}},
+        'default',
+    )
+    assert window == 256000
+
+
+def test_context_window_route_resolves_loaded_model(monkeypatch):
+    def fake_get(url, headers):
+        assert url == 'http://192.168.1.34:8080/v1/models'
+        return DummyResponse(
+            {'data': [
+                {'id': 'other', 'props': {'n_ctx': 4096}},
+                {'id': 'google/gemma-4-12B', 'props': {'n_ctx': 256000}},
+            ]},
+            method='GET',
+            url=url,
+        )
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(get_handler=fake_get))
+
+    response = client.post(
+        '/ai/context-window',
+        json={
+            'apiKey': '',
+            'apiUrl': 'http://192.168.1.34:8080/v1/chat/completions',
+            'apiProvider': 'openai-compatible',
+            'model': 'google/gemma-4-12B',
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()['contextWindow'] == 256000
+
+
+def test_context_window_route_unknown_model_is_null(monkeypatch):
+    def fake_get(url, headers):
+        return DummyResponse({'data': [{'id': 'other'}]}, method='GET', url=url)
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(get_handler=fake_get))
+
+    response = client.post(
+        '/ai/context-window',
+        json={
+            'apiKey': '',
+            'apiUrl': 'http://192.168.1.34:8080/v1/chat/completions',
+            'apiProvider': 'openai-compatible',
+            'model': 'missing-model',
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()['contextWindow'] is None
+
+
+def test_context_window_route_graceful_error(monkeypatch):
+    def fake_get(url, headers):
+        return DummyResponse({'error': 'nope'}, status_code=502, method='GET', url=url)
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(get_handler=fake_get))
+
+    response = client.post(
+        '/ai/context-window',
+        json={
+            'apiKey': '',
+            'apiUrl': 'http://192.168.1.34:8080/v1/chat/completions',
+            'apiProvider': 'openai-compatible',
+            'model': 'any',
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()['contextWindow'] is None
+
+
 def test_resolve_native_tools_auto_is_native_first():
     # "auto" is NATIVE-FIRST for every provider (2026-09-17 decision):
     # local llama.cpp included — the machine channel is what stops models
@@ -933,6 +1070,7 @@ def test_chat_proxy_local_openai_compatible_allows_missing_key(monkeypatch):
             'completionTokens': 0,
             'reasoningTokens': 0,
             'ackReprompts': 0,
+            'lastPromptTokens': None,
             'events': [],
             'truncated': False,
         },
@@ -1059,6 +1197,7 @@ def test_chat_proxy_returns_plain_content(monkeypatch):
             'completionTokens': 0,
             'reasoningTokens': 0,
             'ackReprompts': 0,
+            'lastPromptTokens': None,
             'events': [],
             'truncated': False,
         },
@@ -1069,15 +1208,27 @@ def test_extract_usage_info_captures_tokens_and_reasoning():
     info = ai_routes._extract_usage_info({
         'choices': [{'message': {'content': 'x'}, 'finish_reason': 'stop'}],
         'usage': {
+            'prompt_tokens': 5678,
             'completion_tokens': 1234,
             'completion_tokens_details': {'reasoning_tokens': 700},
         },
     })
     assert info == {
+        'promptTokens': 5678,
         'completionTokens': 1234,
         'reasoningTokens': 700,
         'finishReason': 'stop',
     }
+
+
+def test_extract_usage_info_prompt_tokens_optional():
+    # Providers that omit usage.prompt_tokens must not break extraction —
+    # promptTokens is simply None (W7 stays silent rather than guessing).
+    info = ai_routes._extract_usage_info({
+        'choices': [{'message': {'content': 'x'}, 'finish_reason': 'stop'}],
+        'usage': {'completion_tokens': 10},
+    })
+    assert info['promptTokens'] is None
 
 
 def test_extract_usage_info_none_without_usage():
@@ -2069,3 +2220,71 @@ def test_chat_staged_edit_with_lost_summary_names_the_change(monkeypatch):
     assert body['pendingEdits'], 'setup: the edit must stage'
     assert 'staged 1 change to printer.cfg' in body['content']
     assert 'parameter=' not in body['content']
+
+
+def test_chat_proxy_stops_when_client_disconnects_mid_tool_loop(monkeypatch):
+    # Orphan guard (review follow-up 2026-11-14): the tool loop used to
+    # keep running after the HTTP client vanished — a timed-out harness
+    # request was observed looping 10+ simulate_macro turns for hours
+    # (turn_cap is 50 on the edit arm), holding the single-slot local
+    # router. With the disconnect check the loop must stop before the
+    # next provider call.
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(ai_routes, '_execute_tool_call',
+                        lambda call: f"result for {call['name']}")
+
+    calls = []
+
+    def fake_post(url, headers, payload):
+        calls.append(payload)
+        return DummyResponse(
+            {'choices': [{'message': {
+                'content': None,
+                'tool_calls': [{
+                    'type': 'function',
+                    'id': f'call_{len(calls)}',
+                    'function': {'name': 'search_klipper_docs',
+                                 'arguments': '{"query": "bed_mesh"}'},
+                }],
+            }}]},
+            url=url,
+        )
+
+    monkeypatch.setattr(
+        httpx, 'AsyncClient',
+        lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
+
+    class GoneRequest:
+        async def is_disconnected(self):
+            return True
+
+    req = ai_routes.ChatRequest(
+        messages=[{'role': 'user', 'content': 'hi'}],
+        apiKey='openai-token',
+        model='gpt-4o',
+        apiUrl='https://api.openai.com/v1/chat/completions',
+        apiProvider='chatgpt',
+    )
+    asyncio.run(ai_routes.chat_proxy(req, GoneRequest()))
+
+    # The initial query runs, the tool executes once, then the guard sees
+    # the client is gone and breaks — exactly one provider call, not 50.
+    assert len(calls) == 1, f"loop kept querying a disconnected client: {len(calls)} calls"
+
+
+def test_client_disconnected_helper_never_raises():
+    class Boom:
+        async def is_disconnected(self):
+            raise RuntimeError('transport gone')
+
+    class Yes:
+        async def is_disconnected(self):
+            return True
+
+    class No:
+        async def is_disconnected(self):
+            return False
+
+    assert asyncio.run(ai_routes._client_disconnected(Boom())) is False
+    assert asyncio.run(ai_routes._client_disconnected(Yes())) is True
+    assert asyncio.run(ai_routes._client_disconnected(No())) is False

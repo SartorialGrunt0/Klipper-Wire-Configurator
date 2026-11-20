@@ -12,6 +12,17 @@ class PrinterLED:
         gcode.register_mux_command("SET_LED_TEMPLATE", "LED", name,
                                    self.cmd_SET_LED_TEMPLATE)
 
+    # Mirrors real led.py cmd_SET_LED param-parsing shape (get_float with
+    # literal default, get_int with None default, getboolean, bare get =
+    # required). The generator's type/default capture reads these.
+    def cmd_SET_LED(self, gcmd):
+        red = gcmd.get_float('RED', 0.)
+        green = gcmd.get_float('GREEN', 0.)
+        index = gcmd.get_int('INDEX', None, minval=1)
+        sync = gcmd.getboolean('SYNC', True)
+        label = gcmd.get('LABEL')
+        _ = (red, green, index, sync, label)
+
 
 class TemplateLED:
     def __init__(self, gcode, led):

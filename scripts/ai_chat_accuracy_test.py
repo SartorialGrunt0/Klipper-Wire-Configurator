@@ -524,7 +524,8 @@ def build_questions() -> list[TestQuestion]:
                 # paired `kinematic|…` check below still requires the model to
                 # name the facts it wants, so a bare "need more info" cannot
                 # pass on this arm alone.
-                ("regex", r"provide|need to know|need (some|your|a few)|what|which|key details|details|tell me|share it|share|send me|let me know|paste|from scratch"),
+                ("regex", r"provide|need to know|need (some|your|a few)|what|which|key details|details|tell me|share it|share|send me|let me know|paste|from scratch|"
+                          r"give (me|us)|one (key )?question|first question|need the following|clarif\w*"),
                 ("regex", r"kinematic|mainboard|probe|toolhead|bed|printer|config"),
             ),
         ),
@@ -780,6 +781,274 @@ def build_macro_questions() -> list[TestQuestion]:
                 ("regex", r"no-?go|zone hit|inside a zone|crosses? a zone"),
             ),
         ),
+        # ── W2 runtime-class questions (2026-11-13) ────────────────────
+        # These pin the defect class the Jinja compiler cannot see: a
+        # macro that COMPILES but renders a broken command at its
+        # default invocation (`SET_LED ... RED=` from an empty params_
+        # default). The write-side question is graded with
+        # staged_renders_clean — the shared render simulator decides,
+        # because "empty default + brace ref" is cross-line and no
+        # staged-text regex can grade it without false-failing the
+        # correct fix (giving the params real defaults). Trident is the
+        # context: its own macro tree simulates error-free, so every
+        # finding is the model's own doing.
+        TestQuestion(
+            qid="MACRO-12",
+            title="Macros: LED toggle renders clean at default run",
+            text=("I want a new macro TOGGLE_LEDS that turns my "
+                  "Chamber_LEDs neopixels on and off, with optional RED, "
+                  "GREEN and BLUE parameters so I can pick the color when "
+                  "they turn on."),
+            context_files=(("printer.cfg", TRIDENT_FILE_LABEL,
+                            _load_trident_config("printer.cfg")),),
+            expected_tools=("validate_macro",),
+            require_tool=False,
+            edit_criteria=(
+                ("staged_renders_clean", "printer\\.cfg"),
+                ("staged_section_regex",
+                 r"printer\.cfg::gcode_macro TOGGLE_LEDS::SET_LED"),
+            ),
+        ),
+        TestQuestion(
+            qid="MACRO-13",
+            title="Macros: spot the empty-render defect (review)",
+            # Fixture corrected 2026-11-13 (r5 trace): the original pasted
+            # `params_RED:` config lines. Verified against the bundled
+            # Klipper source (reference/klipper klippy/extras/gcode_macro.py,
+            # Aug-2026): gcode_macro reads ONLY gcode/rename_existing/
+            # description/variable_* — params come from the command line,
+            # defaults from |default(). `params_X:` is a config-load error
+            # ("Unknown parameter"), so that fixture was not a runtime-only
+            # defect at all and a model reporting the load error (r5) was
+            # MORE correct than the criteria. `|default("")` is the legal
+            # shape that genuinely compiles AND renders RED= empty at
+            # default invocation — the class the simulator exists for.
+            text=("Will this macro work when I run TOGGLE_LEDS with no "
+                  "arguments? Check it and tell me exactly what will "
+                  "happen:\n\n"
+                  "```cfg\n"
+                  "[gcode_macro TOGGLE_LEDS]\n"
+                  "description: toggle chamber leds\n"
+                  "gcode:\n"
+                  "    SET_LED LED=Chamber_LEDs "
+                  "RED={params.RED|default(\"\")} "
+                  "GREEN={params.GREEN|default(\"\")} "
+                  "BLUE={params.BLUE|default(\"\")}\n"
+                  "```"),
+            expected_tools=("validate_macro",),
+            require_tool=False,
+            criteria=(
+                # The defect is the EMPTY expansion; an answer that
+                # notices must say so in value terms, and localize it —
+                # quoting the broken line. Negative controls ("looks
+                # fine", generic Jinja advice) match neither arm.
+                ("regex", r"(?i)empty|blank|no value|unable to parse|"
+                          r"can.?t (be )?pars|malformed"),
+                ("regex", r"RED=|params\.RED"),
+            ),
+        ),
+        TestQuestion(
+            qid="MACRO-14",
+            title="Macros: live-state read must NOT be flagged (cry-wolf guard)",
+            text=("Does this macro have any problems? Check it before I "
+                  "save it:\n\n"
+                  "```cfg\n"
+                  "[gcode_macro WHERE_ARE_WE]\n"
+                  "description: report toolhead position\n"
+                  "gcode:\n"
+                  "    {% set pos = printer.toolhead.position %}\n"
+                  "    RESPOND TYPE=echo MSG=\"X is {pos.x} mm\"\n"
+                  "```"),
+            expected_tools=("validate_macro",),
+            require_tool=False,
+            criteria=(
+                # printer.toolhead is runtime state — unknown at author
+                # time, which is INFO, never an error. The answer must
+                # confirm the macro is fine; the inverse class to
+                # MACRO-13. Over-flagging pressure on the sim must not
+                # silently turn this question's correct answer into a
+                # defect report.
+                #
+                # r2-trace widening (2026-11-13): "staged in printer.cfg
+                # and validates cleanly" is a legitimate confirmation
+                # shape — an agent invited to "check before I save" may
+                # stage the reviewed macro. \bvalid\b missed "validates"
+                # (no trailing boundary) and staging was not in the
+                # confirm vocabulary, so the arm graded word-forms
+                # instead of belief. Guards keep the specific wrong
+                # claims out; "cleanly" alone was deliberately NOT
+                # admitted — "will not run cleanly" is a wrong answer.
+                ("regex", r"(?i)\b(fine|correct|valid|validates|"
+                          r"looks good|works|ok|staged)\b|"
+                          r"no (issues|problems|errors)"),
+                # 2026-11-17: not_contains -> not_asserted. r1 FALSE-FAILED
+                # a CORRECT answer that named the ruled-out defect to deny
+                # it ('so no "unable to parse" risk at runtime'). A clean
+                # verdict may legitimately discuss what it rules out; it may
+                # not ASSERT any of these. All four converted (systemic —
+                # each is equally nameable in prose).
+                ("not_asserted", "unable to parse"),
+                ("not_asserted", "unbalanced"),
+                ("not_asserted", "syntax error"),
+                ("not_asserted", "renders empty"),
+            ),
+        ),
+        # ── P2/P3 runtime-class questions (2026-11-15) ────────────────
+        # The render simulator now knows each command's LITERAL bounds and
+        # its either-of rules, so a macro can be wrong in ways the Jinja
+        # compiler, the config schema and the static command-shape check
+        # all pass: a value outside the range Klipper's own get_float()
+        # enforces, or a parameter combination Klipper refuses outright.
+        #
+        # Ground truth (reference/klipper, Aug-2026 checkout):
+        #   led.py:76-78          get_float('RED', 0., minval=0., maxval=1.)
+        #   fan_generic.py:35-38  (speed is None) == (template is None)
+        #                         -> "SET_FAN_SPEED must specify SPEED or
+        #                            TEMPLATE" for BOTH-present too
+        #   heaters.py:369-373    TEMPERATURE_WAIT MINIMUM/MAXIMUM both
+        #                         default to +-inf, then
+        #                         "missing MINIMUM or MAXIMUM"
+        # Both fixtures are single-macro texts because that is the tool's
+        # contract (validate_macro renders ONE [gcode_macro] section).
+        TestQuestion(
+            qid="MACRO-15",
+            title="Macros: out-of-range + contradictory params in a macro we check",
+            text=("A friend sent me this macro from their config. Before I "
+                  "copy it into mine — will it actually run? If Klipper will "
+                  "refuse any of these lines, tell me which ones and why:\n\n"
+                  "```cfg\n"
+                  "[gcode_macro CHAMBER_DIM]\n"
+                  "description: dim the chamber lights and slow the fans "
+                  "for quiet mode\n"
+                  "gcode:\n"
+                  "    SET_LED LED=Chamber_LEDs RED=2.5 GREEN=0.4 BLUE=0.4\n"
+                  "    SET_FAN_SPEED FAN=Chamber_Fan SPEED=0.4 "
+                  'TEMPLATE="40 percent"\n'
+                  "```"),
+            expected_tools=("validate_macro", "simulate_macro"),
+            require_tool=True,
+            criteria=(
+                # (1) the out-of-range class. Klipper's message is
+                # "RED must have maximum of 1.00"; the simulator's is
+                # "outside the range Klipper accepts". Either witness
+                # counts; a generic "check your values" does not.
+                ("regex", r"(?i)out of range|outside the range|"
+                          r"max(imum)? (of|is) 1|exceeds? (the )?(0?\.?1|range)"),
+                # (2) the contradiction class: exactly one of SPEED/TEMPLATE.
+                # r1 (2026-11-15) FALSE-FAILED a correct answer that wrote
+                # "both `SPEED` and `TEMPLATE` are given" and "accepts
+                # exactly one of" — backticks and the "exactly one of"
+                # spelling both missed. Grade the EXCLUSIVITY claim, not one
+                # wording: allow backticks/whitespace between the names.
+                # The EXCLUSIVITY claim only — "both `SPEED` and `TEMPLATE`
+                # are given" alone is a description, and a wrong answer can
+                # phrase it too ("give both, that covers it"). Every arm
+                # below states that only one is allowed.
+                # r2/r3 (2026-11-15) FALSE-FAILED two more correct answers:
+                # markdown bold broke the literals ("accepts **only one**
+                # of"), and "accepts **one** of ... giving both is
+                # rejected" matched no arm. [\s*] tolerance between tokens;
+                # the reject/refuse arms still keep the "give both, that
+                # covers it" wrong-belief control red.
+                ("regex", r"(?i)(exactly|only)[\s*]+one[\s*]+of|"
+                          r"accepts[\s*]+one[\s*]+of|"
+                          r"can.?t (use|specify|set|have|give) both|"
+                          r"either .{0,20}SPEED.{0,40}TEMPLATE|"
+                          r"(never|not) both|"
+                          r"both[^.\n]{0,30}(reject|refus)"),
+                # (3) it must name what is wrong, not just "there are issues".
+                ("regex", r"RED|SPEED|TEMPLATE|SET_LED|SET_FAN_SPEED"),
+                # Negative controls: the two wrong beliefs.
+                ("not_contains", "will run fine"),
+                ("not_contains", "no problems"),
+                ("not_contains", "nothing wrong"),
+            ),
+        ),
+        TestQuestion(
+            qid="MACRO-16",
+            title="Macros: wait macro supplies neither bound (at-least-one rule)",
+            text=("Will this macro work as written? Tell me exactly what "
+                  "happens when I run it:\n\n"
+                  "```cfg\n"
+                  "[gcode_macro WAIT_SOAK]\n"
+                  "description: wait for the chamber to soak\n"
+                  "gcode:\n"
+                  "    TEMPERATURE_WAIT SENSOR=chamber\n"
+                  "```"),
+            expected_tools=("validate_macro",),
+            require_tool=False,
+            criteria=(
+                # heaters.py:369-373 — MINIMUM and MAXIMUM both default to
+                # -inf/+inf, so with neither given the comparison is
+                # vacuous and Klipper raises "missing MINIMUM or MAXIMUM".
+                # The 'or' rule is the inverse of MACRO-15's 'xor' rule.
+                ("regex", r"(?i)TEMPERATURE_WAIT|MINIMUM|MAXIMUM"),
+                ("regex", r"(?i)at least one|neither|must (specify|provide|"
+                          r"give|include)|missing|required"),
+                ("not_contains", "works fine"),
+                ("not_contains", "no problems"),
+            ),
+        ),
+        # ── computed-value + CALL-honesty questions (2026-11-15) ──────
+        # MACRO-15/16 test values written literally. Real configs also
+        # COMPUTE them (`{% set %}`), and the simulator resolves the Jinja
+        # before judging — verified against led.py:76-78 bounds.
+        TestQuestion(
+            qid="MACRO-17",
+            title="Macros: literal color values beyond SET_LED's bound",
+            # Cliff re-cut 2026-11-16: the original carried `{% set level =
+            # 1.8 %}` and the value proved uniquely ambiguous — 27b read it
+            # as "18%" and 'fixed' it to 0.18 while honestly believing no
+            # runtime failure existed. A literal RED=1.8 inside the command
+            # keeps the same test (resolve the rendered line, apply led.py's
+            # 0..1 bound) without the typo-reinterpretation escape hatch.
+            # Note: now MACRO-15's single-defect literal sibling (15 keeps
+            # the XOR defect); distinct answer shape still exercised — here
+            # the ONLY finding is the bound.
+            text=("My printer.cfg has a GLOW macro I wrote to set my "
+                  "chamber lights to a fixed level. Will it run as "
+                  "written? Tell me exactly what happens when I call "
+                  "it."),
+            context_files=_sim_project(_SIM_CHAMBER_HW + _SIM_GLOW),
+            expected_tools=("validate_macro", "simulate_macro"),
+            require_tool=False,
+            criteria=(
+                # Cliff re-cut (above): the 1.8 is now a literal ON the
+                # command line — the answer must still run the tools and
+                # apply led.py's 0..1 bound to the rendered line.
+                # Silent-fix shape (Cliff ruling 2026-11-16): an answer
+                # that STATES the constant was corrected/fixed AND cites
+                # the corrected 0.8 AND cites the valid-range/spec bound
+                # asserts "the original was wrong" — graded as the verdict.
+                # The triple requirement keeps taste-fixes ("0.8 looks
+                # better") and wrong beliefs out; \bvalid covers 'a valid
+                # 0.0-1.0 value'.
+                #
+                # Cliff ruling (2026-11-19) — the `0.8` literal STAYS. Do not
+                # "fix" it to accept any in-range value. The question asks
+                # what happens AS WRITTEN ("tell me exactly what happens when
+                # I call it"), and the 2026-11-17 product guard (13f28af) now
+                # forces that framing in the first sentence. An answer that
+                # only reports a staged fix to 1.0 never states the as-written
+                # outcome, so it is a miss even though 1.0 is an in-range
+                # replacement — 9 historical legs fail exactly this way and
+                # are correctly red. Revisit ONLY if that guard is retired;
+                # then apply the 2026-11-16 silent-fix ruling to any in-range
+                # corrected value.
+                ("regex", r"(?i)out of range|outside the range|"
+                          r"max(imum)? (of|is) 1|"
+                          r"(?=[\s\S]*\b(correct|corrected|fix|fixed|"
+                          r"replac\w*|adjust\w*))"
+                          r"(?=[\s\S]*\b0\.8\b)"
+                          r"(?=[\s\S]*(0\.0\s*[\u2013-]\s*1\.0|"
+                          r"0\.0 (?:to|and) 1(?:\.0)?|valid))"),
+                # Tie the verdict to the computed value, not to a guess.
+                ("regex", r"1\.8|level"),
+                ("not_contains", "will run fine"),
+                ("not_contains", "works fine"),
+                ("not_contains", "no problems"),
+            ),
+        ),
     ]
 
 
@@ -847,6 +1116,392 @@ z_offset: 2.0
 def _bare_project(with_probe: bool = False) -> tuple[tuple[str, str, str], ...]:
     body = _BARE_PRINTER_CFG + (_BARE_PROBE if with_probe else "")
     return (("printer.cfg", "printer.cfg (test project)", body),)
+
+
+def _sim_project(macros: str) -> tuple[tuple[str, str, str], ...]:
+    """Bare project + the SIMTOOL fixture macros (isolated per question —
+    whole-tree configs would grade the tree, not the tool use)."""
+    return (("printer.cfg", "printer.cfg (test project)",
+             _BARE_PRINTER_CFG + macros),)
+
+
+_SIM_COOL_DOWN = """
+[gcode_macro COOL_DOWN]
+description: blow the part-cooling fan while the hotend is still hot
+gcode:
+    {% if printer.extruder.temperature > 150 %}
+    M106 S255
+    {% else %}
+    M106 S0
+    {% endif %}
+"""
+
+_SIM_PRINT_START = """
+[gcode_macro PRINT_START]
+description: home then heat bed and hotend to the given targets
+gcode:
+    G28
+    M140 S{params.BED}
+    M104 S{params.EXTRUDER}
+    M190 S{params.BED}
+    M109 S{params.EXTRUDER}
+"""
+
+# NO `params_BED:`/`params_EXTRUDER:` declarations on purpose
+# (review 4.1, 2026-11-14): the shipped static validator currently
+# hard-errors params_* keys on [gcode_macro] as unknown_param (a
+# pre-existing escalation, filed separately) — the fixture would ride
+# into the question already red. Undeclared params are valid Klipper
+# (required-at-invocation); the question supplies both values as
+# explicit scenario params, which render identically.
+
+# Chamber hardware for the questions that need a resolvable SET_LED /
+# SET_FAN_SPEED target: a neopixel and a named fan, so a mux refusal cannot
+# be confused with the parameter defect the question is about.
+_SIM_CHAMBER_HW = """
+[neopixel Chamber_LEDs]
+pin: PB1
+chain_count: 30
+
+[fan_generic Chamber_Fan]
+pin: PB2
+"""
+
+# SIMTOOL-06: the offending value exists only AFTER rendering — the static
+# layer sees `{params.R}`, which is well-formed.
+_SIM_SET_BRIGHT = """
+[gcode_macro SET_BRIGHT]
+description: set chamber light brightness from a 0-1 fraction
+gcode:
+    SET_LED LED=Chamber_LEDs RED={params.R} GREEN={params.R} BLUE={params.R}
+"""
+
+# SIMTOOL-08: a macro whose body is only a CALL. Klipper renders the body
+# completely before executing, and the simulator does NOT recurse into the
+# called macro — so "Findings: none" here means "this line is well formed",
+# never "the called macro ran". HOME_ALL must come FIRST: simulate_macro
+# takes one [gcode_macro] section from provided text, and the first wins.
+_SIM_HOME_ALL = """
+[gcode_macro HOME_ALL]
+description: home then set the chamber lights
+gcode:
+    G28
+    GLOW
+"""
+
+# SIMTOOL-08 needs a CLEAN callee: r1 reused MACRO-17's buggy GLOW, so the
+# question turned into "fix this" and the honesty probe never ran (the model
+# staged a fix and then narrated an expansion the tool never performed).
+_SIM_GLOW_CLEAN = """
+[gcode_macro GLOW]
+description: set the chamber lights to 40 percent
+gcode:
+    SET_LED LED=Chamber_LEDs RED=0.4 GREEN=0.4 BLUE=0.4
+"""
+
+# MACRO-17 (Cliff go 2026-11-17): lives in the SEEDED project, not pasted
+# in the question. m17law legs showed the miss is a FRAME, not phrasing:
+# a pasted macro absent from the files casts the task as
+# install-this-for-me, where "Staged/Applied —" IS the answer and the
+# as-written verdict reads as pedantry (positional law lost to the frame
+# 2/3, even with 'Applied' verbatim in its don't-open-with list). With the
+# macro genuinely in printer.cfg the install story is unavailable.
+_SIM_GLOW = """
+[gcode_macro GLOW]
+description: glow at a fixed level
+gcode:
+    SET_LED LED=Chamber_LEDs RED=1.8 GREEN=1.8 BLUE=1.8
+"""
+
+# SIMTOOL-07: the hotend ceiling is CONFIG-derived (max_temp), never a
+# literal in the handler, so no bound is recorded — and none may be invented.
+_SIM_PREHEAT = """
+[gcode_macro PREHEAT]
+description: heat the hotend to the given target and wait for it
+gcode:
+    M104 S{params.T}
+    M109 S{params.T}
+"""
+
+_SIM_LEVEL_FAN = """
+[gcode_macro LEVEL_FAN]
+description: set fan speed, defaulting to half when LEVEL is omitted
+gcode:
+    {% if params.LEVEL is defined %}
+    M106 S{params.LEVEL}
+    {% else %}
+    M106 S128
+    {% endif %}
+"""
+
+
+def build_simtool_questions() -> list[TestQuestion]:
+    """SIMTOOL — simulate_macro tool-use compliance (W4R.4, 2026-11-14).
+
+    The decision (plan 4R.4): the model must GROUND runtime-behavior
+    claims in a scenario simulation it declares, citing rendered lines —
+    never asserting runtime behavior from source reading alone. Graded
+    on TOOL-TRACE artifacts (tool_args / tool_output_regex /
+    tool_call_count), never reply prose about intent — the bank law the
+    TOOL-05 audit established: grade the artifact the tool produced.
+    staged_renders_clean on the edit job proves the new tool did not
+    disturb the write-path gate.
+    """
+    return [
+        TestQuestion(
+            qid="SIMTOOL-01",
+            title="Sim tool: runtime branch question needs a declared-state run",
+            text="If my hotend is sitting at 180 degrees when I call "
+                 "COOL_DOWN, what does it actually send? Don't guess from "
+                 "the source — run it.",
+            context_files=_sim_project(_SIM_COOL_DOWN),
+            expected_tools=("simulate_macro",),
+            require_tool=True,
+            criteria=(
+                # Binding is key-anchored: tool_args value is
+                # "tool:ARG_KEY:regex" and the KEY is a literal argument
+                # name (it is NOT a regex), so the two accepted shapes are
+                # two arms: printer_state inside scenarios[0], or the
+                # top-level single-invocation shorthand. r10 leg a used the
+                # shorthand and was false-failed by a one-spelling anchor.
+                ("any_of", json.dumps([
+                    [["tool_args",
+                      r"simulate_macro:scenarios:extruder.{0,30}temperature.{0,8}180"]],
+                    [["tool_args",
+                      r"simulate_macro:printer_state:extruder.{0,30}temperature.{0,8}180"]],
+                ])),
+                ("tool_output_regex", "simulate_macro::M106 S255"),
+                ("contains", "255"),
+            ),
+        ),
+        TestQuestion(
+            qid="SIMTOOL-02",
+            title="Sim tool: toggle write job runs twice and flips state",
+            text="Add a TOGGLE_FAN macro to printer.cfg that switches the "
+                 "fan on and off, using a variable to remember whether it "
+                 "is on. Before you tell me it works, run the macro twice "
+                 "in a row — simulate the first call, then the very next "
+                 "call — and show me what each one sends.",
+            context_files=_sim_project(""),
+            expected_tools=("simulate_macro",),
+            require_tool=True,
+            edit_criteria=(
+                # DOUBLE-escaped dot ("printer\\.cfg" -> regex
+                # printer\.cfg): the quad form compiles to a literal-
+                # backslash pattern that can never match a filename —
+                # it false-failed the r2 artifact (a CLEAN named-fan
+                # toggle), caught by offline replay 2026-11-14.
+                ("staged_renders_clean", "printer\\.cfg"),
+                # PERSISTENCE, graded in the staged artifact: a toggle
+                # that never writes its state back cannot toggle. The r8
+                # leg-b dead toggle ({% set %} only, no write) passed the
+                # old criteria. Klipper's mux key is MACRO
+                # (gcode_macro.py:148), so a row of SET_FAN_SPEED alone
+                # is not a toggle.
+                ("staged_section_regex",
+                 "printer\\.cfg::gcode_macro TOGGLE_FAN::"
+                 "SET_GCODE_VARIABLE MACRO=TOGGLE_FAN"),
+                # Fan command: a named-fan toggle (SET_FAN_SPEED FAN=x
+                # SPEED=y) is as correct as M106/M107 — grade the
+                # behavior, not one spelling.
+                ("staged_section_regex",
+                 "printer\\.cfg::gcode_macro TOGGLE_FAN::"
+                 "SET_FAN_SPEED|M10[67]"),
+                # RUNS, not two independent scenarios: only runs=N threads
+                # call 1's own SET_GCODE_VARIABLE into call 2, which is
+                # what "does it toggle" actually means. Two scenarios
+                # prove the branches, never the transition (r7 leg b).
+                ("tool_args", "simulate_macro:runs:[2-6]"),
+                # Grade the tool's own computed verdict, not the reply
+                # prose about it.
+                ("tool_output_regex",
+                 "simulate_macro::commands differ: YES"),
+                # D5: the toggle must drive hardware the project DECLARES.
+                # The r9 leg-b artifact staged `SET_FAN_SPEED FAN=fan`
+                # against a project with only [fan] + [fan_generic
+                # Aux_Fan] — runtime-fatal ("The value 'fan' is not valid
+                # for FAN"), and the old criteria accepted it. The engine
+                # now resolves mux targets against the project's sections;
+                # a clean run must not report one.
+                ("tool_output_not_regex",
+                 "simulate_macro::is not valid for"),
+            ),
+        ),
+        TestQuestion(
+            qid="SIMTOOL-03",
+            title="Sim tool: explicit scenario params render the real values",
+            text="What exact commands does my PRINT_START send when I call "
+                 "it as PRINT_START BED=60 EXTRUDER=230? Run it with those "
+                 "values rather than reciting the template.",
+            context_files=_sim_project(_SIM_PRINT_START),
+            expected_tools=("simulate_macro",),
+            require_tool=True,
+            criteria=(
+                # params arrive either inside scenarios[0] or as the
+                # top-level shorthand — the same declared invocation in two
+                # accepted spellings (tool_args keys are literal arg names,
+                # so each spelling is its own arm).
+                ("any_of", json.dumps([
+                    [["tool_args", r"simulate_macro:scenarios:BED.{0,8}60"]],
+                    [["tool_args", r"simulate_macro:params:BED.{0,8}60"]],
+                ])),
+                ("any_of", json.dumps([
+                    [["tool_args", r"simulate_macro:scenarios:EXTRUDER.{0,8}230"]],
+                    [["tool_args", r"simulate_macro:params:EXTRUDER.{0,8}230"]],
+                ])),
+                ("tool_output_regex", "simulate_macro::M104 S230"),
+                ("tool_output_regex", "simulate_macro::M140 S60"),
+                ("contains", "230"),
+            ),
+        ),
+        TestQuestion(
+            qid="SIMTOOL-04",
+            title="Sim tool: guarded param bare call runs the fallback",
+            text="If I call LEVEL_FAN with no LEVEL argument, will it "
+                 "error out on the missing parameter, or what happens?",
+            context_files=_sim_project(_SIM_LEVEL_FAN),
+            expected_tools=("simulate_macro",),
+            require_tool=True,
+            criteria=(
+                # Regression pin from the 2026-11-14 dev-server audit:
+                # an `is defined` guard is NOT a missing-param failure —
+                # the bare call renders the fallback. The artifact (the
+                # fallback line from the tool) plus citing its value is
+                # the grounding; no prose-shape regex.
+                ("tool_output_regex", "simulate_macro::M106 S128"),
+                ("contains", "128"),
+            ),
+        ),
+        TestQuestion(
+            qid="SIMTOOL-05",
+            title="Sim tool negative control: review-only stages nothing",
+            text="Review my COOL_DOWN macro for correctness. Don't change "
+                 "anything — just tell me what you see.",
+            context_files=_sim_project(_SIM_COOL_DOWN),
+            expected_tools=(),
+            require_tool=False,
+            criteria=(
+                ("not_staged_any", ""),
+                ("regex", r"cool_?down|M106|fan"),
+            ),
+        ),
+        TestQuestion(
+            qid="SIMTOOL-06",
+            title="Sim tool: parameter-driven value is out of range at run time",
+            text="I'm about to call SET_BRIGHT R=2 on my chamber lights to "
+                 "make them extra bright. Will that actually work? Run it "
+                 "with R=2 rather than reasoning about the template — the "
+                 "template itself looks fine to me.",
+            context_files=_sim_project(_SIM_CHAMBER_HW + _SIM_SET_BRIGHT),
+            expected_tools=("simulate_macro",),
+            require_tool=True,
+            criteria=(
+                # The value only exists AFTER rendering: the static checks
+                # see `{params.R}` and cannot know it becomes 2. Graded on
+                # the tool artifact (the rendered line + its verdict), never
+                # on prose about "probably fine".
+                # led.py:76-78 bounds RED/GREEN/BLUE to 0..1.
+                ("tool_output_regex", "simulate_macro::RED=2"),
+                ("tool_output_regex",
+                 "simulate_macro::outside the range|maximum of 1"),
+                # The answer must land on the refusal, not on brightness
+                # advice. Either the simulator's wording or the human
+                # outcome counts. W4-R2 reruns (2026-11-16): the answer was
+                # right 4/4 but phrased "will refuse" (active), "are
+                # rejected" (bare passive), "won't work" — none matched the
+                # old "will (be )?refused" spelling. Accept natural tenses;
+                # "fail" is admitted only in the affirmative-at-runtime form
+                # because "won't fail" ASSERTS success and must never flip
+                # this check green.
+                ("regex", r"(?i)out of range|outside the range|"
+                          r"max(imum)? of 1|won'?t (actually )?work|"
+                          r"will (not|n'?t) (actually )?work|doesn'?t work|"
+                          r"(will |would |is |are |gets? )?(be )?"
+                          r"(refus\w*|reject\w*)|fail(s|ed|ing)? at runtime"),
+                ("not_contains", "will work fine"),
+            ),
+        ),
+        TestQuestion(
+            qid="SIMTOOL-07",
+            title="Sim tool negative control: config-derived limits are not invented",
+            # Scope matters (r2 trace, 2026-11-15): "safe to run on my
+            # printer?" invites an audit of the LIVE host, and a model that
+            # finds real environment problems there (a halted klippy, no
+            # [extruder]) is RIGHT to say the call fails — which has nothing
+            # to do with the belief under test. Ask about the value.
+            text="My PREHEAT macro passes its T straight to M104 and M109. "
+                 "Before I call it as PREHEAT T=240, I want to know about the "
+                 "command itself: is 240 outside any range Klipper checks, so "
+                 "the command gets rejected for being out of range? Run it and "
+                 "tell me what the command-level verdict is.",
+            context_files=_sim_project(_SIM_PREHEAT),
+            expected_tools=("simulate_macro",),
+            require_tool=True,
+            criteria=(
+                # The cry-wolf guard for P3: the hotend ceiling comes from
+                # the CONFIG (max_temp), never from a literal in the
+                # handler, so the registry records no bound for M104/M109
+                # and the simulator must NOT invent one. 240 renders and is
+                # accepted; only the project's own config can make it
+                # refused, which this bare project does not.
+                ("tool_output_regex", "simulate_macro::M104 S240"),
+                ("tool_output_not_regex",
+                 "simulate_macro::outside the range|maximum of 1"),
+                # Engagement: the answer must be ABOUT the value under
+                # test. Deliberately verdict-free — no synonym list here.
+                ("regex", r"\b240\b|M104|M109"),
+                # The verdict, graded structurally (2026-11-19): the prose
+                # may not ASSERT a refusal. Affirmations were enumerated
+                # here for three live rounds and lost every time — r1
+                # (2026-11-15) "Klipper will accept it" missed the arm;
+                # r2 added bold "only one of"; p3-r1 (2026-11-19) said
+                # "240 is in range — no rejection" / "**Findings: none**"
+                # / "will not be rejected" and missed three more. Refusal
+                # claims are a closed set and every correct mention of one
+                # is scoped (conditional "only if max_temp is below 240",
+                # or environmental "won't run on this printer"), so the
+                # kind decides scope by clause, not wording.
+                # The three old not_contains guards (outside the range
+                # Klipper accepts / is outside the range / exceeds the
+                # maximum) are subsumed: each is an unscoped claim.
+                ("no_asserted_refusal", ""),
+            ),
+        ),
+        TestQuestion(
+            qid="SIMTOOL-08",
+            title="Sim tool honesty: a CALLed macro is not expanded",
+            # "Don't change anything" is scope discipline, not politeness:
+            # r1 wandered into staging a fix and then narrated an expansion
+            # the tool never performed, so the honesty probe never ran.
+            text="Run HOME_ALL and tell me whether my chamber lights "
+                 "actually get set when this macro runs. Don't change "
+                 "anything yet — I just want to know what the run shows.",
+            context_files=_sim_project(
+                _SIM_CHAMBER_HW + _SIM_HOME_ALL + _SIM_GLOW_CLEAN),
+            expected_tools=("simulate_macro",),
+            require_tool=True,
+            criteria=(
+                # Cliff ruling 2026-11-16: the disclosure-phrasing demand was
+                # the defect — a model that runs HOME_ALL, sees the
+                # un-expanded `GLOW` line, runs GLOW separately, sees the
+                # SET_LED render, and answers YES WITH ATTRIBUTION did the
+                # complete honest verification. Grade the GROUNDEDNESS in the
+                # tool trace instead of a magic sentence: (a) the caller run
+                # happened and shows the CALL not expanded; (b) the callee
+                # was simulated on its own — HOME_ALL's output never contains
+                # SET_LED, so this is true only if the second run happened;
+                # (c) the verdict rides in the answer and cites the callee
+                # run's own value (0.4 appears nowhere but GLOW's render).
+                # Classes still caught: "lights get set" from 'Findings:
+                # none' alone, pure confabulation, and a NO verdict against
+                # clean evidence.
+                ("tool_output_regex", "simulate_macro::L2: GLOW"),
+                ("tool_output_regex", "simulate_macro::SET_LED"),
+                ("regex", r"(?i)(get|gets|be) ?set[\s\S]*(0\.4|40%)|"
+                          r"(0\.4|40%)[\s\S]*(get|gets|be) ?set"),
+            ),
+        ),
+    ]
 
 
 def _load_m109_bugged_printer_cfg() -> str:
@@ -1304,14 +1959,20 @@ def build_trident_questions() -> list[TestQuestion]:
         TestQuestion(
             qid="HARNESS-03",
             title="Audit false-positive probe: pre-satisfied requirement = silent footer",
-            text=("Set my bed mesh probe speed to 8 in printer.cfg and keep "
-                  "the current probe_count of 3x3."),
+            text=("Set the speed parameter of the [bed_mesh] section in "
+                  "printer.cfg to 8 and keep the current probe_count of 3x3."),
+            # 2026-11-17 disambiguation (r1 FAIL): "bed mesh probe speed"
+            # let a model defensibly route to [probe] speed (the z-probing
+            # move speed) and explicitly decline [bed_mesh] speed (travel
+            # between points) — both readings are Klipper-true, so the
+            # qid graded a vocabulary coin-flip. Its PURPOSE is the audit
+            # footer on a pre-satisfied requirement, not param discovery,
+            # so the section is named outright.
             # Fixture has probe_count 3,3 PRE-SATISFIED so a correct edit
             # that keeps it must produce NO requirement-checker note. The
             # stated-value pattern ('probe_count ... 3x3') is exercised
             # live; a footer here = checker false positive = product bug.
-            # (Real stock value is 7,7 — fixture only. The real [bed_mesh]
-            # param is 'speed'; 'probe speed' is how users say it.)
+            # (Real stock value is 7,7 — fixture only.)
             context_files=_context_with(_load_probe_params_printer_cfg()),
             require_tool=False,
             criteria=(),
@@ -1612,6 +2273,53 @@ def build_rename_questions() -> list[TestQuestion]:
     ]
 
 
+def _comment06_context() -> tuple[tuple[str, str, str], ...]:
+    """COMMENT-06 fixture: real Trident project with Knomi.cfg's
+    [gcode_macro BED_MESH_CALIBRATE] wrapper shadowed away.
+
+    2026-11-17 (r1): the model REFUSED the rename and was right about the
+    project — Knomi.cfg:30 defines [gcode_macro BED_MESH_CALIBRATE]
+    (included from printer.cfg), so renaming Level_Bed to
+    bed_mesh_calibrate is a cross-file duplicate section, and
+    _BED_MESH_CALIBRATE exists nowhere. The qid rewards engineering
+    correctness, so the FIXTURE is corrected instead: attaching a modified
+    Knomi.cfg shadows the disk copy for this request only (the proven
+    _bare_project overlay mechanism), leaving the target name free and
+    `rename_existing: _BED_MESH_CALIBRATE` binding to the built-in — the
+    stock BTT pattern the commented line originally followed. Disk files
+    are never modified; the guards die loudly if the wrapper moves.
+    """
+    knomi = _load_trident_config("Knomi.cfg")
+    lines = knomi.splitlines(keepends=True)
+    out: list[str] = []
+    i = 0
+    removed = False
+    while i < len(lines):
+        if lines[i].strip() == "[gcode_macro BED_MESH_CALIBRATE]":
+            removed = True
+            i += 1
+            # Section body = everything up to the next boundary: a new
+            # section header or a col-0 comment. Params sit at col 0
+            # (rename_existing:), so indentation is NOT the boundary.
+            while i < len(lines):
+                s = lines[i].strip()
+                if s and (s.startswith("[") or s.startswith("#")):
+                    break
+                i += 1
+            continue
+        out.append(lines[i])
+        i += 1
+    stripped = "".join(out)
+    if not removed or "BTT_BED_MESH_CALIBRATE" in stripped:
+        raise RuntimeError(
+            "COMMENT-06 fixture: BED_MESH_CALIBRATE wrapper not cleanly "
+            "strippable from Knomi.cfg — re-verify the project"
+        )
+    return _cfg_context("printer.cfg") + (
+        ("Knomi.cfg", TRIDENT_FILE_LABEL, stripped),
+    )
+
+
 def build_comment_questions() -> list[TestQuestion]:
     """Comment/uncomment family (COMMENT-*), added 2026-09-28 with the
     rename patch_gcode->patch_section and the new comment_section /
@@ -1758,7 +2466,7 @@ def build_comment_questions() -> list[TestQuestion]:
             text=("Can you rename the level_bed macro to bed_mesh_calibrate "
                   "and comment back in the rename_existing: "
                   "_bed_mesh_calibrate"),
-            context_files=printer_cfg,
+            context_files=_comment06_context(),
             edit_tools=True,
             expected_tools=("config_edit",),
             require_tool=True,
@@ -1971,15 +2679,25 @@ def build_skill_gate_questions() -> list[TestQuestion]:
         ),
         TestQuestion(
             qid="SKILL-N04",
-            title="Skill: discuss-a-draft must NOT load",
+            title="Skill: discuss-a-draft must NOT load the edit skill",
             text=("Draft me a PARK_X macro gcode body I can read over. "
                   "Don't add it to my config — I just want to see it here."),
             context_files=printer_cfg,
             edit_tools=True,
-            skill_expected=False,
+            # W4-R2 (2026-11-16): the zero-skill law is dead — macro
+            # drafting is macro-authoring's home turf, and SKILL-M01
+            # asserts the opposite expectation for an isomorphic request
+            # (4/4 the model loads macro-authoring here). The graded signal
+            # moved into the named criterion; the any-load gate label would
+            # now report correct macro loads as FPs, so the label is gone.
+            skill_expected=None,
             require_tool=False,
             criteria=(
-                ("skill_not_loaded", ""),
+                # Anti-edit-mode intent survives: entering EDIT mode to
+                # "discuss a draft" is the original miss this qid was built
+                # for. W4-R2 reruns confirmed loading macro-authoring is
+                # what a correct model does; loading config-editing is not.
+                ("skill_not_loaded", "config-editing"),
                 # not_staged_any, NOT `not_staged printer.cfg`: the request
                 # says "don't add it to MY CONFIG", so staging a brand-new
                 # file is equally a miss. The file-scoped kind went green for
@@ -2191,6 +2909,105 @@ def _bulk_inventory(text: str) -> tuple[list[str], list[str], list[str]]:
     annotatable = [s for s in headers if has_body.get(s, False)]
     macros = [s for s in headers if s.startswith("gcode_macro")]
     return headers, annotatable, macros
+
+
+def build_macro_skill_questions() -> list[TestQuestion]:
+    """SKILL-M family (W4-R2, 2026-11-16): activation detector for the
+    macro-authoring knowledge skill (Cliff: "the accuracy test should tell
+    us if the models aren't reading the skill"). Grades the executed
+    tool-call trace at NAME level (skill_loaded / skill_not_loaded take a
+    skill name):
+
+      M01 draft-a-macro question      -> macro-authoring loaded
+      M02 save-a-macro edit           -> BOTH macro-authoring and
+                                         config-editing loaded (the
+                                         two-skill flow)
+      M03 runtime-behavior question   -> macro-authoring loaded AND the
+                                         simulation consulted
+      MN01 plain param edit           -> config-editing yes, macro NOT
+                                         loaded (the new FP class: paying
+                                         macro rules on a non-macro edit)
+      MN02 non-macro question         -> no skill load at all
+    """
+    printer_cfg = _cfg_context("printer.cfg")
+    return [
+        TestQuestion(
+            qid="SKILL-M01",
+            title="Macro skill: draft-only request loads macro-authoring",
+            text=("Draft a macro LED_BLINK that toggles the casing_light "
+                  "pin for 3 seconds. Just show me the text to read over — "
+                  "do NOT change my files."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=True,
+            criteria=(("skill_loaded", "macro-authoring"),),
+            edit_criteria=(
+                ("skill_loaded", "macro-authoring"),
+                ("not_staged_any", ""),
+            ),
+        ),
+        TestQuestion(
+            qid="SKILL-M02",
+            title="Macro skill: save-a-macro loads BOTH skills",
+            text=("Create a macro FAN_PURGE in printer.cfg that runs the "
+                  "part fan at full for 10 seconds then off, and save it."),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=True,
+            criteria=(
+                ("skill_loaded", "macro-authoring"),
+                ("skill_loaded", "config-editing"),
+            ),
+            edit_criteria=(
+                ("skill_loaded", "macro-authoring"),
+                ("skill_loaded", "config-editing"),
+                ("staged_header", "printer.cfg::gcode_macro FAN_PURGE"),
+            ),
+        ),
+        TestQuestion(
+            qid="SKILL-M03",
+            title="Macro skill: runtime question consults the simulation",
+            text=("Here is a macro I'm considering:\n"
+                  "[gcode_macro HOT_PARK]\n"
+                  "gcode:\n"
+                  "    G1 Z{params.Z|float} F300\n"
+                  "If I call HOT_PARK with no Z argument, what exactly "
+                  "happens?"),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=True,
+            expected_tools=("simulate_macro",),
+            require_tool=True,
+            criteria=(("skill_loaded", "macro-authoring"),),
+            edit_criteria=(
+                ("skill_loaded", "macro-authoring"),
+                ("not_staged_any", ""),
+            ),
+        ),
+        TestQuestion(
+            qid="SKILL-MN01",
+            title="Macro skill FP: plain param edit must not load macros",
+            text="In printer.cfg change the [printer] max_velocity to 250.",
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=True,  # config-editing IS expected here
+            criteria=(("skill_not_loaded", "macro-authoring"),),
+            edit_criteria=(
+                ("staged_param_ci", "printer.cfg::max_velocity: 250"),
+                ("skill_not_loaded", "macro-authoring"),
+            ),
+        ),
+        TestQuestion(
+            qid="SKILL-MN02",
+            title="Macro skill FP: non-macro question needs no skill",
+            text=("What does square_corner_velocity actually control during "
+                  "a print?"),
+            context_files=printer_cfg,
+            edit_tools=True,
+            skill_expected=False,
+            criteria=(("skill_not_loaded", ""),),
+        ),
+    ]
 
 
 def build_bulk_questions() -> list[TestQuestion]:
@@ -3264,6 +4081,10 @@ ALL_TOOLS = (
     "calculate_rotation_distance",
     "generate_macro_template",
     "validate_macro",
+    # On-demand scenario simulation (W4R.3, 2026-11-14). The tuple
+    # comment above is law — the r1b run re-proved it by listing real
+    # simulate_macro calls under "Unknown tool attempts".
+    "simulate_macro",
     # Skill-gate loader (Phase 3): loop-routed like the write tools.
     "load_skill",
 )
@@ -3300,6 +4121,22 @@ def extract_printer_memory(content: str) -> tuple[str, dict | None]:
     return block, data
 
 
+def _skill_arg_name(call: dict) -> str:
+    """The skill NAME a load_skill tool call asked for ('' arg = the
+    legacy config-editing convention; unparseable args likewise fail-open
+    to config-editing, mirroring chatSkillTrace)."""
+    args = call.get("arguments")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except (json.JSONDecodeError, ValueError):
+            args = {}
+    if not isinstance(args, dict):
+        args = {}
+    name = str(args.get("name") or "")
+    return name or "config-editing"
+
+
 def _entry_created(entry: dict) -> bool:
     """Did this staged entry CREATE its file?
 
@@ -3325,6 +4162,166 @@ def _staged_section_body(text: str, section: str) -> str | None:
 
 
 # ── Evaluation ─────────────────────────────────────────────────────────
+# ── refusal-claim vocabulary for the `no_asserted_refusal` kind ─────────
+# SIMTOOL-07 (2026-11-19). A correct cry-wolf answer may NAME the refusal
+# it rules out, but only inside a scoped clause — conditional ("would
+# refuse only if max_temp is below 240") or environmental ("won't run on
+# this printer — config error"). Affirmations are an OPEN set; refusal
+# claims are CLOSED. So the criterion enumerates the claim and decides
+# scope structurally, instead of enumerating ways to say yes (three live
+# rounds added "will accept", bold "only one of", then "in range — no
+# rejection"/"Findings: none"/"will not be rejected" and still missed).
+_REFUSAL_CLAIM_RE = re.compile(
+    r"(?i)out[ -]of[ -]range|outside the range|"
+    r"\bwill (?:be )?(?:refused|rejected)\b|\bis rejected\b|\bare rejected\b|"
+    r"\bwon'?t (?:be )?(?:accepted|run)\b|"
+    r"\bwill not (?:be )?(?:run|accepted)\b|"
+    r"\bexceeds? (?:the )?(?:maximum|max_temp|limit)\b|"
+    r"\baborts? the macro\b")
+# Negators scope a claim when they sit shortly BEFORE it in the SAME
+# clause ("no out-of-range rejection", "not rejected"). They must not
+# rescue a neighbouring clause: "will not accept 240 — so the command is
+# rejected" asserts a refusal and stays red.
+_REFUSAL_NEGATOR_RE = re.compile(
+    r"(?i)\bno\b|\bnot\b|\bnever\b|\bnothing\b|\bneither\b|\bnor\b|"
+    r"\bwithout\b|\bnone\b|\bisn'?t\b|\baren'?t\b|\bwon'?t\b|"
+    r"\bdoesn'?t\b|\bdidn'?t\b|\bcan'?t\b|\bfree (?:of|from)\b")
+# Conditional / environmental frames: a refusal that only happens under a
+# condition or because of the host's own state is not a claim about the
+# command, and the qid's doctrine says those answers PASS.
+# PR #43 review F10: the bare conditional words (if / unless / would /
+# should / could / only if / assuming / depending / until / while) are
+# GONE from the scope. They scoped a clause WHOLESALE, and the three
+# probe wrong-answers showed the exploit: 'If you call PREHEAT T=240,
+# M104 S240 IS REJECTED', 'Should you run it, 240 is outside the range',
+# 'While M104 S240 renders, 240 EXCEEDS THE MAXIMUM' — the 'condition'
+# is the very invocation the tool output shows clean, so the frame is
+# rhetorical, not hypothetical. What remains scopes a real
+# location/state frame.
+# PR #43 second-pass L-5 — the residual, stated honestly: the claim
+# vocabulary above is INDICATIVE for the finite patterns (is rejected /
+# will refuse / won't be accepted), but THREE of them are TENSE-FREE —
+# 'out[ -]of[ -]range', 'exceeds? …', 'aborts? the macro' — and read the
+# same as a claim about what happened and as an irrealis hypothesis
+# ("240 would be out of range"). So F10's "an irrealis refusal never
+# reaches the scope check at all" was FALSE for those three, and a
+# correct hypothetical answer ("Were max_temp 200, the command would
+# exceed the maximum") was graded a refusal claim. They are NOT scoped
+# wholesale either — that is the F10 exploit ('Should you run it, 240 is
+# outside the range'). The guard is local instead: _irrealis_frame()
+# drops a tense-free hit only when a modal in its own preceding window
+# frames a hypothetical OUTCOME and no present-tense refusal verb pins
+# the clause to fact.
+_REFUSAL_SCOPE_RE = re.compile(
+    r"(?i)\breal printer\b|"
+    r"\byour (?:config|printer|extruder|max_temp)\b|"
+    r"\b(?:this|the) printer\b|\bthis host\b|\bworking config\b|\bthe config\b|"
+    r"\bno \[extruder\]\b|\bhypothetical\b|\bcase where\b|"
+    r"\bright now\b|\bmust be (?:set|configured)\b")
+_NEGATOR_WINDOW = 45
+# The claim alternatives that carry no tense of their own. `match` against
+# the MATCHED TEXT (not the clause) so only these three take the guard.
+_REFUSAL_TENSE_FREE_RE = re.compile(
+    r"(?i)^(?:out[ -]of[ -]range|outside the range|exceeds?|aborts?)")
+# PR #43 second-pass L-5: ~40 chars before the hit. A modal there means
+# the sentence narrates a hypothetical outcome instead of claiming a
+# refusal — unless the window also names a present-tense refusal, which
+# pins the clause to fact ("M104 S300 exceeds the maximum").
+_IRREALIS_WINDOW = 40
+_IRREALIS_MODAL_RE = re.compile(
+    r"(?i)\b(?:would|could|should|might|will)\b|['\u2019]d\b")
+_PRESENT_REFUSAL_RE = re.compile(
+    r"(?i)\b(?:is|are|was|were|gets?|got|has|have)\b[^,;:.!?\n]{0,24}?"
+    r"(?:refused|rejected|exceed\w*|abort\w*|out[ -]of[ -]range)")
+
+
+def _irrealis_frame(clause: str, start: int) -> bool:
+    """Does a modal frame the tense-free claim at `start` as a hypothesis?
+
+    Local by design: the modal must sit in the claim's OWN window, so a
+    conditional anywhere else in the sentence cannot scope it (F10). A
+    modal that OPENS the clause ('Should you run it, …') is an inverted
+    conditional — grammatical mood, the rhetorical frame F10 rejected —
+    not a hypothetical outcome, so it does not count.
+    """
+    win_start = max(0, start - _IRREALIS_WINDOW)
+    window = clause[win_start:start]
+    lead = len(clause) - len(clause.lstrip())
+    modal = any(win_start + m.start() > lead
+                for m in _IRREALIS_MODAL_RE.finditer(window))
+    if not modal:
+        return False
+    return _PRESENT_REFUSAL_RE.search(window) is None
+
+
+def _verdict_clauses(text: str) -> list[str]:
+    """Clauses for verdict grading: sentence enders plus em/en dashes and
+    " - " (the models' verdict frames: "240 is in range — no rejection")."""
+    text = re.sub(r"[\u2014\u2013]", ";", text)
+    return [c for c in re.split(r"[.;:!?\n]| - ", text) if c.strip()]
+
+
+# ── clause scoping for `not_asserted` (PR #43 second pass L-3/L-4/L-6) ──
+def _clause_enders(text: str) -> list[int]:
+    """Positions of sentence enders, IGNORING a decimal point.
+
+    L-6: clause starts came from rfind('.') over '.!?\\n', so the '.' in
+    "no 1.8 unbalanced offset" opened a fake clause and dropped the
+    negator that was still in front of the phrase (a false error).
+    """
+    return [
+        i for i, ch in enumerate(text)
+        if ch in ".!?\n" and not (
+            ch == "." and 0 < i < len(text) - 1
+            and text[i - 1].isdigit() and text[i + 1].isdigit())
+    ]
+
+
+# L-4: the hedge/booster neutralizer was a CLOSED list while hedges are an
+# OPEN set, so an unlisted spelling ("not fully sure", "no question",
+# "nothing to worry about") left its 'not/no/nothing' behind as a negator
+# and rescued the very assertion it hedged — a false PASS in the dangerous
+# direction. The grammar: an optional first-person frame, a negator, up to
+# three filler words, one hedge noun — in two families. Confidence/belief
+# words may introduce an embedded claim ("not sure THAT macro is
+# unbalanced"), so a complementizer hedges too. Concern words hedge only
+# when the clause BREAKS after them: "no concern about the unbalanced
+# block" / "no concern that anything is unbalanced" are negated mentions
+# (the negated noun takes the claim as its complement), while "No concern
+# here: the macro renders empty" frames a claim that follows.
+_HEDGE_LEAD = (
+    r"\b(?:(?:i'?m|i am|it'?s|that'?s|we'?re|we are|this is)\s+)?"
+    r"(?:not|no|nothing|never)\s+(?:[a-z'\u2019-]+\s+){0,3}?")
+_HEDGE_TAIL = (
+    r"(?:\s+(?:about|here|really|at all|whatsoever|either|then|it|that))*")
+_HEDGE_RE = re.compile(
+    "(?i)" + _HEDGE_LEAD
+    # Confidence / belief words may embed the claim itself ("not sure THAT
+    # macro is unbalanced"), so a 'that/whether/if' complementizer hedges
+    # too.
+    + r"(?:sure|certain|confident|convinced|question|doubt)\b" + _HEDGE_TAIL
+    + r"(?=[,;:.!?\n]| - |$|\s+(?:that|whether|if)\b)"
+    + "|" + _HEDGE_LEAD
+    # Concern words hedge only when the clause BREAKS: "no concern that
+    # anything is unbalanced" negates the claim itself (a real negation,
+    # the negator must stay in scope), while "No concern here: the macro
+    # renders empty" frames a claim that follows.
+    + r"(?:concern|worry|problem|issue|surprise)\b" + _HEDGE_TAIL
+    + r"(?=[,;:.!?\n]| - |$)")
+
+
+def _strip_hedges(clause: str) -> str:
+    """Blank out epistemic hedges/boosters, length preserved so positions
+    computed against the clause still line up. Blanked, never deleted:
+    the surviving-negator test compares offsets."""
+    out = list(clause)
+    for m in _HEDGE_RE.finditer(clause):
+        for k in range(m.start(), m.end()):
+            if out[k] != " ":
+                out[k] = " "
+    return "".join(out)
+
+
 def criterion_ok(kind: str, value: str, content: str,
                  memory: tuple[str, dict | None] | None = None,
                  tool_calls: list[dict] | None = None,
@@ -3433,14 +4430,25 @@ def criterion_ok(kind: str, value: str, content: str,
     if kind == "staged_file":
         return any(e.get("file") == value for e in pending_edits or [])
     if kind == "skill_loaded":
-        # Phase 3 trace criterion: load_skill executed (arguments ignored).
-        # Activation is ALSO covered by expected_tools for True-labelled
-        # questions; this kind exists for paired assertions.
-        return any(c.get("name") == "load_skill" for c in tool_calls or [])
+        # Phase 3 trace criterion: load_skill executed. W4-R2: when VALUE
+        # names a skill, the load_skill call's `name` argument must match
+        # ('' arg = config-editing, the legacy convention). Empty value =
+        # any load_skill (paired activation assertions keep working).
+        if not value:
+            return any(c.get("name") == "load_skill" for c in tool_calls or [])
+        return any(c.get("name") == "load_skill"
+                   and _skill_arg_name(c) == value
+                   for c in tool_calls or [])
     if kind == "skill_not_loaded":
-        # Negative control: a non-edit request must not pay for an
-        # irrelevant edit-law load (false-positive rate denominator).
-        return not any(c.get("name") == "load_skill" for c in tool_calls or [])
+        # Negative control. W4-R2: VALUE may name a skill — the new FP
+        # class is a MACRO load paid on a plain edit (config-editing IS
+        # expected there, so the any-load kind cannot express it).
+        if not value:
+            return not any(c.get("name") == "load_skill"
+                           for c in tool_calls or [])
+        return not any(c.get("name") == "load_skill"
+                       and _skill_arg_name(c) == value
+                       for c in tool_calls or [])
     if kind == "staged_new_file":
         # `created` is the engine's own word (config_write, or a
         # move_section whose to_file was new) — an op-name test misses the
@@ -3524,6 +4532,75 @@ def criterion_ok(kind: str, value: str, content: str,
                 return not re.search(pattern, e.get("newText") or "",
                                      re.IGNORECASE | re.DOTALL)
         return False
+    if kind == "staged_renders_clean":
+        # W2 RUNTIME CLASS (law A refined): the staged macros on the
+        # target file must not merely COMPILE — they are graded on the
+        # DECLARED state only (section params_* defaults ride every
+        # Klipper invocation; there is no single invocation of a staged
+        # macro). Static defects — empty/garbage declared defaults,
+        # broken literal lines — are ERROR findings and FAIL;
+        # param-dependent reads (no declared value) render as INFO and
+        # are NOT graded (3.1: no invocation is not a bare invocation).
+        # Graded by the SHARED render
+        # simulator — the same engine as the save gate and validate_macro,
+        # so the grader can never drift weaker than what ships.
+        # value = escaped target filename regex (e.g. "printer\\.cfg").
+        # An artifact is REQUIRED (staged_* family convention): nothing
+        # staged on the target file is a FAIL, not a pass.
+        if not pending_edits:
+            return False
+        pat = re.compile(value, re.IGNORECASE)
+        targets = [e for e in pending_edits
+                   if isinstance(e, dict) and pat.search(str(e.get("file", "")))
+                   and str(e.get("newText") or "").strip()]
+        if not targets:
+            return False
+        import sys as _sys
+        from pathlib import Path as _Path
+        _backend = str(_Path(__file__).resolve().parents[1] / "backend")
+        if _backend not in _sys.path:
+            _sys.path.insert(0, _backend)
+        from parser.config_parser import parse_config
+        from parser.validator import (_TEMPLATE_SECTION_BODIES,
+                                      _compile_macro_template,
+                                      _strip_inline_comments)
+        from parser.macro_render import simulate_macro
+        for e in targets:
+            try:
+                cfg = parse_config(str(e.get("newText")))
+            except Exception:
+                return False
+            for sec in cfg.sections:
+                if sec.section_type not in _TEMPLATE_SECTION_BODIES:
+                    continue
+                bp = _TEMPLATE_SECTION_BODIES[sec.section_type]
+                sp = sec.get_param(bp)
+                if sp is None or not str(sp.value).strip():
+                    continue
+                # Broken templates: the render engine deliberately defers
+                # syntax errors to the validator's Jinja check (dedup),
+                # so their findings never appear in simulate_macro. The
+                # grader runs that SAME check here — the criterion stays
+                # a superset of the save gate.
+                if _compile_macro_template(_strip_inline_comments(
+                        str(sp.value))) is not None:
+                    return False
+                declared = {
+                    q.key[len("params_"):].lower(): q.value
+                    for q in sec.params
+                    if q.key.startswith("params_") and not q.is_commented_out
+                }
+                try:
+                    sim = simulate_macro(str(sp.value),
+                                         declared_defaults=declared)
+                except Exception:
+                    return False
+                # Compile failures surface HERE as error findings — the
+                # simulator folds Jinja syntax/runtime errors into the
+                # same findings list (no separate compile_error field).
+                if any(f.severity == "error" for f in sim.findings):
+                    return False
+        return True
     if kind == "staged_section_regex":
         # "file::section::regex" — regex searched WITHIN the named
         # section body of the staged newText (section-aware so a stray
@@ -3575,6 +4652,93 @@ def criterion_ok(kind: str, value: str, content: str,
         return value.lower() in content.lower()
     if kind == "not_contains":
         return value.lower() not in content.lower()
+    if kind == "not_asserted":
+        # Negation-aware not_contains (2026-11-17, MACRO-14 lesson): a
+        # cry-wolf-clean answer may LEGITIMATELY name the defect it rules
+        # out ("so no 'unable to parse' risk at runtime") — naive
+        # containment false-failed it. The phrase may appear only inside
+        # a NEGATED CLAUSE. PR #43 review F11: the negation must be IN
+        # that clause — the old anywhere-in-sentence rule let the hedge
+        # 'NOT SURE, but that macro is UNBALANCED' pass, because 'not'
+        # from "not sure" rescued an assertion three words later. A
+        # sentence splits on enders AND 'but' (the word that separates a
+        # hedge from what it concedes): the negator must sit before the
+        # phrase inside the same clause. Conservative by design:
+        # ambiguous phrasing ("risk of unable to parse") stays RED.
+        neg = re.compile(r"\bno\b|\bnot\b|\bnever\b|\bnothing\b|neither|"
+                         r"won'?t|wouldn'?t|isn'?t|doesn'?t|aren'?t|"
+                         r"can'?not|avoid|free (?:of|from)|without",
+                         re.IGNORECASE)
+        low = content.lower()
+        phrase = value.lower()
+        # L-6: decimal points are not clause boundaries (see _clause_enders).
+        enders = _clause_enders(content)
+        idx = 0
+        while True:
+            i = low.find(phrase, idx)
+            if i < 0:
+                return True
+            start = 0
+            for e in enders:
+                if e >= i:
+                    break
+                start = e + 1
+            # 'but' opens a new clause for grading purposes: the hedge a
+            # negator lives behind it no longer scopes what follows.
+            # L-3: the offsets must stay ABSOLUTE. The old loop added each
+            # m.end() — measured against the slice taken at the ORIGINAL
+            # start — to an already-mutated start, so a second 'but' walked
+            # the header past the phrase ("no issue but a style note, but
+            # the macro is not unbalanced" lost its negator).
+            buts = list(re.finditer(r"\bbut\b", content[start:i],
+                                    re.IGNORECASE))
+            if buts:
+                start += buts[-1].end()
+            end = len(content)
+            for e in enders:
+                if e >= i + len(phrase):
+                    end = e
+                    break
+            clause_lo = low[start:end]
+            phrase_lo = i - start
+            # Epistemic hedges and assertion boosters are NOT negators:
+            # 'not sure', 'no doubt', 'not certain' speak about the
+            # speaker's confidence while the embedded claim stands
+            # (F11's 'No doubt about it: the macro renders empty').
+            # Stripped with length preserved so positions still align.
+            # L-4: pattern-based, not a closed list — an unlisted hedge
+            # ('not fully sure', 'no question', 'nothing to worry about')
+            # used to leave its negator behind and rescue the assertion.
+            clause_lo = _strip_hedges(clause_lo)
+            # The negator must PRECEDE the phrase inside its clause
+            # ('no risk of X'). Anything else ('X avoided', 'is
+            # unbalanced, not fine') stays RED — ambiguity is never
+            # scored as ruling the defect out.
+            negated = any(m.start() < phrase_lo
+                          for m in neg.finditer(clause_lo))
+            if not negated:
+                return False
+            idx = i + len(phrase)
+    if kind == "no_asserted_refusal":
+        # Prose-only; `value` is unused. Fails on the FIRST refusal claim
+        # that is NOT scoped — a claim preceded (same clause, short window)
+        # by a negator, or sitting in a conditional/environmental clause,
+        # is a refusal the answer RULES OUT or attributes to the host, and
+        # passes. See _REFUSAL_* above for why the test is inverted.
+        # L-5: the three tense-free claim patterns are dropped when their
+        # own window frames them as an irrealis hypothesis (_irrealis_frame).
+        for clause in _verdict_clauses(content):
+            for m in _REFUSAL_CLAIM_RE.finditer(clause):
+                if (_REFUSAL_TENSE_FREE_RE.match(m.group(0))
+                        and _irrealis_frame(clause, m.start())):
+                    continue
+                prefix = clause[:m.start()][-_NEGATOR_WINDOW:]
+                if _REFUSAL_NEGATOR_RE.search(prefix):
+                    continue
+                if _REFUSAL_SCOPE_RE.search(clause):
+                    continue
+                return False
+        return True
     if kind == "reply_not_regex":
         # Prose-claim NEGATIVE (C-01, round-1 review 2026-10-25): fails
         # when the final reply MATCHES the regex. value is
@@ -3638,6 +4802,20 @@ def criterion_ok(kind: str, value: str, content: str,
             if re.search(pattern, rendered, re.IGNORECASE):
                 return True
         return False
+    if kind == "tool_call_count":
+        # SIMTOOL family (W4R.4): "name::min" — at least <min> executed
+        # calls of tool_name in the trace. Structural evidence for
+        # "simulate BOTH states" jobs where two one-scenario calls are
+        # exactly as compliant as one two-scenario call (the alternative
+        # — regexing one scenarios JSON for two entries — false-fails
+        # the compliant two-call shape).
+        name, _, want = value.partition("::")
+        try:
+            minimum = int(want)
+        except ValueError:
+            return False
+        return sum(1 for call in tool_calls or []
+                   if call.get("name") == name) >= minimum
     if kind == "coverage":
         # BULK family (large-edit rework 2026-10-17):
         # "<file>::[<section-prefix>::]<min_sections>" — the captured
@@ -3740,6 +4918,25 @@ def criterion_ok(kind: str, value: str, content: str,
             if re.search(pattern, output, re.IGNORECASE | re.DOTALL):
                 return True
         return False
+    if kind == "tool_output_not_regex":
+        # value = "tool_name::regex" — passes when the tool was CALLED at
+        # least once and NO call's output matches the regex. The negative
+        # sibling of tool_output_regex, for "the tool must not have
+        # reported this defect" (SIMTOOL-02: simulate_macro flagging a mux
+        # target the project does not define). An uncalled tool never
+        # passes — absence of output is not evidence of a clean run.
+        name, _, pattern = value.partition("::")
+        seen_call = False
+        for call in tool_calls or []:
+            if call.get("name") != name:
+                continue
+            seen_call = True
+            output = call.get("output") or ""
+            if not isinstance(output, str):
+                output = json.dumps(output, ensure_ascii=False)
+            if re.search(pattern, output, re.IGNORECASE | re.DOTALL):
+                return False
+        return seen_call
     return False
 
 
@@ -4329,6 +5526,24 @@ def parse_question_filter(spec: str, questions: list[TestQuestion]) -> list[int]
 
 
 # ── Main ───────────────────────────────────────────────────────────────
+def exit_code_for(failed, errored, conditional) -> int:
+    """Process exit code for a finished run (review round-1 F11).
+
+    0 = every question clean; 2 = at least one FAIL or ERROR (unchanged);
+    3 = no hard failure but at least one CONDITIONAL pass — the answer was
+    right yet the required tool was never called (PASS*) or the wrong tool
+    was called (PASS+). Before this, a leg whose every required tool was
+    skipped still exited 0, so CI could not tell 'tool-use compliance' from
+    'answered without the tool'. 1 stays fatal-setup, 3 also flags the
+    API-key-leak guard.
+    """
+    if failed or errored:
+        return 2
+    if conditional:
+        return 3
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Test AI chat accuracy and MCP tool usage against the running backend.",
@@ -4409,7 +5624,7 @@ def main() -> int:
                              "printer memory, blank it, run MEMORY-01..03, then restore it")
     args = parser.parse_args()
 
-    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions() + build_edit_tool_questions() + build_rename_questions() + build_comment_questions() + build_skill_gate_questions() + build_tool_coverage_questions() + build_ack_guard_questions() + build_bulk_questions()
+    questions = build_questions() + build_macro_questions() + build_trident_questions() + build_ambiguity_questions() + build_setup_questions() + build_live_context_questions() + build_edit_tool_questions() + build_rename_questions() + build_comment_questions() + build_skill_gate_questions() + build_tool_coverage_questions() + build_ack_guard_questions() + build_bulk_questions() + build_simtool_questions() + build_macro_skill_questions()
     if args.include_memory:
         questions += build_memory_questions()
     if args.list_questions:
@@ -4623,7 +5838,8 @@ def main() -> int:
         if usage.get("truncated"):
             tok_s += "*"  # * = hit max_tokens (finish_reason=length), possibly truncated
         log.write(f"{r.qid:<5} {r.status:<15} {str(r.answer_ok):<7} {str(r.tool_ok):<7} "
-                  f"{r.tool_turns:<6} {tok_s:<8} {','.join(r.tool_names) or '-'}")
+                  f"{str(r.tool_turns if r.tool_turns is not None else '-'):<6} "
+                  f"{tok_s:<8} {','.join(r.tool_names) or '-'}")
     if truncated_results:
         log.write("")
         log.write(f"Truncated (hit max_tokens budget, finish_reason=length): {len(truncated_results)}")
@@ -4736,7 +5952,7 @@ def main() -> int:
         print(f"Tools NEVER used: {', '.join(missing)}")
     print(f"\nFull log: {log_path}")
     print(f"Machine-readable: {results_path}")
-    return 0 if not failed and not errored else 2
+    return exit_code_for(failed, errored, conditional)
 
 
 if __name__ == "__main__":
