@@ -4196,12 +4196,22 @@ _REFUSAL_NEGATOR_RE = re.compile(
 # M104 S240 IS REJECTED', 'Should you run it, 240 is outside the range',
 # 'While M104 S240 renders, 240 EXCEEDS THE MAXIMUM' — the 'condition'
 # is the very invocation the tool output shows clean, so the frame is
-# rhetorical, not hypothetical. The removal costs nothing legitimate:
-# a genuinely conditional refusal is stated irrealis ('would refuse only
-# if ...'), and the claim vocabulary above only matches INDICATIVE
-# claims (is rejected / will refuse / exceeds / aborts) — an irrealis
-# refusal never reaches the scope check at all. What remains scopes a
-# real location/state frame.
+# rhetorical, not hypothetical. What remains scopes a real
+# location/state frame.
+# PR #43 second-pass L-5 — the residual, stated honestly: the claim
+# vocabulary above is INDICATIVE for the finite patterns (is rejected /
+# will refuse / won't be accepted), but THREE of them are TENSE-FREE —
+# 'out[ -]of[ -]range', 'exceeds? …', 'aborts? the macro' — and read the
+# same as a claim about what happened and as an irrealis hypothesis
+# ("240 would be out of range"). So F10's "an irrealis refusal never
+# reaches the scope check at all" was FALSE for those three, and a
+# correct hypothetical answer ("Were max_temp 200, the command would
+# exceed the maximum") was graded a refusal claim. They are NOT scoped
+# wholesale either — that is the F10 exploit ('Should you run it, 240 is
+# outside the range'). The guard is local instead: _irrealis_frame()
+# drops a tense-free hit only when a modal in its own preceding window
+# frames a hypothetical OUTCOME and no present-tense refusal verb pins
+# the clause to fact.
 _REFUSAL_SCOPE_RE = re.compile(
     r"(?i)\breal printer\b|"
     r"\byour (?:config|printer|extruder|max_temp)\b|"
@@ -4209,6 +4219,39 @@ _REFUSAL_SCOPE_RE = re.compile(
     r"\bno \[extruder\]\b|\bhypothetical\b|\bcase where\b|"
     r"\bright now\b|\bmust be (?:set|configured)\b")
 _NEGATOR_WINDOW = 45
+# The claim alternatives that carry no tense of their own. `match` against
+# the MATCHED TEXT (not the clause) so only these three take the guard.
+_REFUSAL_TENSE_FREE_RE = re.compile(
+    r"(?i)^(?:out[ -]of[ -]range|outside the range|exceeds?|aborts?)")
+# PR #43 second-pass L-5: ~40 chars before the hit. A modal there means
+# the sentence narrates a hypothetical outcome instead of claiming a
+# refusal — unless the window also names a present-tense refusal, which
+# pins the clause to fact ("M104 S300 exceeds the maximum").
+_IRREALIS_WINDOW = 40
+_IRREALIS_MODAL_RE = re.compile(
+    r"(?i)\b(?:would|could|should|might|will)\b|['\u2019]d\b")
+_PRESENT_REFUSAL_RE = re.compile(
+    r"(?i)\b(?:is|are|was|were|gets?|got|has|have)\b[^,;:.!?\n]{0,24}?"
+    r"(?:refused|rejected|exceed\w*|abort\w*|out[ -]of[ -]range)")
+
+
+def _irrealis_frame(clause: str, start: int) -> bool:
+    """Does a modal frame the tense-free claim at `start` as a hypothesis?
+
+    Local by design: the modal must sit in the claim's OWN window, so a
+    conditional anywhere else in the sentence cannot scope it (F10). A
+    modal that OPENS the clause ('Should you run it, …') is an inverted
+    conditional — grammatical mood, the rhetorical frame F10 rejected —
+    not a hypothetical outcome, so it does not count.
+    """
+    win_start = max(0, start - _IRREALIS_WINDOW)
+    window = clause[win_start:start]
+    lead = len(clause) - len(clause.lstrip())
+    modal = any(win_start + m.start() > lead
+                for m in _IRREALIS_MODAL_RE.finditer(window))
+    if not modal:
+        return False
+    return _PRESENT_REFUSAL_RE.search(window) is None
 
 
 def _verdict_clauses(text: str) -> list[str]:
@@ -4216,6 +4259,67 @@ def _verdict_clauses(text: str) -> list[str]:
     " - " (the models' verdict frames: "240 is in range — no rejection")."""
     text = re.sub(r"[\u2014\u2013]", ";", text)
     return [c for c in re.split(r"[.;:!?\n]| - ", text) if c.strip()]
+
+
+# ── clause scoping for `not_asserted` (PR #43 second pass L-3/L-4/L-6) ──
+def _clause_enders(text: str) -> list[int]:
+    """Positions of sentence enders, IGNORING a decimal point.
+
+    L-6: clause starts came from rfind('.') over '.!?\\n', so the '.' in
+    "no 1.8 unbalanced offset" opened a fake clause and dropped the
+    negator that was still in front of the phrase (a false error).
+    """
+    return [
+        i for i, ch in enumerate(text)
+        if ch in ".!?\n" and not (
+            ch == "." and 0 < i < len(text) - 1
+            and text[i - 1].isdigit() and text[i + 1].isdigit())
+    ]
+
+
+# L-4: the hedge/booster neutralizer was a CLOSED list while hedges are an
+# OPEN set, so an unlisted spelling ("not fully sure", "no question",
+# "nothing to worry about") left its 'not/no/nothing' behind as a negator
+# and rescued the very assertion it hedged — a false PASS in the dangerous
+# direction. The grammar: an optional first-person frame, a negator, up to
+# three filler words, one hedge noun — in two families. Confidence/belief
+# words may introduce an embedded claim ("not sure THAT macro is
+# unbalanced"), so a complementizer hedges too. Concern words hedge only
+# when the clause BREAKS after them: "no concern about the unbalanced
+# block" / "no concern that anything is unbalanced" are negated mentions
+# (the negated noun takes the claim as its complement), while "No concern
+# here: the macro renders empty" frames a claim that follows.
+_HEDGE_LEAD = (
+    r"\b(?:(?:i'?m|i am|it'?s|that'?s|we'?re|we are|this is)\s+)?"
+    r"(?:not|no|nothing|never)\s+(?:[a-z'\u2019-]+\s+){0,3}?")
+_HEDGE_TAIL = (
+    r"(?:\s+(?:about|here|really|at all|whatsoever|either|then|it|that))*")
+_HEDGE_RE = re.compile(
+    "(?i)" + _HEDGE_LEAD
+    # Confidence / belief words may embed the claim itself ("not sure THAT
+    # macro is unbalanced"), so a 'that/whether/if' complementizer hedges
+    # too.
+    + r"(?:sure|certain|confident|convinced|question|doubt)\b" + _HEDGE_TAIL
+    + r"(?=[,;:.!?\n]| - |$|\s+(?:that|whether|if)\b)"
+    + "|" + _HEDGE_LEAD
+    # Concern words hedge only when the clause BREAKS: "no concern that
+    # anything is unbalanced" negates the claim itself (a real negation,
+    # the negator must stay in scope), while "No concern here: the macro
+    # renders empty" frames a claim that follows.
+    + r"(?:concern|worry|problem|issue|surprise)\b" + _HEDGE_TAIL
+    + r"(?=[,;:.!?\n]| - |$)")
+
+
+def _strip_hedges(clause: str) -> str:
+    """Blank out epistemic hedges/boosters, length preserved so positions
+    computed against the clause still line up. Blanked, never deleted:
+    the surviving-negator test compares offsets."""
+    out = list(clause)
+    for m in _HEDGE_RE.finditer(clause):
+        for k in range(m.start(), m.end()):
+            if out[k] != " ":
+                out[k] = " "
+    return "".join(out)
 
 
 def criterion_ok(kind: str, value: str, content: str,
@@ -4567,23 +4671,34 @@ def criterion_ok(kind: str, value: str, content: str,
                          re.IGNORECASE)
         low = content.lower()
         phrase = value.lower()
+        # L-6: decimal points are not clause boundaries (see _clause_enders).
+        enders = _clause_enders(content)
         idx = 0
         while True:
             i = low.find(phrase, idx)
             if i < 0:
                 return True
             start = 0
-            for t in ".!?\n":
-                start = max(start, content.rfind(t, 0, i) + 1)
+            for e in enders:
+                if e >= i:
+                    break
+                start = e + 1
             # 'but' opens a new clause for grading purposes: the hedge a
             # negator lives behind it no longer scopes what follows.
-            for m in re.finditer(r"\bbut\b", content[start:i], re.IGNORECASE):
-                start = max(start, start + m.end())
+            # L-3: the offsets must stay ABSOLUTE. The old loop added each
+            # m.end() — measured against the slice taken at the ORIGINAL
+            # start — to an already-mutated start, so a second 'but' walked
+            # the header past the phrase ("no issue but a style note, but
+            # the macro is not unbalanced" lost its negator).
+            buts = list(re.finditer(r"\bbut\b", content[start:i],
+                                    re.IGNORECASE))
+            if buts:
+                start += buts[-1].end()
             end = len(content)
-            for t in ".!?\n":
-                e = content.find(t, i + len(phrase))
-                if e != -1:
-                    end = min(end, e)
+            for e in enders:
+                if e >= i + len(phrase):
+                    end = e
+                    break
             clause_lo = low[start:end]
             phrase_lo = i - start
             # Epistemic hedges and assertion boosters are NOT negators:
@@ -4591,10 +4706,10 @@ def criterion_ok(kind: str, value: str, content: str,
             # speaker's confidence while the embedded claim stands
             # (F11's 'No doubt about it: the macro renders empty').
             # Stripped with length preserved so positions still align.
-            clause_lo = re.sub(
-                r"(?i)\b(?:no doubt|not sure|not certain|not confident|"
-                r"not convinced|unsure)\b",
-                lambda m: " " * (m.end() - m.start()), clause_lo)
+            # L-4: pattern-based, not a closed list — an unlisted hedge
+            # ('not fully sure', 'no question', 'nothing to worry about')
+            # used to leave its negator behind and rescue the assertion.
+            clause_lo = _strip_hedges(clause_lo)
             # The negator must PRECEDE the phrase inside its clause
             # ('no risk of X'). Anything else ('X avoided', 'is
             # unbalanced, not fine') stays RED — ambiguity is never
@@ -4610,8 +4725,13 @@ def criterion_ok(kind: str, value: str, content: str,
         # by a negator, or sitting in a conditional/environmental clause,
         # is a refusal the answer RULES OUT or attributes to the host, and
         # passes. See _REFUSAL_* above for why the test is inverted.
+        # L-5: the three tense-free claim patterns are dropped when their
+        # own window frames them as an irrealis hypothesis (_irrealis_frame).
         for clause in _verdict_clauses(content):
             for m in _REFUSAL_CLAIM_RE.finditer(clause):
+                if (_REFUSAL_TENSE_FREE_RE.match(m.group(0))
+                        and _irrealis_frame(clause, m.start())):
+                    continue
                 prefix = clause[:m.start()][-_NEGATOR_WINDOW:]
                 if _REFUSAL_NEGATOR_RE.search(prefix):
                     continue
