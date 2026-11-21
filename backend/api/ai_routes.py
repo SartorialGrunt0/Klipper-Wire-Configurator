@@ -326,6 +326,10 @@ class ContextWindowRequest(ModelsRequest):
     model: str = ""
 
 
+class ReasoningLevelsRequest(ContextWindowRequest):
+    """Reasoning-effort discovery: the same credentials + active model."""
+
+
 class ChatRequest(BaseModel):
     messages: list[dict]
     apiKey: str
@@ -349,8 +353,20 @@ class ChatRequest(BaseModel):
     # --jinja 2026-09); the loop still regex-extracts text calls as a
     # fallback. "text" forces the ```tool protocol (escape hatch for
     # servers that advertise tools but emit template garbage); "native"
-    # pins native explicitly. scripts/ai_chat_accuracy_test.py A/Bs these.
+    #    pins native explicitly. scripts/ai_chat_accuracy_test.py A/Bs these.
     toolProtocol: str = "auto"
+    # Reasoning-effort override (frontend setting / harness runs). The level
+    # string is forwarded verbatim as top-level `reasoning_effort`, and ONLY
+    # for the openai-compatible provider (scope call 2026-11-21) — the field
+    # is the OpenAI-standard one and every OpenAI-compatible server that
+    # honors reasoning accepts it (llama.cpp, vLLM, Ollama /v1; llama-swap
+    # forwards unknown body keys untouched to its upstream). "default" or
+    # "" = send NOTHING: an omitted field means the model default on every
+    # server, while a literal "default" string is not a valid level anywhere
+    # (llama.cpp would pass it into the chat template). Levels come from
+    # POST /ai/reasoning-levels; a server that rejects the chosen value gets
+    # the field stripped and the request retried ONCE inside _query_provider.
+    reasoningEffort: str = "default"
     # Tool-mediated editing override (harness A/B runs ONLY; the frontend
     # never sends it). The write tools are unconditional product behavior
     # since the Phase-6 flag removal (2026-09-24); True/False forces
@@ -4279,6 +4295,7 @@ def _build_provider_payload(
     temperature: float | None = None,
     tools: list[dict] | None = None,
     merge_system: bool = True,
+    reasoning_effort: str | None = None,
 ) -> dict:
     """Build the request payload for the given provider.
 
@@ -4371,6 +4388,20 @@ def _build_provider_payload(
         }
         if tools:
             payload["tools"] = tools
+        # Reasoning effort: openai-compatible ONLY (scope 2026-11-21). The
+        # chatgpt/google/github paths share this OpenAI-shaped branch but
+        # deliberately never receive the field — cloud effort support is
+        # out of scope, and a setting saved under a local endpoint must not
+        # silently ride along after a provider switch. "default"/"" sends
+        # NOTHING (omitted field = model default on every server; a literal
+        # "default" is an invalid level everywhere).
+        # Trim at the boundary: the gate compares against 'default', so a
+        # padded level from a raw API caller (' high ', ' default ') must
+        # not ship untrimmed bytes (product clients all normalize, but this
+        # function IS the intended gate).
+        effort = (reasoning_effort or "").strip()
+        if provider == "openai-compatible" and effort and effort != "default":
+            payload["reasoning_effort"] = effort
 
     return payload
 
@@ -4402,6 +4433,24 @@ def _shape_for_send(url: str, payload: dict) -> str:
     """
     model = str(payload.get("model", "") or "")
     return _learned_shape(url, model) or _default_shape(model)
+
+
+# (url, model) pairs that 400'd the reasoning_effort field — omit the field
+# PROACTIVELY for them afterwards (LibreChat's drop-on-incompatible rule,
+# server-side: at most one wasted round-trip per pair instead of one per
+# request). In-process state, same lifetime class as the stop-event registry.
+_effort_rejected_endpoints: set[tuple[str, str]] = set()
+_EFFORT_REJECTED_ENDPOINTS_MAX = 256
+
+
+def _looks_like_reasoning_effort_rejection(status: int, body_text: str) -> bool:
+    """True when a 4xx is the server rejecting OUR reasoning_effort field.
+    Literal matcher only: the response must name the field. Never infer
+    intent from prose (intent law)."""
+    if status not in (400, 422):
+        return False
+    lowered = body_text.lower()
+    return "reasoning_effort" in lowered or "reasoning effort" in lowered
 
 
 async def _query_provider(
@@ -4457,6 +4506,12 @@ async def _query_provider(
             return await query_task
         return await client.post(url, headers=headers, json=body)
 
+    effort_remember_key = (url, str(payload.get("model", "") or ""))
+    if "reasoning_effort" in payload and effort_remember_key in _effort_rejected_endpoints:
+        # Already proven incompatible for this endpoint+model — omit without
+        # paying for the 400 again.
+        payload = {k: v for k, v in payload.items() if k != "reasoning_effort"}
+
     # ── C2 shape ladder: a template rejection downgrades the wire shape and
     # retries inside THIS request (never surfaced as a user-visible failure);
     # every other failure propagates on the first try.
@@ -4472,6 +4527,28 @@ async def _query_provider(
                 _remember_shape(url, model_id, shape, persist=downgraded)
             break
         body_text = _response_error_text(resp)
+        # Reasoning-effort degradation lives INSIDE the current rung: a 4xx
+        # that NAMES the field we added is OUR input, not the provider's
+        # failure — drop the field and retry this shape once (the matcher is
+        # literal, intent law, so no unrelated error is swallowed). The pair
+        # is remembered only when that retry SUCCEEDS; if it still fails,
+        # the fresh body falls through to the shape-ladder logic below.
+        if "reasoning_effort" in send_payload and _looks_like_reasoning_effort_rejection(
+                resp.status_code, body_text):
+            logger.warning(
+                "Provider rejected reasoning_effort=%s | field dropped, request retried once | context=%s",
+                send_payload.get("reasoning_effort"), context,
+            )
+            payload = {k: v for k, v in payload.items() if k != "reasoning_effort"}
+            send_payload = _reshape_for_template_fallback(payload, shape)
+            resp = await _post_once(send_payload)
+            if getattr(resp, "status_code", 200) < 400:
+                if len(_effort_rejected_endpoints) < _EFFORT_REJECTED_ENDPOINTS_MAX:
+                    _effort_rejected_endpoints.add(effort_remember_key)
+                if _learned_shape(url, model_id) != shape:
+                    _remember_shape(url, model_id, shape, persist=downgraded)
+                break
+            body_text = _response_error_text(resp)
         remaining = rungs[rung_index + 1:]
         if not (remaining and _looks_like_template_rejection(
                 resp.status_code, body_text)):
@@ -4643,6 +4720,20 @@ def _models_url_from_chat_url(api_url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, models_path, "", "", ""))
 
 
+def _props_url_from_chat_url(api_url: str) -> str:
+    """llama.cpp-style capability endpoint at the server ROOT.
+
+    The chat URL's version prefix is NOT part of it:
+      http://host:8080/v1/chat/completions -> http://host:8080/props
+    (GET /props is llama-server's; llama-swap answers it too and proxies
+    ?model=<id> to the upstream llama-server.)
+    """
+    parsed = urlparse(api_url)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return urlunparse((parsed.scheme, parsed.netloc, "/props", "", "", ""))
+
+
 def _provider_auth_headers(provider: str, api_url: str, api_key: str) -> dict:
     """Build auth headers for the configured provider.
 
@@ -4704,6 +4795,102 @@ async def list_models(req: ModelsRequest):
                     ids.append(m["id"])
     logger.info("Model list | provider=%s url=%s count=%d", provider, models_url, len(ids))
     return {"models": ids}
+
+
+@router.post("/ai/reasoning-levels")
+async def reasoning_levels(req: ReasoningLevelsRequest):
+    """Discover the reasoning-effort levels an endpoint accepts for one model.
+
+    Effort CONTROL is wired for the openai-compatible provider only (scope
+    2026-11-21), so every other provider answers empty and the UI shows the
+    setting nowhere. The metadata source is llama.cpp's GET /props
+    (chat_template_caps.reasoning_effort_levels — ordered lowest->highest;
+    reasoning_effort_rejected values are filtered out; llama-swap proxies
+    ?model=<id> through to its upstream). Probing the router's /props may
+    BOOT the model on demand, which is why only the SELECTED model is ever
+    probed, never the whole list.
+
+    The source field is the contract:
+      "props" -> authoritative. `levels` are exactly what the server
+                 accepts; [] means the server says this model has NO
+                 configurable effort — the client must show Default alone,
+                 never an assumed ladder.
+      null    -> nothing advertised (vLLM/Ollama cards, an older llama.cpp
+                 build without chat_template_caps, or an unreachable /props)
+                 -> the client may offer its conservative assumed ladder
+                 (low/medium/high), clearly labelled as assumed.
+    """
+    provider = req.apiProvider.value if hasattr(req.apiProvider, "value") else req.apiProvider
+    if provider != "openai-compatible":
+        return {"levels": [], "source": None}
+    props_url = _props_url_from_chat_url(req.apiUrl)
+    if not props_url:
+        return {"levels": [], "source": None}
+
+    headers = _provider_auth_headers(provider, req.apiUrl, req.apiKey)
+    timeout = httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=30.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                res = await client.get(props_url, headers=headers)
+                res.raise_for_status()
+            except httpx.HTTPError:
+                if not req.model:
+                    raise
+                # llama-swap's /props REQUIRES ?model=<id> (it may boot the
+                # model on demand to answer); llama.cpp router mode answers
+                # bare and is handled below. Retry the documented shape
+                # before declaring nothing advertised.
+                res = await client.get(props_url, params={"model": req.model}, headers=headers)
+                res.raise_for_status()
+            data = res.json()
+            if isinstance(data, dict) and data.get("role") == "router" and req.model:
+                # Multi-model router: caps are per model, so ask for the
+                # selected one (see the boot-on-demand note above).
+                res = await client.get(props_url, params={"model": req.model}, headers=headers)
+                res.raise_for_status()
+                data = res.json()
+    except httpx.TimeoutException:
+        logger.warning("Reasoning levels timeout | url=%s", props_url)
+        return {"levels": [], "source": None, "error": "Timed out probing reasoning levels"}
+    except httpx.HTTPError as e:
+        logger.warning("Reasoning levels probe failed | url=%s error=%s", props_url, e)
+        return {"levels": [], "source": None, "error": f"Failed to probe reasoning levels: {e}"}
+    except ValueError:
+        # Same lesson as the W7 route: a 200 with a non-JSON body (a
+        # mis-pointed apiUrl hitting a landing page) degrades gracefully,
+        # it must never 500.
+        logger.warning("Reasoning levels probe got non-JSON body | url=%s", props_url)
+        return {"levels": [], "source": None, "error": "Reasoning levels probe returned a non-JSON body"}
+
+    if not isinstance(data, dict):
+        return {"levels": [], "source": None}
+    caps = data.get("chat_template_caps")
+    if not isinstance(caps, dict):
+        # Older llama.cpp build / non-llama server: no caps block.
+        return {"levels": [], "source": None}
+    if caps.get("supports_reasoning_effort") is not True:
+        # Answered from props, and props says: no configurable effort here.
+        return {"levels": [], "source": "props"}
+    raw_levels = caps.get("reasoning_effort_levels")
+    if not isinstance(raw_levels, (list, tuple)):
+        # Claims support but carries no usable level list (a number, a
+        # string, garbage): that is UNANSWERED, not an authoritative empty —
+        # degrade to the assumed ladder rather than pretending props listed
+        # nothing, and never TypeError the route.
+        return {"levels": [], "source": None}
+    raw_rejected = caps.get("reasoning_effort_rejected")
+    rejected = (
+        {lv for lv in raw_rejected if isinstance(lv, str)}
+        if isinstance(raw_rejected, (list, tuple))
+        else set()
+    )
+    levels = [
+        lv for lv in raw_levels
+        if isinstance(lv, str) and lv.strip() and lv not in rejected
+    ]
+    logger.info("Reasoning levels | url=%s model=%s levels=%s", props_url, req.model, levels)
+    return {"levels": levels, "source": "props"}
 
 
 def _positive_int(value: object) -> int | None:
@@ -5114,6 +5301,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
                 temperature=req.temperature,
                 tools=native_tools,
                 merge_system=req.mergeSystemMessages,
+                reasoning_effort=req.reasoningEffort,
             )
 
             current_content, current_data = await _query_provider(
@@ -5295,6 +5483,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
                         temperature=req.temperature,
                         tools=native_tools,
                         merge_system=req.mergeSystemMessages,
+                        reasoning_effort=req.reasoningEffort,
                     )
                     current_content, current_data = await _query_provider(
                         client, req.apiUrl, headers, _steer_payload,
@@ -5347,6 +5536,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
                             temperature=req.temperature,
                             tools=native_tools,
                             merge_system=req.mergeSystemMessages,
+                            reasoning_effort=req.reasoningEffort,
                         )
                         current_content, current_data = await _query_provider(
                             client, req.apiUrl, headers, malformed_payload, req.apiProvider,
@@ -5457,6 +5647,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
                             temperature=req.temperature,
                             tools=native_tools,
                             merge_system=req.mergeSystemMessages,
+                            reasoning_effort=req.reasoningEffort,
                         )
                         current_content, current_data = await _query_provider(
                             client, req.apiUrl, headers, nudge_payload,
@@ -5508,6 +5699,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
                                 temperature=req.temperature,
                                 tools=native_tools,
                                 merge_system=req.mergeSystemMessages,
+                                reasoning_effort=req.reasoningEffort,
                             )
                             current_content, current_data = await _query_provider(
                                 client, req.apiUrl, headers, verdict_payload,
@@ -5577,6 +5769,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
                             temperature=req.temperature,
                             tools=native_tools,
                             merge_system=req.mergeSystemMessages,
+                            reasoning_effort=req.reasoningEffort,
                         )
                         current_content, current_data = await _query_provider(
                             client, req.apiUrl, headers, ack_payload,
@@ -5846,6 +6039,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
                     temperature=req.temperature,
                     tools=native_tools,
                     merge_system=req.mergeSystemMessages,
+                    reasoning_effort=req.reasoningEffort,
                 )
                 current_content, current_data = await _query_provider(
                     client, req.apiUrl, headers, tool_payload, req.apiProvider,
@@ -5945,6 +6139,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
                     temperature=req.temperature,
                     tools=None,
                     merge_system=req.mergeSystemMessages,
+                    reasoning_effort=req.reasoningEffort,
                 )
                 current_content, current_data = await _query_provider(
                     client, req.apiUrl, headers, retry_payload, req.apiProvider,

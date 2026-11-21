@@ -898,6 +898,12 @@ export interface AiChatRequest {
   /** Tool-calling protocol override: 'auto' (scheme split), 'native', 'text'. */
   toolProtocol?: 'auto' | 'native' | 'text';
   /**
+   * Reasoning effort for openai-compatible endpoints ('default' = send
+   * nothing). The backend forwards the string verbatim as top-level
+   * reasoning_effort and ONLY for that provider.
+   */
+  reasoningEffort?: string;
+  /**
    * Loaded user-config content (filename -> {content, label}) for the
    * backend's config-grounding fallback. Held server-side only — it is NOT
    * injected into the prompt; the backend uses it when the model answers a
@@ -1198,6 +1204,45 @@ export async function listModels(
     };
   } catch {
     return { models: [], error: 'Failed to reach the backend' };
+  }
+}
+
+export interface ReasoningLevelsResponse {
+  levels: string[];
+  /** 'props' = authoritative from the endpoint; null = nothing advertised. */
+  source: 'props' | null;
+  error?: string;
+}
+
+/**
+ * Probe the reasoning-effort levels an OpenAI-compatible endpoint accepts
+ * for ONE model (same server-side-proxy rationale as listModels: CORS + key
+ * handling). Probing a router may boot the model, so only the SELECTED model
+ * is ever probed — never the whole list.
+ */
+export async function probeReasoningLevels(
+  provider: string,
+  apiUrl: string,
+  apiKey: string,
+  model: string,
+): Promise<ReasoningLevelsResponse> {
+  try {
+    const res = await fetch('/ai/reasoning-levels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiProvider: provider, apiUrl, apiKey, model }),
+    });
+    if (!res.ok) {
+      return { levels: [], source: null, error: `Failed to probe reasoning levels (HTTP ${res.status})` };
+    }
+    const data = (await res.json()) as ReasoningLevelsResponse;
+    return {
+      levels: Array.isArray(data.levels) ? data.levels : [],
+      source: data.source === 'props' ? 'props' : null,
+      error: data.error,
+    };
+  } catch {
+    return { levels: [], source: null, error: 'Failed to reach the backend' };
   }
 }
 

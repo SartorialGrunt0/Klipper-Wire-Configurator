@@ -30,6 +30,8 @@ export interface ChatRequestCredentials {
   maxTokens: number;
   temperature: number;
   toolProtocol: AiSettings['toolProtocol'];
+  /** Reasoning effort ('default' = the backend sends nothing). */
+  reasoningEffort: string;
 }
 
 /** Same clamp the request path has always used: floor 256, default 4096. */
@@ -63,5 +65,6 @@ export function buildChatRequestCredentials(
     maxTokens: clampMaxTokens(settings.maxTokens),
     temperature: clampTemperature(settings.temperature),
     toolProtocol: settings.toolProtocol ?? 'auto',
+    reasoningEffort: settings.reasoningEffort?.trim() || 'default',
   };
 }
