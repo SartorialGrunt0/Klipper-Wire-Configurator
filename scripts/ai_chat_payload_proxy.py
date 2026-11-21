@@ -72,6 +72,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+            # Response-side telemetry: the provider's own cache numbers, so a
+            # backend that predates C3 (main) can still be measured. Written as
+            # a separate JSONL record so request bodies stay diff-able.
+            if "/chat/completions" in self.path:
+                try:
+                    resp = json.loads(data)
+                    if isinstance(resp, dict) and "usage" in resp:
+                        u = resp.get("usage") or {}
+                        t = resp.get("timings") or {}
+                        with open(ARGS.capture, "a") as fh:
+                            fh.write(json.dumps({"_usage": {
+                                "prompt_tokens": u.get("prompt_tokens"),
+                                "cached_tokens": (u.get("prompt_tokens_details") or {}).get("cached_tokens"),
+                                "prompt_ms": t.get("prompt_ms"),
+                                "predicted_ms": t.get("predicted_ms"),
+                            }}) + "\n")
+                except (ValueError, OSError):
+                    # A logging proxy must never break the chat it observes.
+                    pass
         else:
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()

@@ -34,6 +34,7 @@ Usage:
 import argparse
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -127,6 +128,7 @@ def main() -> int:
     failed = False
     for i in range(args.turns):
         messages.append({"role": "user", "content": TURNS[i]})
+        _t0 = time.monotonic()
         try:
             data = chat(args.url, build_body(args, messages, i), args.timeout)
         except (urllib.error.URLError, urllib.error.HTTPError) as exc:
@@ -150,6 +152,9 @@ def main() -> int:
             "promptTokens": prompt,
             "cachedTokens": cached,
             "cachedShare": round(share, 4) if share is not None else None,
+            # user-facing latency: whole round trip for this turn (includes
+            # generation — prefill is the part the cache removes)
+            "elapsedMs": round((time.monotonic() - _t0) * 1000),
         })
         messages.append({"role": "assistant", "content": data.get("content") or ""})
 
@@ -163,6 +168,9 @@ def main() -> int:
         # acceptance gate reads (turn 1 is cold by definition).
         "meanWarmCachedShare": (round(sum(r["cachedShare"] for r in warm) / len(warm), 4)
                                 if warm else None),
+        "meanWarmElapsedMs": (round(sum(r["elapsedMs"] for r in warm if r.get("elapsedMs")) /
+                                    len([r for r in warm if r.get("elapsedMs")]))
+                              if any(r.get("elapsedMs") for r in warm) else None),
         "failed": failed,
     }
     print(f"{'turn':>4} {'prompt':>8} {'cached':>8} {'share':>7}")
@@ -171,7 +179,8 @@ def main() -> int:
             print(f"{r['turn']:>4} {'ERROR: ' + r['error']}")
         else:
             share = f"{r['cachedShare']:.3f}" if r["cachedShare"] is not None else "  n/a"
-            print(f"{r['turn']:>4} {r['promptTokens']!s:>8} {r['cachedTokens']!s:>8} {share:>7}")
+            ms = f"{r.get('elapsedMs')}ms" if r.get("elapsedMs") else "n/a"
+            print(f"{r['turn']:>4} {r['promptTokens']!s:>8} {r['cachedTokens']!s:>8} {share:>7} {ms:>9}")
     print(json.dumps(summary, indent=2))
     if args.output:
         with open(args.output, "w") as fh:
