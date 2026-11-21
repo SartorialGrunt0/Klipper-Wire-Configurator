@@ -32,6 +32,8 @@ beforeEach(() => {
   vi.mocked(fetchContextWindow).mockReset();
   useContextPressureStore.setState({
     lastPromptTokens: null,
+    lastCachedTokens: null,
+    cachedShare: null,
     contextWindow: null,
     probedKey: null,
     pendingKey: null,

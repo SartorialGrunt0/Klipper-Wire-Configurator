@@ -1071,6 +1071,7 @@ def test_chat_proxy_local_openai_compatible_allows_missing_key(monkeypatch):
             'reasoningTokens': 0,
             'ackReprompts': 0,
             'lastPromptTokens': None,
+            'lastCachedTokens': None,
             'events': [],
             'truncated': False,
         },
@@ -1198,6 +1199,7 @@ def test_chat_proxy_returns_plain_content(monkeypatch):
             'reasoningTokens': 0,
             'ackReprompts': 0,
             'lastPromptTokens': None,
+            'lastCachedTokens': None,
             'events': [],
             'truncated': False,
         },
@@ -1217,6 +1219,7 @@ def test_extract_usage_info_captures_tokens_and_reasoning():
         'promptTokens': 5678,
         'completionTokens': 1234,
         'reasoningTokens': 700,
+        'cachedTokens': None,
         'finishReason': 'stop',
     }
 
@@ -1234,6 +1237,90 @@ def test_extract_usage_info_prompt_tokens_optional():
 def test_extract_usage_info_none_without_usage():
     assert ai_routes._extract_usage_info({'choices': [{'message': {'content': 'x'}}]}) is None
     assert ai_routes._extract_usage_info({}) is None
+
+
+def test_extract_usage_info_captures_cached_tokens():
+    # C3 prefix-cache telemetry: llama.cpp and OpenAI report the cached
+    # share of the prompt under usage.prompt_tokens_details.cached_tokens;
+    # Anthropic reports it as usage.cache_read_input_tokens. Same field
+    # either way — silent (None) when neither is present, never guessed.
+    info = ai_routes._extract_usage_info({
+        'choices': [{'message': {'content': 'x'}, 'finish_reason': 'stop'}],
+        'usage': {
+            'prompt_tokens': 5678,
+            'completion_tokens': 10,
+            'prompt_tokens_details': {'cached_tokens': 4321},
+        },
+    })
+    assert info['cachedTokens'] == 4321
+
+    anthropic = ai_routes._extract_usage_info({
+        'choices': [{'message': {'content': 'x'}, 'finish_reason': 'stop'}],
+        'usage': {'completion_tokens': 10, 'cache_read_input_tokens': 99},
+    })
+    assert anthropic['cachedTokens'] == 99
+
+    absent = ai_routes._extract_usage_info({
+        'choices': [{'message': {'content': 'x'}, 'finish_reason': 'stop'}],
+        'usage': {'prompt_tokens': 5, 'completion_tokens': 10},
+    })
+    assert absent['cachedTokens'] is None
+
+    garbage = ai_routes._extract_usage_info({
+        'choices': [{'message': {'content': 'x'}, 'finish_reason': 'stop'}],
+        'usage': {
+            'prompt_tokens': 5,
+            'completion_tokens': 10,
+            'prompt_tokens_details': {'cached_tokens': 'many'},
+        },
+    })
+    assert garbage['cachedTokens'] is None
+
+
+def test_chat_proxy_reports_last_cached_tokens(monkeypatch):
+    # Cache-hit roll-up: LAST provider request with an int cachedTokens is
+    # the one whose prefix the next turn continues from, mirroring the
+    # lastPromptTokens law (W7). Providers without details → null.
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(ai_routes, '_execute_tool_call', lambda call: f"result for {call['name']}")
+
+    responses = [
+        {'choices': [{'message': {
+            'content': None,
+            'tool_calls': [{'type': 'function', 'id': 'call_1',
+                            'function': {'name': 'search_klipper_docs',
+                                         'arguments': '{"query": "bed_mesh"}'}}],
+        }}],
+         'usage': {'prompt_tokens': 100, 'completion_tokens': 5,
+                   'prompt_tokens_details': {'cached_tokens': 0}}},
+        {'choices': [{'message': {'content': 'done'}}],
+         'usage': {'prompt_tokens': 180, 'completion_tokens': 5,
+                   'prompt_tokens_details': {'cached_tokens': 96}}},
+    ]
+    seen = []
+
+    def fake_post(url, headers, payload):
+        resp = responses[min(len(seen), len(responses) - 1)]
+        seen.append(1)
+        return DummyResponse(resp, url=url)
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user', 'content': 'Explain bed_mesh.'}],
+            'apiKey': 'openai-token',
+            'model': 'gpt-4o',
+            'apiUrl': 'https://api.openai.com/v1/chat/completions',
+            'apiProvider': 'chatgpt',
+        },
+    )
+    assert response.status_code == 200
+    usage = response.json()['usage']
+    assert usage['lastPromptTokens'] == 180
+    assert usage['lastCachedTokens'] == 96
+    assert usage['events'][0]['cachedTokens'] == 0
 
 
 def test_chat_proxy_reports_usage_and_truncation(monkeypatch):

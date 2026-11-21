@@ -959,6 +959,10 @@ export interface AiChatUsageEvent {
   promptTokens?: number | null;
   completionTokens: number;
   reasoningTokens?: number | null;
+  /** C3: cached prefix tokens of this request's prompt (llama.cpp/OpenAI
+   *  prompt_tokens_details.cached_tokens; Anthropic cache_read_input_tokens).
+   *  Undefined when the provider doesn't report cache telemetry. */
+  cachedTokens?: number | null;
   finishReason: string;
   /** Which leg of the loop produced it ('initial', 'steer-N', 'retry', …). */
   context?: string;
@@ -970,6 +974,9 @@ export interface AiChatUsage {
   ackReprompts?: number;
   /** Prompt tokens of the LAST provider call that reported usage. */
   lastPromptTokens?: number | null;
+  /** C3: cached prefix tokens of that same last call — the prefix the NEXT
+   *  turn continues from. Null/undefined when no call reported it. */
+  lastCachedTokens?: number | null;
   events: AiChatUsageEvent[];
   truncated: boolean;
 }

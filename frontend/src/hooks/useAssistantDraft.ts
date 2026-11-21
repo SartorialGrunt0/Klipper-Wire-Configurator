@@ -117,7 +117,10 @@ export function useAssistantDraft() {
       // new/loaded chat moved the epoch mid-flight, this reply's telemetry
       // is stale and lands nowhere.
       if (useContextPressureStore.getState().epoch === pressureEpoch) {
-        pressure.recordUsage(response.usage?.lastPromptTokens ?? null);
+        pressure.recordUsage(
+          response.usage?.lastPromptTokens ?? null,
+          response.usage?.lastCachedTokens ?? null,
+        );
         void pressure.ensureWindow({
           apiKey: chatRequestBase.apiKey,
           apiUrl: chatRequestBase.apiUrl,

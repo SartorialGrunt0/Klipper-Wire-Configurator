@@ -20,6 +20,15 @@ export interface ContextPressureInput {
   contextWindow: number | null | undefined;
 }
 
+export interface CachedShareInput {
+  /** Prompt tokens of the same request cachedShare is measured for. */
+  lastPromptTokens: number | null | undefined;
+  /** Cached prefix tokens of that request (usage.prompt_tokens_details.
+   *  cached_tokens / Anthropic cache_read_input_tokens; backend field
+   *  cachedTokens / usage.lastCachedTokens). */
+  lastCachedTokens: number | null | undefined;
+}
+
 export interface ContextPressureVerdict {
   advisory: boolean;
   /** prompt/window when both sides are known, else null. */
@@ -45,4 +54,21 @@ export function evaluateContextPressure(input: ContextPressureInput): ContextPre
   }
   const ratio = tokens / window;
   return { advisory: ratio >= CONTEXT_PRESSURE_ADVISORY_RATIO, ratio };
+}
+
+/**
+ * C3 prefix-cache telemetry: the cached share of the latest provider
+ * request (cached_tokens / prompt_tokens). Providers that don't report
+ * cached_tokens yield null — a missing measurement is never shown as a
+ * 0% hit rate. A nonsensical cached > prompt clamps to 1 (a provider
+ * bug must not read as a broken cache story). 0 with a warm conversation
+ * means something upstream of the tail started moving.
+ */
+export function computeCachedShare(input: CachedShareInput): number | null {
+  const prompt = finiteNumber(input.lastPromptTokens);
+  const cached = finiteNumber(input.lastCachedTokens);
+  if (prompt === null || cached === null || prompt <= 0 || cached < 0) {
+    return null;
+  }
+  return Math.min(1, cached / prompt);
 }

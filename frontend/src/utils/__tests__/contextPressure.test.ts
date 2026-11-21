@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   CONTEXT_PRESSURE_ADVISORY_RATIO,
   CONTEXT_PRESSURE_ADVISORY_TEXT,
+  computeCachedShare,
   evaluateContextPressure,
 } from '@/utils/contextPressure';
 
@@ -54,5 +55,31 @@ describe('evaluateContextPressure', () => {
     expect(CONTEXT_PRESSURE_ADVISORY_TEXT).toMatch(/new chat/i);
     // One label, no numbers demanded of the user.
     expect(CONTEXT_PRESSURE_ADVISORY_TEXT).not.toMatch(/\d/);
+  });
+});
+
+describe('computeCachedShare (C3 cache telemetry)', () => {
+  it('is the cached/prompt ratio of the same request', () => {
+    expect(computeCachedShare({ lastPromptTokens: 180, lastCachedTokens: 96 }))
+      .toBeCloseTo(96 / 180);
+  });
+
+  it('is silent whenever either side is unknown — never guesses', () => {
+    expect(computeCachedShare({ lastPromptTokens: 180, lastCachedTokens: null })).toBeNull();
+    expect(computeCachedShare({ lastPromptTokens: null, lastCachedTokens: 96 })).toBeNull();
+    expect(computeCachedShare({ lastPromptTokens: undefined, lastCachedTokens: undefined })).toBeNull();
+    expect(computeCachedShare({ lastPromptTokens: 180, lastCachedTokens: 'x' as unknown as number })).toBeNull();
+  });
+
+  it('is null for a zero-token prompt (no denominator)', () => {
+    expect(computeCachedShare({ lastPromptTokens: 0, lastCachedTokens: 0 })).toBeNull();
+  });
+
+  it('clamps a nonsensical cached > prompt to a full share', () => {
+    expect(computeCachedShare({ lastPromptTokens: 100, lastCachedTokens: 220 })).toBe(1);
+  });
+
+  it('reports a cold (uncached) prompt as exactly 0, not null', () => {
+    expect(computeCachedShare({ lastPromptTokens: 100, lastCachedTokens: 0 })).toBe(0);
   });
 });

@@ -4029,6 +4029,17 @@ async def _query_provider(
 
     content = _extract_provider_content(provider, data) or ""
 
+    # C3: one grep-able cache line per provider request (probe harness +
+    # post-hoc forensics). Only when the provider reported the field.
+    _usage_raw = data.get("usage") if isinstance(data, dict) else None
+    _pdetails = (_usage_raw or {}).get("prompt_tokens_details")
+    _cached = _pdetails.get("cached_tokens") if isinstance(_pdetails, dict) else None
+    if isinstance(_cached, int):
+        logger.info(
+            "Provider cache | prompt=%s cached=%s context=%s",
+            (_usage_raw or {}).get("prompt_tokens"), _cached, context,
+        )
+
     logger.info(
         "Provider response | chars=%d context=%s preview=%s",
         len(content), context, repr(content[:120]),
@@ -4100,10 +4111,26 @@ def _extract_usage_info(data: dict) -> dict | None:
         rt = details.get("reasoning_tokens")
         if isinstance(rt, int):
             reasoning_tokens = rt
+    # C3 prefix-cache telemetry: the cached share of the prompt. llama.cpp
+    # and OpenAI report usage.prompt_tokens_details.cached_tokens;
+    # Anthropic reports usage.cache_read_input_tokens. One field either
+    # way — silent (None) when neither is present, never guessed (same law
+    # as promptTokens above).
+    cached_tokens = None
+    pdetails = usage.get("prompt_tokens_details")
+    if isinstance(pdetails, dict):
+        ct = pdetails.get("cached_tokens")
+        if isinstance(ct, int) and not isinstance(ct, bool):
+            cached_tokens = ct
+    if cached_tokens is None:
+        crt = usage.get("cache_read_input_tokens")
+        if isinstance(crt, int) and not isinstance(crt, bool):
+            cached_tokens = crt
     return {
         "promptTokens": prompt_tokens,
         "completionTokens": completion_tokens,
         "reasoningTokens": reasoning_tokens,
+        "cachedTokens": cached_tokens,
         "finishReason": choice.get("finish_reason") or "",
     }
 
@@ -5715,6 +5742,18 @@ async def chat_proxy(req: ChatRequest, request: Request):
                             e.get("promptTokens")
                             for e in reversed(usage_events)
                             if isinstance(e.get("promptTokens"), int)
+                        ),
+                        None,
+                    ),
+                    # C3: cached share of that same last request — the
+                    # prefix the NEXT turn continues from. 0 with a warm
+                    # conversation means something upstream of the tail
+                    # started moving (see cache probe harness).
+                    "lastCachedTokens": next(
+                        (
+                            e.get("cachedTokens")
+                            for e in reversed(usage_events)
+                            if isinstance(e.get("cachedTokens"), int)
                         ),
                         None,
                     ),
