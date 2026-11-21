@@ -62,6 +62,16 @@ export interface AiSettings {
    * https → native function calling; 'native'/'text' force either.
    */
   toolProtocol: 'auto' | 'native' | 'text';
+  /**
+   * Reasoning effort for openai-compatible providers (the ONLY provider
+   * this is wired for, scope 2026-11-21). 'default' (default value) sends
+   * nothing at all — the model decides. Any other string is forwarded
+   * verbatim as top-level `reasoning_effort`. Offered levels come from
+   * the /ai/reasoning-levels probe (utils/chatReasoning); a level saved
+   * under another endpoint survives a provider switch in this store but
+   * is never sent to non-openai-compatible providers (backend-gated).
+   */
+  reasoningEffort: string;
 }
 
 interface PersistedAiState {
@@ -169,6 +179,12 @@ function buildAiSettings(settings: Partial<AiSettings>): AiSettings {
     ...merged,
     providerModels,
     model: modelToUse,
+    // A persisted state file with a missing/blank/garbage value must land
+    // on 'default' (send-nothing), never on an accidental level.
+    reasoningEffort:
+      typeof merged.reasoningEffort === 'string' && merged.reasoningEffort.trim()
+        ? merged.reasoningEffort.trim()
+        : 'default',
   };
 }
 
@@ -209,6 +225,7 @@ const DEFAULT_SETTINGS: AiSettings = {
   maxTokens: 4096,
   temperature: 0.7,
   toolProtocol: 'auto',
+  reasoningEffort: 'default',
 };
 
 export const useAiStore = create<AiState>()((set, get) => {

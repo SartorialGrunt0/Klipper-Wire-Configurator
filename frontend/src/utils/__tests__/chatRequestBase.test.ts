@@ -17,6 +17,7 @@ const SETTINGS: AiSettings = {
   maxTokens: 8192,
   temperature: 0.7,
   toolProtocol: 'native',
+  reasoningEffort: 'xhigh',
 };
 
 describe('buildChatRequestCredentials', () => {
@@ -31,7 +32,17 @@ describe('buildChatRequestCredentials', () => {
       maxTokens: 8192,
       temperature: 0.7,
       toolProtocol: 'native',
+      reasoningEffort: 'xhigh',
     });
+  });
+
+  it('normalizes a missing/blank reasoning effort to the send-nothing default', () => {
+    const missing = buildChatRequestCredentials(
+      { ...SETTINGS, reasoningEffort: undefined as unknown as string }, 'req-r1',
+    );
+    expect(missing.reasoningEffort).toBe('default');
+    const blank = buildChatRequestCredentials({ ...SETTINGS, reasoningEffort: '  ' }, 'req-r2');
+    expect(blank.reasoningEffort).toBe('default');
   });
 
   it('resolves the local provider URL from host/port when apiUrl is empty', () => {

@@ -15,6 +15,14 @@ import {
   PROVIDER_DEFAULTS,
   isLocalProvider,
 } from '../../utils/chatProviders';
+import {
+  REASONING_DEFAULT,
+  reasoningEffortOptions,
+  reasoningEffortHint,
+  reasoningSettingApplies,
+  type ReasoningProbe,
+  EMPTY_REASONING_PROBE,
+} from '../../utils/chatReasoning';
 
 export interface ChatSettingsPanelProps {
   standalone: boolean;
@@ -32,6 +40,8 @@ export interface ChatSettingsPanelProps {
   setEditTemperature: (v: string) => void;
   editToolProtocol: 'auto' | 'native' | 'text';
   setEditToolProtocol: (v: 'auto' | 'native' | 'text') => void;
+  editReasoningEffort: string;
+  setEditReasoningEffort: (v: string) => void;
   resolvedEditApiUrl: string;
   onSaveSettings: () => void;
   onClose?: () => void;
@@ -58,6 +68,8 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
   setEditTemperature,
   editToolProtocol,
   setEditToolProtocol,
+  editReasoningEffort,
+  setEditReasoningEffort,
   resolvedEditApiUrl,
   onSaveSettings,
   onClose,
@@ -68,6 +80,29 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
   const [modelsLoading, setModelsLoading] = useState(false);
   const [modelsError, setModelsError] = useState<string | null>(null);
   const modelsFetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Reasoning-level discovery for the FORM (the send path never reads this;
+  // the wire-side guard is server-side, see utils/chatReasoning). A router
+  // may BOOT the probed model, so it only ever runs for the selected model.
+  const [reasoningProbe, setReasoningProbe] = useState<ReasoningProbe>(EMPTY_REASONING_PROBE);
+  const [reasoningProbeLoading, setReasoningProbeLoading] = useState(false);
+  const reasoningProbeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const refreshReasoningProbe = async (
+    provider: AiProvider = editApiProvider,
+    apiUrl: string = resolvedEditApiUrl,
+    apiKey: string = editApiKey,
+    model: string = editModel.trim(),
+  ) => {
+    if (!reasoningSettingApplies(provider) || !model || !apiUrl.trim()) {
+      setReasoningProbe(EMPTY_REASONING_PROBE);
+      return;
+    }
+    setReasoningProbeLoading(true);
+    const result = await api.probeReasoningLevels(provider, apiUrl, apiKey.trim(), model);
+    setReasoningProbe({ levels: result.levels, source: result.source });
+    setReasoningProbeLoading(false);
+  };
 
   const fetchAvailableModels = async (
     provider: AiProvider = editApiProvider,
@@ -127,6 +162,23 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editApiProvider, resolvedEditApiUrl, editApiKey]);
+
+  useEffect(() => {
+    // Levels are per model, so the model joins the trigger set; same
+    // debounce law as the model list (keystroke bursts, one probe).
+    if (reasoningProbeTimerRef.current) clearTimeout(reasoningProbeTimerRef.current);
+    if (!reasoningSettingApplies(editApiProvider) || !editModel.trim()) {
+      setReasoningProbe(EMPTY_REASONING_PROBE);
+      return;
+    }
+    reasoningProbeTimerRef.current = setTimeout(() => {
+      void refreshReasoningProbe();
+    }, MODELS_DEBOUNCE_MS);
+    return () => {
+      if (reasoningProbeTimerRef.current) clearTimeout(reasoningProbeTimerRef.current);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editApiProvider, resolvedEditApiUrl, editApiKey, editModel]);
 
   const handleModelChange = (nextModel: string) => {
     setEditModel(nextModel);
@@ -265,6 +317,44 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
     </div>
   ) : null;
 
+  // Reasoning effort — openai-compatible ONLY (scope 2026-11-21), the same
+  // provider-gating precedent as the Tool Format field. 'default' means
+  // send-nothing; the options come from the probe (utils/chatReasoning —
+  // authoritative props levels, else the conservative assumed ladder, plus
+  // a saved value the probe doesn't list so the form never lies).
+  const reasoningEffortField = reasoningSettingApplies(editApiProvider) ? (
+    <div>
+      <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
+        Reasoning Effort
+      </label>
+      <div className="flex gap-2">
+        <select
+          className="flex-1 px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+          value={editReasoningEffort.trim() || REASONING_DEFAULT}
+          onChange={(e) => setEditReasoningEffort(e.target.value)}
+        >
+          {reasoningEffortOptions(reasoningProbe, editReasoningEffort).map((level) => (
+            <option key={level} value={level}>
+              {level === REASONING_DEFAULT ? 'Default (model decides)' : level}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          onClick={() => void refreshReasoningProbe()}
+          disabled={reasoningProbeLoading}
+          className="px-3 py-2 rounded-lg text-xs font-medium bg-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-primary)] hover:text-[var(--color-text-primary)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          title="Re-probe the endpoint's accepted reasoning levels"
+        >
+          {reasoningProbeLoading ? 'Loading...' : 'Refresh'}
+        </button>
+      </div>
+      <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">
+        {reasoningEffortHint(reasoningProbe, editReasoningEffort)}
+      </p>
+    </div>
+  ) : null;
+
   const maxTokensField = (
     <div>
       <label className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1.5">
@@ -322,6 +412,7 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
       {apiUrlField}
       {apiKeyField}
       {toolFormatField}
+      {reasoningEffortField}
       {maxTokensAndTemperatureRow}
     </div>
   );
@@ -438,6 +529,7 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
             />
           </div>
           {toolFormatField}
+          {reasoningEffortField}
           <div className="flex gap-2">
             <div className="flex-1">
               <label className="block text-[10px] text-[var(--color-text-secondary)] mb-1">Max Tokens</label>
