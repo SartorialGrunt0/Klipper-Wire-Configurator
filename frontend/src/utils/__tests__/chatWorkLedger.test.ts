@@ -29,6 +29,7 @@ import { describe, expect, it } from 'vitest';
 import type { ChatMessage } from '../../stores/aiStore';
 import {
   buildWorkLedger,
+  countUserTurns,
   WORK_LEDGER_MAX_TURNS,
   type WorkLedgerDecision,
 } from '../chatWorkLedger';
@@ -84,7 +85,7 @@ describe('buildWorkLedger — harness-grammar classification', () => {
       user('next question'),
     ], []);
     expect(rows).toEqual([
-      { turnOffset: 1, file: 'printer.cfg', section: 'led', verdict: 'pending' },
+      { turnOffset: 1, turnOrdinal: 1, file: 'printer.cfg', section: 'led', verdict: 'pending' },
     ]);
   });
 
@@ -113,7 +114,7 @@ describe('buildWorkLedger — harness-grammar classification', () => {
       user('y'),
     ], []);
     expect(rows).toEqual([
-      { turnOffset: 1, file: 'fan_generic.cfg', section: '', verdict: 'pending' },
+      { turnOffset: 1, turnOrdinal: 1, file: 'fan_generic.cfg', section: '', verdict: 'pending' },
     ]);
   });
 
@@ -126,6 +127,7 @@ describe('buildWorkLedger — harness-grammar classification', () => {
     expect(rows).toEqual([
       {
         turnOffset: 1,
+        turnOrdinal: 1,
         file: 'printer.cfg',
         section: 'led',
         verdict: 'failed',
@@ -179,7 +181,7 @@ describe('buildWorkLedger — harness-grammar classification', () => {
       user('y'),
     ], []);
     expect(rows).toEqual([
-      { turnOffset: 1, file: 'printer.cfg', section: 'led', verdict: 'pending' },
+      { turnOffset: 1, turnOrdinal: 1, file: 'printer.cfg', section: 'led', verdict: 'pending' },
     ]);
   });
 });
@@ -273,9 +275,10 @@ describe('buildWorkLedger — decision overlay', () => {
     ]);
     // The undo (turn 1) applies to the first staging only; the second
     // staging (turn 2) has no decision → pending. ONE row per
-    // (file, section) — the newest staging wins.
+    // (file, section) — the newest staging wins, and its ABSOLUTE
+    // turnOrdinal is the turn that staged it (C1).
     expect(rows).toEqual([
-      { turnOffset: 1, file: 'printer.cfg', section: 'led', verdict: 'pending' },
+      { turnOffset: 1, turnOrdinal: 2, file: 'printer.cfg', section: 'led', verdict: 'pending' },
     ]);
   });
 
@@ -366,7 +369,7 @@ describe('buildWorkLedger — touched files (W6.5 enrichment)', () => {
       user('y'),
     ], []);
     expect(rows).toEqual([
-      { turnOffset: 1, file: 'printer.cfg', section: '', verdict: 'touched' },
+      { turnOffset: 1, turnOrdinal: 1, file: 'printer.cfg', section: '', verdict: 'touched' },
     ]);
   });
 
@@ -392,7 +395,7 @@ describe('buildWorkLedger — touched files (W6.5 enrichment)', () => {
       { file: 'printer.cfg', section: '', verdict: 'kept', turnIndex: 1 },
     ]);
     expect(rows).toEqual([
-      { turnOffset: 1, file: 'printer.cfg', section: '', verdict: 'touched' },
+      { turnOffset: 1, turnOrdinal: 1, file: 'printer.cfg', section: '', verdict: 'touched' },
     ]);
   });
 
@@ -491,5 +494,52 @@ describe('buildWorkLedger — lineage epoch and trust boundary (PR #43 F5/F6)', 
     ];
     expect(buildWorkLedger(failTrail, [], { epoch: 1, trustFrom: 2 })[0].verdict)
       .toBe('failed');
+  });
+});
+
+describe('C1 ledger byte-stability across sends', () => {
+  // The cache contract behind '- turn N:' rendering (plan
+  // 2026-11-20_ai-chat-cache-hit-miss.md): the relative turnOffset
+  // recomputes every send by design, but the ABSOLUTE turnOrdinal —
+  // what the backend renders from — must be identical on every later
+  // send while the event and its verdict are unchanged. Otherwise one
+  // mutated header byte ahead of the whole transcript busts the
+  // provider prefix cache on every turn (measured: warm cached share
+  // 0.312 with a ledger vs 0.982 without).
+  const trail = (extra: ChatMessage[]): ChatMessage[] => [
+    user('stage the led edit'),
+    assistant([call('config_edit', { file: 'printer.cfg', section: 'led' }, SINGLE_OK)]),
+    ...extra,
+  ];
+
+  it('rendered identity is identical when only later turns were appended', () => {
+    // The renderer consumes turnOrdinal + the row fields; turnOffset is
+    // the one field that legitimately moves per send (and the one the
+    // absolute header no longer reads).
+    const stripOffset = (r: { turnOffset: number }) => {
+      const { turnOffset, ...rest } = r;
+      return rest;
+    };
+    const a = buildWorkLedger(trail([user('next')]), []);
+    const b = buildWorkLedger(
+      trail([user('next'), assistant([]), user('and next'), assistant([]), user('and more')]),
+      [],
+    );
+    expect(a).toHaveLength(1);
+    expect(b).toHaveLength(1);
+    expect(JSON.stringify(stripOffset(b[0]))).toBe(JSON.stringify(stripOffset(a[0])));
+  });
+
+  it('turnOffset still moves while turnOrdinal holds (law pair)', () => {
+    const b = buildWorkLedger(
+      trail([user('next'), assistant([]), user('and next')]),
+      [],
+    );
+    expect(b[0].turnOffset).toBe(2);
+    expect(b[0].turnOrdinal).toBe(1);
+  });
+
+  it('countUserTurns matches the ledger count law', () => {
+    expect(countUserTurns(trail([user('two'), user('three')]))).toBe(3);
   });
 });

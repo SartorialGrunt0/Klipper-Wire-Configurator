@@ -353,3 +353,168 @@ def test_renderer_collapses_and_caps_file_and_section_fields():
     # One arrow per row line: no smuggled second row.
     arrow_lines = [l for l in text.splitlines() if '->' in l]
     assert len(arrow_lines) == 2
+
+
+# ── C1: absolute turn numbers — ledger byte-stability across turns ───
+# (plan 2026-11-20_ai-chat-cache-hit-miss.md) Providers cache the exact
+# longest-common-prefix of the prompt; the relative label ("previous
+# turn" -> "2 turns ago") mutated one row-header byte every turn, ahead
+# of the whole transcript, so a ledger-present conversation missed the
+# prefix cache on EVERY turn (measured live 2026-11-20: warm mean cached
+# share 0.312 with a ledger vs 0.982 without). Rows now carry the
+# absolute turnOrdinal plus workLedgerCurrentTurn, and render as
+# "turn N:" headers that never change. turnOffset-only payloads (legacy
+# clients) keep the old relative rendering — the wire switch is additive.
+
+def test_absolute_labels_when_ordinal_and_current_turn_present():
+    text = ai_routes._render_work_ledger(
+        [{'turnOffset': 2, 'turnOrdinal': 3, 'file': 'p.cfg',
+          'section': 'led', 'verdict': 'kept'}],
+        current_turn=5)
+    assert '- turn 3:' in text
+    assert 'turns ago' not in text
+    assert 'previous turn' not in text
+
+
+def test_ledger_bytes_identical_across_consecutive_turns():
+    # The cache contract: same rows + same verdicts => byte-identical
+    # render at every later send (only the window check consumes
+    # current_turn). This is what turns the warm cached share from ~0.3
+    # back to ~1.0.
+    row = {'turnOrdinal': 3, 'file': 'printer.cfg', 'section': 'led',
+           'verdict': 'kept'}
+    a = ai_routes._render_work_ledger([dict(row)], current_turn=4)
+    b = ai_routes._render_work_ledger([dict(row)], current_turn=9)
+    assert a == b
+
+
+def test_ordinal_preferred_when_offset_inconsistent():
+    # The client is ground truth for its own event creation turn; when
+    # both fields ride and disagree, the absolute ordinal wins.
+    text = ai_routes._render_work_ledger(
+        [{'turnOffset': 9, 'turnOrdinal': 4, 'file': 'p.cfg',
+          'section': 'led', 'verdict': 'kept'}],
+        current_turn=5)
+    assert '- turn 4:' in text
+
+
+def test_legacy_offset_only_payloads_keep_relative_labels():
+    # Backward compatibility: an old client sends no ordinal/currentTurn;
+    # rendering must keep working exactly as before (measured baseline).
+    text = ai_routes._render_work_ledger(
+        [{'turnOffset': 1, 'file': 'p.cfg', 'section': 'led', 'verdict': 'kept'}])
+    assert '- previous turn:' in text
+    text2 = ai_routes._render_work_ledger(
+        [{'turnOffset': 3, 'file': 'p.cfg', 'section': 'led', 'verdict': 'kept'}])
+    assert '- 3 turns ago:' in text2
+
+
+def test_window_law_enforced_via_current_turn_for_ordinal_rows():
+    # Absolute ordinals are window-checked against current_turn with the
+    # classic client law (offset = current - ordinal; current counts the
+    # user message being sent, so offset 0 = staged this turn = not yet
+    # reviewable = not in the ledger).
+    rows = [
+        {'turnOrdinal': 1, 'turnOffset': 11, 'file': 'p.cfg', 'section': 'old', 'verdict': 'kept'},
+        {'turnOrdinal': 2, 'turnOffset': 10, 'file': 'p.cfg', 'section': 'edge', 'verdict': 'kept'},
+        {'turnOrdinal': 11, 'turnOffset': 1, 'file': 'p.cfg', 'section': 'fresh', 'verdict': 'kept'},
+    ]
+    text = ai_routes._render_work_ledger(rows, current_turn=12)
+    assert '[old]' not in text       # 11 turns back — outside the window
+    assert '[edge] in p.cfg -> kept' in text  # exactly 10 — inside
+    assert '[fresh] in p.cfg -> kept' in text
+
+
+def test_current_turn_falls_back_to_offset_sum_when_absent():
+    # Ordinal rows without a request-level currentTurn: the newest row
+    # anchors the scale (ordinal + offset = now). Same bytes every turn
+    # as long as the client keeps the offsets coherent — still far more
+    # stable than recomputing every label.
+    text = ai_routes._render_work_ledger(
+        [{'turnOrdinal': 3, 'turnOffset': 2, 'file': 'p.cfg',
+          'section': 'led', 'verdict': 'kept'}])
+    assert '- turn 3:' in text
+
+
+def test_route_injects_stable_ledger_with_current_turn(install):
+    # End-to-end: a client sending ordinals + workLedgerCurrentTurn gets
+    # absolute headers in the injected trailing ledger message.
+    scripted = install([_final_reply()])
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'Hi'}],
+        workLedger=[{'turnOrdinal': 1, 'turnOffset': 1, 'file': 'printer.cfg',
+                     'section': 'led', 'verdict': 'pending'}],
+        workLedgerCurrentTurn=2,
+    ))
+    assert response.status_code == 200
+    ledgers = _ledger_messages(scripted.payloads[0])
+    assert len(ledgers) == 1
+    assert '- turn 1:' in ledgers[0]
+    assert 'turns ago' not in ledgers[0]
+
+
+# ── C1 LCP guard: the cross-turn prefix contract (plan 2026-11-20) ───
+
+ABS_ROWS = [
+    {'turnOffset': 2, 'turnOrdinal': 1, 'file': 'printer.cfg',
+     'section': 'stepper', 'verdict': 'kept'},
+    {'turnOffset': 1, 'turnOrdinal': 2, 'file': 'printer.cfg',
+     'section': 'led', 'verdict': 'undone'},
+]
+
+
+def test_cross_turn_merged_prefix_is_byte_stable(install):
+    """The whole branch in one assertion: with an ABSOLUTE ledger, the
+    full provider payload for turn k is a byte-prefix of turn k+1's
+    (same conversation, one more Q/A pair, unchanged verdicts). The
+    pre-C1 relative labels broke this on every turn — measured live:
+    warm cached share 0.312 with a ledger vs 0.982 without. This is the
+    provider-independent necessary condition for any token-prefix cache;
+    scripts/ai_chat_cache_probe.py measures the ground truth."""
+    scripted1 = install([_final_reply('First answer.')])
+    client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'stage an LED edit please'}],
+        workLedger=[{'turnOffset': 1, 'turnOrdinal': 1,
+                     'file': 'printer.cfg', 'section': 'led',
+                     'verdict': 'pending'}],
+        workLedgerCurrentTurn=2,
+    ))
+    # Turn 2 STAGES A NEW SECTION: same-led-row-with-changed-verdict is
+    # a legitimate in-place mutation (the record updating itself), not a
+    # cache bug — the guard pins the no-verdict-change case.
+    scripted2 = install([_final_reply('Second answer.')])
+    client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'stage an LED edit please'},
+         {'role': 'assistant', 'content': 'First answer.'},
+         {'role': 'user', 'content': 'now check the stepper section'}],
+        workLedger=[
+            {'turnOffset': 2, 'turnOrdinal': 1, 'file': 'printer.cfg',
+             'section': 'led', 'verdict': 'pending'},
+            {'turnOffset': 1, 'turnOrdinal': 2, 'file': 'printer.cfg',
+             'section': 'stepper', 'verdict': 'pending'},
+        ],
+        workLedgerCurrentTurn=3,
+    ))
+    p1 = scripted1.payloads[0]['messages']
+    p2 = scripted2.payloads[0]['messages']
+    s1 = next(m['content'] for m in p1 if m.get('role') == 'system')
+    s2 = next(m['content'] for m in p2 if m.get('role') == 'system')
+    assert s2.startswith(s1), (
+        'C1 violated: the merged system prefix changed bytes between '
+        'turns — something upstream of the tail is mutating per send')
+    # And the transcript tail replays byte-stable too.
+    t1 = [m for m in p1 if m.get('role') != 'system']
+    t2 = [m for m in p2 if m.get('role') != 'system']
+    assert t2[:len(t1)] == t1
+
+
+def test_ledger_headers_absolute_for_absolute_payloads(install):
+    scripted = install([_final_reply()])
+    client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'why is my LED change gone?'}],
+        workLedger=ABS_ROWS,
+        workLedgerCurrentTurn=3,
+    ))
+    text = _ledger_messages(scripted.payloads[0])[0]
+    assert '- turn 1:' in text and '- turn 2:' in text
+    assert 'turns ago' not in text and 'previous turn' not in text

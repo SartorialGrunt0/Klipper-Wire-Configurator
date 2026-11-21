@@ -391,6 +391,14 @@ class ChatRequest(BaseModel):
     # (review law: the backend re-delivers the record, decisions stay
     # client-side); names + verdicts only, no payloads.
     workLedger: list[dict] = []
+    # C1 ledger byte-stability: the client's user-message count at send
+    # time (the absolute turn the ledger is rendered against). With rows
+    # carrying absolute turnOrdinal values the rendered '- turn N:'
+    # headers stop recomputing every send — the merged system prefix
+    # stays byte-identical turn to turn and the provider's prefix cache
+    # keeps hitting. Absent = legacy client: rows render via turnOffset
+    # with the old relative labels.
+    workLedgerCurrentTurn: int | None = None
     # Approval-gate override (harness A/B runs ONLY; the frontend never
     # sends it). INERT since the post-hoc review change (2026-10-02):
     # nothing in the edit path suspends, so there is no wait to skip and
@@ -1094,7 +1102,8 @@ def _prepare_messages(messages: list[dict],
                       context_references: list | None = None,
                       inject_edit_skill_body: bool = False,
                       loaded_skills: list | None = None,
-                      work_ledger: list | None = None) -> list[dict]:
+                      work_ledger: list | None = None,
+                      work_ledger_current_turn: int | None = None) -> list[dict]:
     """Build a clean system prompt with MCP tool descriptions, printer memory,
     and user messages.
     """
@@ -1299,7 +1308,8 @@ def _prepare_messages(messages: list[dict],
     ledger_messages: list[dict] = []
     if not (minimal or no_system):
         try:
-            ledger_text = _render_work_ledger(work_ledger)
+            ledger_text = _render_work_ledger(work_ledger,
+                                             current_turn=work_ledger_current_turn)
         except Exception:
             logger.warning("work-ledger render failed", exc_info=True)
             ledger_text = None
@@ -2096,7 +2106,8 @@ def _ledger_field(raw: object, cap: int) -> str:
     return text
 
 
-def _render_work_ledger(rows: list | None) -> str | None:
+def _render_work_ledger(rows: list | None,
+                       current_turn: int | None = None) -> str | None:
     """Render client-derived work-ledger rows as ONE system message body.
 
     Verbatim re-delivery: names + verdicts only, no interpretation — the
@@ -2106,26 +2117,102 @@ def _render_work_ledger(rows: list | None) -> str | None:
     so the rendered text stays stable for the KV cache. Malformed rows
     drop silently — an absent line claims nothing, a garbage line would.
     """
-    valid: list[tuple[int, str, str, str, str]] = []
+    # Pass 1: judge each row's turn coordinates ONCE and pair them with
+    # the row — a separate filter pass over `rows` would have to
+    # re-implement this exact predicate and drift from it (a bool
+    # `turnOffset` is `is not None` yet not an int: precisely such a
+    # drift). Pass 2 then reads the same pairs.
+    ct = current_turn if (isinstance(current_turn, int)
+                          and not isinstance(current_turn, bool)
+                          and current_turn > 0) else None
+    paired: list[tuple[dict, int | None, int | None]] = []
+    has_any_ordinal = False
     for row in rows or []:
         if not isinstance(row, dict):
             continue
-        offset = row.get("turnOffset")
-        if isinstance(offset, bool) or not isinstance(offset, int):
+        raw_offset = row.get("turnOffset")
+        offset_opt = (raw_offset if isinstance(raw_offset, int)
+                      and not isinstance(raw_offset, bool) else None)
+        raw_ordinal = row.get("turnOrdinal")
+        # C1: absolute creation turn (the client is ground truth for its
+        # own event). A payload with NO ordinals anywhere is a legacy
+        # client and keeps the old relative rendering untouched; offset-
+        # only rows inside an absolute payload anchor on currentTurn.
+        ordinal_opt = (raw_ordinal if isinstance(raw_ordinal, int)
+                       and not isinstance(raw_ordinal, bool)
+                       and raw_ordinal > 0 else None)
+        if offset_opt is None and ordinal_opt is None:
             continue
-        if offset < 1 or offset > WORK_LEDGER_MAX_TURNS:
+        if ordinal_opt is not None:
+            has_any_ordinal = True
+        paired.append((row, offset_opt, ordinal_opt))
+    if not paired:
+        return None
+
+    valid: list[tuple[int, int | None, str, str, str, str]] = []
+    for row, offset_opt, ordinal_opt in paired:
+        # Window law offset: for absolute rows it is anchored on the
+        # request currentTurn, else on the row's own offset (a coherent
+        # client keeps offset == current - ordinal). Rows with neither an
+        # offset nor an anchor are unjudgeable against the window —
+        # render them (absence would claim more than presence does).
+        effective: int | None
+        if ordinal_opt is not None:
+            if offset_opt is not None:
+                anchor = ct if ct is not None else ordinal_opt + offset_opt - 1
+                effective = anchor - ordinal_opt
+            else:
+                effective = ct - ordinal_opt if ct is not None else None
+        else:
+            # Pre-C1 law, kept: a row whose turnOffset is missing OR not
+            # an int has no place in the ledger — in ANY payload mode
+            # (a garbage offset claims nothing even beside good rows).
+            if offset_opt is None:
+                continue
+            # Offset-only row inside an absolute payload anchors on
+            # currentTurn for the window check.
+            effective = offset_opt if ct is None else ct - offset_opt
+        if effective is not None and not (1 <= effective <= WORK_LEDGER_MAX_TURNS):
             continue
+        window_offset = effective if effective is not None else 1
+        # Absolute header iff the payload is an absolute one (some row
+        # carries a creation turn); legacy relative header otherwise.
+        rendered_ordinal: int | None = None
+        if has_any_ordinal:
+            rendered_ordinal = ordinal_opt if ordinal_opt is not None else (
+                ct - offset_opt if (ct is not None and offset_opt is not None) else None)
         file = _ledger_field(row.get("file"), _LEDGER_FIELD_MAX)
         section = _ledger_field(row.get("section"), _LEDGER_FIELD_MAX)
         verdict = str(row.get("verdict") or "").strip()
         if not file or verdict not in _LEDGER_VERDICTS:
             continue
         detail = _ledger_field(row.get("detail"), _LEDGER_DETAIL_MAX)
-        valid.append((offset, file, section, verdict, detail))
+        valid.append((window_offset, rendered_ordinal, file, section, verdict, detail))
     if not valid:
         return None
     # Oldest turn first, newest last; deterministic within a turn.
-    valid.sort(key=lambda r: (-r[0], r[1], r[2]))
+    # C1: the group key is the ABSOLUTE turn (descending = oldest
+    # first), not the per-send window offset — otherwise adding a new
+    # turn shifts every older group header down one line and rewrites
+    # the block's middle. Absolute groups are frozen once written: the
+    # ledger block becomes append-only, which is what keeps the merged
+    # prefix byte-stable across turns. Legacy offset-only rows anchor on
+    # currentTurn (ct - offset, their absolute turn anyway); without a
+    # currentTurn every key is None and the stable sort keeps the
+    # client's oldest-first row order (the documented row law).
+    def _absolute_of(r):
+        return r[1] if r[1] is not None else (
+            ct - r[0] if ct is not None else None)
+    if any(_absolute_of(r) is not None for r in valid):
+        # ASCENDING absolute = oldest first. (The pre-C1 key was
+        # OFFSET-descending, which was the same order — offsets run
+        # backwards to turns. Negating absolute orders the ledger
+        # NEWEST-first, rewriting the block's middle every turn.)
+        valid.sort(key=lambda r: (_absolute_of(r), r[2], r[3]))
+    else:
+        # Pure legacy payload without a currentTurn anchor: keep the
+        # pre-C1 window sort (offset descending = oldest first).
+        valid.sort(key=lambda r: (-r[0], r[2], r[3]))
     # PR #43 B-04: the flood cap must drop the OLDEST rows — turnOffset 1
     # is the NEWEST turn (utils/chatWorkLedger), so with the list sorted
     # oldest-first the tail is what the model needs. The old
@@ -2166,12 +2253,28 @@ def _render_work_ledger(rows: list | None) -> str | None:
         "later turn."
     )
     lines: list[str] = []
-    current_offset = None
-    for offset, file, section, verdict, detail in valid:
-        if offset != current_offset:
-            when = "previous turn" if offset == 1 else f"{offset} turns ago"
+    current_key = None
+    for offset, row_ordinal, file, section, verdict, detail in valid:
+        # Group on the SAME absolute key the sort used, so two rows that
+        # share a turn never double-header even if a client's offsets
+        # drifted within the payload.
+        group_key = row_ordinal if row_ordinal is not None else (
+            ct - offset if ct is not None else offset)
+        if group_key != current_key:
+            # C1: with absolute turn numbers the header bytes are stable
+            # across every later send of the same conversation — the
+            # point of the whole exercise. Legacy offset-only rows keep
+            # the relative labels (baseline behavior).
+            if row_ordinal is not None:
+                when = f"turn {row_ordinal}"
+            elif has_any_ordinal and ct is not None:
+                # Offset-only row inside an absolute payload: anchors on
+                # currentTurn — same absolute string, group_key holds it.
+                when = f"turn {group_key}"
+            else:
+                when = "previous turn" if offset == 1 else f"{offset} turns ago"
             lines.append(f"- {when}:")
-            current_offset = offset
+            current_key = group_key
         # Created files are file-level write rows; touched rows mark
         # what earlier turns grounded on.
         if verdict == "touched":
@@ -4544,6 +4647,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
                                  # W6: re-deliver the client's action record
                                  # verbatim (never interpreted here).
                                  work_ledger=req.workLedger,
+                                 work_ledger_current_turn=req.workLedgerCurrentTurn,
                                  native_mode=_resolve_native_tools(
                                      req.apiProvider, req.apiUrl, req.toolProtocol,
                                      edit_capable=edit_capable,

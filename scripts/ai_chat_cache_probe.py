@@ -77,7 +77,9 @@ def build_body(args, messages: list, turn_index: int) -> dict:
     }
     if args.ledger:
         # 'staged' verdict: no decision store involved, deterministic.
-        turn_offset = (turn_index + 1) - 1  # event created in turn 1
+        # Client law offset = current - ordinal (current counts the user
+        # message being sent), so the turn-1 event shows from turn 2 on.
+        turn_offset = turn_index
         body["workLedger"] = [{
             "turnOffset": max(1, turn_offset),
             "turnOrdinal": 1,

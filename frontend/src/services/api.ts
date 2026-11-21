@@ -934,6 +934,16 @@ export interface AiChatRequest {
    */
   workLedger?: WorkLedgerRow[];
   /**
+   * C1 cache-stability: the absolute user-turn count of the sent trail
+   * INCLUDING the message being sent — the same count law as each row's
+   * turnOrdinal (utils/chatWorkLedger.countUserTurns). Lets the backend
+   * renderer anchor offset-only rows on an absolute turn instead of
+   * re-deriving a moving "previous turn" label, keeping the ledger block
+   * append-only so the provider's prefix cache survives across turns.
+   * Meaningless without a workLedger; ignored when absent (legacy).
+   */
+  workLedgerCurrentTurn?: number;
+  /**
    * W8 pre-flight: the model's REAL context window already probed this
    * session via /ai/context-window (contextPressureStore). Lets the
    * backend refuse an obviously-over prompt without a provider round-trip

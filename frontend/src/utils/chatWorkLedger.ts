@@ -75,8 +75,18 @@ export interface WorkLedgerDecision {
 /** One ledger row: one section's final state in one turn. */
 export interface WorkLedgerRow {
   /** Turns since the (latest) staging: 1 = previous turn. Sorted
-   *  DESCENDING — oldest first, newest last (render order). */
+   *  DESCENDING — oldest first, newest last (render order).
+   *  C1: still exact (current turn - turnOrdinal), kept for wire
+   *  compatibility; the CACHE-stable identity is turnOrdinal. */
   turnOffset: number;
+  /** C1 ledger byte-stability: the ABSOLUTE user-turn the event was
+   *  created in (same count law as turnOffset's `totalUsers`). The
+   *  backend renders '- turn N:' headers from this so a row's rendered
+   *  bytes never change on later sends — the relative label used to
+   *  mutate one header byte every turn ahead of the whole transcript,
+   *  busting the provider prefix cache on every turn (measured 2026-11-20:
+   *  warm cached share 0.312 vs 0.982 without a ledger). */
+  turnOrdinal: number;
   file: string;
   /** Bare section name; '' = file-level. */
   section: string;
@@ -267,6 +277,18 @@ export interface WorkLedgerBuildOptions {
 }
 
 /**
+ * C1: the ledger's turn count, exposed so a caller that wants the
+ * request-level `workLedgerCurrentTurn` anchor can derive it under the
+ * SAME law as turnOffset (total user messages in the sent trail
+ * INCLUDING the message being sent). The renderer does not need it when
+ * rows carry absolute turnOrdinal values — it is a coherence guard, not
+ * a dependency.
+ */
+export function countUserTurns(messages: readonly Pick<ChatMessage, 'role'>[]): number {
+  return messages.reduce((n, m) => (m.role === 'user' ? n + 1 : n), 0);
+}
+
+/**
  * Derive the ledger rows for one outgoing request.
  *
  * `messages` is the sent trail INCLUDING the current user message (same
@@ -351,8 +373,8 @@ export function buildWorkLedger(
       }
     }
     rows.push(detail !== undefined && verdict === 'failed'
-      ? { turnOffset, file, section, verdict, detail }
-      : { turnOffset, file, section, verdict });
+      ? { turnOffset, turnOrdinal: event.turnOrdinal, file, section, verdict, detail }
+      : { turnOffset, turnOrdinal: event.turnOrdinal, file, section, verdict });
   }
   // Oldest first, newest last (the render law); stable within a turn by
   // file+section so output is deterministic.
