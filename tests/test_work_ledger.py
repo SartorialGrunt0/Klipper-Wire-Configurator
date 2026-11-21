@@ -151,23 +151,53 @@ def test_empty_ledger_injects_nothing(install):
     assert _ledger_messages(scripted.payloads[0]) == []
 
 
-def test_ledger_rides_after_skill_body_in_the_merged_prompt(install):
-    """Provider payloads merge every system message into the leading one
-    (merge_system default, 2026-09 KV/provider law) — so the ordering law
-    is asserted inside the merged text: references/body first, ledger
-    after them, nothing before the ledger moves."""
-    scripted = install([_final_reply()])
-    client.post('/ai/chat', json=_chat_payload(
-        [{'role': 'user', 'content': 'keep going'}],
-        loadedSkills=['config-editing'],
-        workLedger=ROWS,
-    ))
-    system_text = scripted.payloads[0]['messages'][0]['content']
+def test_ledger_rides_after_skill_body_in_both_wire_shapes(install):
+    """Ordering law — references/body first, ledger after them, nothing before
+    the ledger moves — asserted in BOTH shapes.
+
+    AMENDED 2026-11-20 (C2, same commit as the default flip, not silently):
+    `mergeSystemMessages` now defaults to False, so the seam blocks are their
+    own messages after the transcript instead of living inside messages[0].
+    The ORDER law is unchanged; only the container moved. The merged shape
+    stays pinned below as the explicit override, exactly as the 2026-09
+    KV/provider law asserted it."""
+    def post(**extra):
+        scripted = install([_final_reply()])
+        client.post('/ai/chat', json=_chat_payload(
+            [{'role': 'user', 'content': 'keep going'}],
+            loadedSkills=['config-editing'],
+            workLedger=ROWS,
+            **extra,
+        ))
+        return scripted.payloads[0]['messages']
+
+    # ── tail shape (new default): seam blocks ride after the transcript ──
+    messages = post()
+    assert [m['role'] for m in messages][:1] == ['system']
+    seam = [m['content'] for m in messages
+            if m.get('role') == 'system' and m is not messages[0]]
+    seam_text = '\n\n'.join(seam)
+    assert BODY_MARKER in seam_text
+    assert LEDGER_MARKER in seam_text
+    assert seam_text.index(BODY_MARKER) < seam_text.index(LEDGER_MARKER)
+    # The ledger runs to the very end of the payload (no W3 observation fires
+    # on this trail), and exactly one ledger is present.
+    assert messages[-1]['content'].endswith('[led] in printer.cfg -> undone by user')
+    assert sum(str(m.get('content', '')).count(LEDGER_MARKER) for m in messages) == 1
+    # And the human's message still precedes the seam (the seam never moves
+    # ahead of the transcript — that was the whole point of C2).
+    assert max(i for i, m in enumerate(messages) if m['role'] == 'user') < \
+        min(i for i, m in enumerate(messages)
+            if m.get('role') == 'system' and m is not messages[0])
+
+    # ── merged shape (explicit override): the pre-C2 wire, law intact ──
+    merged = post(mergeSystemMessages=True)
+    # Exactly one system message: everything hoisted into the leading block.
+    assert sum(1 for m in merged if m.get('role') == 'system') == 1
+    system_text = merged[0]['content']
     assert BODY_MARKER in system_text
     assert LEDGER_MARKER in system_text
     assert system_text.index(BODY_MARKER) < system_text.index(LEDGER_MARKER)
-    # No W3 observation fires on this trail — the ledger runs to the very
-    # end of the merged prompt (its deterministically-last row last).
     assert system_text.endswith('[led] in printer.cfg -> undone by user')
     assert system_text.count(LEDGER_MARKER) == 1
 

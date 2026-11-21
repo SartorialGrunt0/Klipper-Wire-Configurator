@@ -429,7 +429,13 @@ class ChatRequest(BaseModel):
     # single leading system message is the canonical shape every server
     # accepts. Set False explicitly only for A/B testing the trailing
     # task-anchor position.
-    mergeSystemMessages: bool = True
+    # C2 (2026-11-20): the DEFAULT FLIPPED to False. Merging every system
+    # block into messages[0] is what parked the volatile work-ledger AHEAD of
+    # the replayed transcript, so its first-appearance byte busted ~11K tokens
+    # of cache. Strict system-first templates (Qwen3.x) are now answered by
+    # the wire-shape ladder in _query_provider instead of by this flag, which
+    # stays available as an explicit override.
+    mergeSystemMessages: bool = False
     # Explicitly attached context from the docked text-view panel: highlighted
     # line ranges and pinned tree rows, each with the findings in its scope as
     # the FRONTEND resolved them (severity visibility is frontend state, so the
@@ -3982,6 +3988,243 @@ def _build_native_tool_followup(
     return [assistant_message, *tool_messages]
 
 
+# ── C2: provider wire-shape ladder (prefix cache vs strict templates) ─────
+#
+# WHY THREE SHAPES. The volatile per-turn blocks (work ledger, W3 runtime
+# observation) must ride at the END of the payload: providers cache the exact
+# longest-common-prefix of the rendered prompt, so anything that changes
+# between turns inside the leading system message re-prefills the whole
+# replayed transcript (measured 2026-11-20: ~11K tokens busted the moment the
+# ledger's first row landed). But open-weight chat templates fight back: the
+# Qwen3.x Jinja template raises
+# 'System message must be at the beginning' the instant a system message
+# appears after position 0 — verified live on qwen/Qwen3.8-flash-next
+# (HTTP 500, pre-generation) while gemma and gpt-oss slots accept it. The
+# same collision is reported upstream for Claude Code / Codex on Qwen
+# (llama.cpp #27081, #27367; Qwen3.8-27B discussion #148) and LiteLLM added a
+# static `supports_mid_conversation_system: false` capability flag for it.
+#
+# So the shape is a capability, and capabilities are learned — guessing wrong
+# must not cost the user a turn. Precedence:
+#   1. the shape learned for this (url, model) — persisted when it was earned
+#      from a real rejection,
+#   2. `_STRICT_SYSTEM_FIRST_MODEL_PATTERNS` for templates documented strict,
+#   3. `tail_system` (best framing, best cache) as the optimistic default.
+# A genuine template rejection then walks down one rung and retries in the
+# SAME request — the user never sees the 500 — and the working shape is
+# remembered so the rejection is paid once per endpoint, not once per turn.
+#
+# A template rejection is PRE-GENERATION (the failure happens while rendering
+# the Jinja template, before any token is produced), so the retry cannot
+# double-charge. Non-template failures (401/429/5xx/timeout) never reshape
+# and never retry here — see `_looks_like_template_rejection`.
+
+PROVIDER_SHAPES = ("tail_system", "tail_user", "merged")
+
+# The tail-user rung recasts harness blocks as a user message (the Claude
+# Code / Pydantic-AI pattern: volatile context in the system role sits at the
+# front and busts the prefix). The label keeps the model from reading them as
+# human prose.
+VOLATILE_TAIL_LABEL = ("[Harness context — recorded by the app during this "
+                       "conversation, not typed by the user]")
+
+# Templates documented (upstream reports, or probed on this network) to
+# require system-at-index-0. Only a starting hint: `_provider_shape_memory`
+# overrides it the moment the wire proves otherwise.
+_STRICT_SYSTEM_FIRST_MODEL_PATTERNS = ("qwen3",)
+
+# Learned shapes, keyed by (url, model). Loaded lazily from disk so a restart
+# does not re-pay the rejection.
+_provider_shape_memory: dict[tuple[str, str], str] = {}
+_shape_memory_loaded = False
+
+# File name only: AI_DATA_DIR is defined further down this module, and the
+# helpers below resolve it at CALL time (import order must not force a move).
+_SHAPE_FILE_NAME = "provider_shapes.json"
+
+
+def _shape_memory_key(url: str, model: str) -> tuple[str, str]:
+    return (str(url or "").rstrip("/"), str(model or ""))
+
+
+def _shape_file_path() -> Path:
+    return AI_DATA_DIR / _SHAPE_FILE_NAME
+
+
+def _ensure_shape_memory_loaded() -> None:
+    global _shape_memory_loaded
+    if _shape_memory_loaded:
+        return
+    _shape_memory_loaded = True
+    try:
+        saved = _load_ai_json(_shape_file_path())
+    except Exception:
+        logger.warning("provider shape memory load failed", exc_info=True)
+        return
+    for key, shape in saved.items():
+        if not isinstance(key, str) or shape not in PROVIDER_SHAPES:
+            continue
+        url, _, model = key.partition("\x00")
+        _provider_shape_memory[(url, model)] = str(shape)
+
+
+def _learned_shape(url: str, model: str) -> str | None:
+    _ensure_shape_memory_loaded()
+    return _provider_shape_memory.get(_shape_memory_key(url, model))
+
+
+def _remember_shape(url: str, model: str, shape: str,
+                    persist: bool = False) -> None:
+    """Record the shape that worked.
+
+    `persist=True` is reserved for shapes learned from an ACTUAL rejection:
+    that evidence is expensive (it cost a round trip) and not inferable from
+    the hint table, so it survives a restart. A plain optimistic success is
+    process-local — it says nothing a retry could not re-derive, and writing
+    it would let unit-test traffic poison a production artifact (it did).
+    """
+    if shape not in PROVIDER_SHAPES:
+        return
+    _ensure_shape_memory_loaded()
+    key = _shape_memory_key(url, model)
+    if _provider_shape_memory.get(key) == shape and not persist:
+        return
+    _provider_shape_memory[key] = shape
+    if not persist:
+        return
+    try:
+        saved = _load_ai_json(_shape_file_path())
+        saved["\x00".join(key)] = shape
+        _save_ai_json(_shape_file_path(), saved)
+    except Exception:
+        # Learning is an optimization: losing the persistence write costs a
+        # future rejection-retry, never a turn. Loud, not silent (B-L4 law).
+        logger.warning("provider shape memory save failed", exc_info=True)
+
+
+def _default_shape(model: str) -> str:
+    """Rung for an endpoint with nothing learned yet: a template documented
+    (or probed) strict starts at tail_user, everything else gets the
+    optimistic tail_system."""
+    name = str(model or "").lower()
+    if any(pat in name for pat in _STRICT_SYSTEM_FIRST_MODEL_PATTERNS):
+        return "tail_user"
+    return "tail_system"
+
+
+def _rungs_from(shape: str) -> list[str]:
+    """The ladder starting at `shape` (an already-chosen rung is not retried
+    against itself)."""
+    try:
+        start = PROVIDER_SHAPES.index(shape)
+    except ValueError:
+        start = 0
+    return list(PROVIDER_SHAPES[start:])
+
+
+def _volatile_tail(messages: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split (stable body, volatile tail blocks).
+
+    A system message appearing AFTER the first non-system message is a
+    trailing-seam block (`_prepare_messages` appends anchor / references /
+    skill body / ledger / observation there); a leading run of system
+    messages is the stable head and is never tail material.
+    """
+    first_non_system = next(
+        (i for i, m in enumerate(messages) if m.get("role") != "system"), None)
+    if first_non_system is None:
+        return list(messages), []
+    body = [m for i, m in enumerate(messages) if i < first_non_system
+            or m.get("role") != "system"]
+    tail = [m for i, m in enumerate(messages)
+            if i >= first_non_system and m.get("role") == "system"]
+    return body, tail
+
+
+def _reshape_for_template_fallback(payload: dict, shape: str) -> dict:
+    """Re-place the volatile tail of an already-built OpenAI-format payload.
+
+    Identity-preserving: returns the SAME object when nothing moves, so a
+    caller can tell 'no-op' from 'reshaped' without diffing.
+
+    Placement law (why these are in-place, not "move to the end"): the route
+    loop appends per-reprompt directives (ack-guard, edit nudge, steer) AFTER
+    the prepared seam, and that directive is the thing the model must act on
+    now — it stays the last message on the wire. Reordering the seam behind it
+    buried the directive under ~1.5K chars of ledger (caught by
+    tests/test_ai_progress_ack_guard.py).
+
+    tail_system : identity — `_build_provider_payload` already built this shape.
+    tail_user   : collapse the system run that sits after the transcript into
+                  ONE labeled user message, IN PLACE.
+    merged      : hoist every system block into messages[0] (the pre-C2 wire).
+    """
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or "system" in payload:
+        # Anthropic-shaped (top-level system field) — no tail concept there.
+        return payload
+    _body, tail = _volatile_tail(messages)
+    if not tail:
+        return payload
+    if shape == "tail_system":
+        return payload
+    if shape == "tail_user":
+        first_tail_index = next(
+            idx for idx, m in enumerate(messages)
+            if idx and m.get("role") == "system")
+        joined = "\n\n".join(str(m.get("content", "")) for m in tail)
+        # One labeled user block at the seam's ORIGINAL position; anything the
+        # loop appended after the seam keeps its place behind it.
+        rebuilt = []
+        inserted = False
+        for idx, msg in enumerate(messages):
+            is_tail = idx >= first_tail_index and msg.get("role") == "system"
+            if is_tail:
+                if not inserted:
+                    rebuilt.append({"role": "user",
+                                    "content": f"{VOLATILE_TAIL_LABEL}\n\n{joined}"})
+                    inserted = True
+            else:
+                rebuilt.append(msg)
+    elif shape == "merged":
+        head_blocks = [m for m in messages if m.get("role") == "system"]
+        parts = [str(m.get("content", "")) for m in head_blocks]
+        merged_head = {"role": "system", "content": "\n\n".join(parts)}
+        rebuilt = [merged_head] + [m for m in messages
+                                   if m.get("role") != "system"]
+    else:
+        return payload
+    if rebuilt == messages:
+        return payload
+    return {**payload, "messages": rebuilt}
+
+
+# Deliberately narrow: a signature that says the MESSAGE SHAPE was rejected.
+# Anything else (auth, quota, capacity, model bugs) must surface to the user
+# untouched — reshaping around a 401 would hide a real failure behind retries.
+_TEMPLATE_REJECTION_PATTERNS = (
+    "system message must be at the beginning",
+    "system role must be the first",
+    "must be the first message",
+    "unexpected role",
+    "raise_exception",
+    "jinja exception",
+    "template error",
+    "unsupported role",
+    "invalid role",
+)
+
+
+def _looks_like_template_rejection(status: int, body: str) -> bool:
+    if status not in (400, 500):
+        return False
+    text = str(body or "").lower()
+    if not text:
+        return False
+    return any(pat in text for pat in _TEMPLATE_REJECTION_PATTERNS)
+
+
+
 def _build_provider_payload(
     provider: str,
     messages: list[dict],
@@ -4058,7 +4301,22 @@ def _build_provider_payload(
             if system_parts:
                 filtered_messages.insert(0, {"role": "system", "content": "\n\n".join(system_parts)})
         else:
-            filtered_messages = messages
+            # C2 rung 1 (`tail_system`): merge ONLY the leading system run and
+            # leave the rest of the list exactly where the caller put it.
+            # Multi-leading-system is its own strict-template failure class,
+            # and the leading blocks are stable across turns, so folding them
+            # costs nothing. Reordering is NOT part of shaping: the route loop
+            # appends re-prompt directives after the prepared seam, and sliding
+            # the seam behind them buries the instruction the model must act on
+            # (pinned by tests/test_ai_progress_ack_guard.py).
+            leading = 0
+            while leading < len(messages) and messages[leading].get("role") == "system":
+                leading += 1
+            head = ([{"role": "system",
+                      "content": "\n\n".join(str(m.get("content", ""))
+                                             for m in messages[:leading])}]
+                    if leading else [])
+            filtered_messages = head + list(messages[leading:])
         payload = {
             "model": model,
             "messages": filtered_messages,
@@ -4069,6 +4327,35 @@ def _build_provider_payload(
             payload["tools"] = tools
 
     return payload
+
+
+def _response_error_text(resp) -> str:
+    """Best-effort provider error text, for the rejection-signature check."""
+    data = None
+    try:
+        data = resp.json()
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        err = data.get("error")
+        if isinstance(err, dict):
+            return str(err.get("message") or err)
+        if isinstance(err, str):
+            return err
+        for field in ("message", "detail"):
+            if data.get(field):
+                return str(data[field])
+    return str(getattr(resp, "text", "") or "")
+
+
+def _shape_for_send(url: str, payload: dict) -> str:
+    """Which wire shape this request goes out in: the shape learned for THIS
+    (url, model), else the documented-strict hint, else optimistic
+    tail_system. (A UI-level override is deliberately not wired up yet — one
+    resolution path, added only if a real endpoint needs pinning.)
+    """
+    model = str(payload.get("model", "") or "")
+    return _learned_shape(url, model) or _default_shape(model)
 
 
 async def _query_provider(
@@ -4104,25 +4391,61 @@ async def _query_provider(
         context,
     )
 
-    if stop_event is not None:
-        # Race the provider request against the stop event so a user stop
-        # cancels the in-flight request instead of waiting for it to finish.
-        query_task = asyncio.create_task(client.post(url, headers=headers, json=payload))
-        stop_task = asyncio.create_task(stop_event.wait())
-        done, _pending = await asyncio.wait(
-            {query_task, stop_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if stop_task in done:
-            query_task.cancel()
+    async def _post_once(body: dict):
+        if stop_event is not None:
+            # Race the provider request against the stop event so a user stop
+            # cancels the in-flight request instead of waiting for it to
+            # finish.
+            query_task = asyncio.create_task(
+                client.post(url, headers=headers, json=body))
+            stop_task = asyncio.create_task(stop_event.wait())
+            done, _pending = await asyncio.wait(
+                {query_task, stop_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_task in done:
+                query_task.cancel()
+                stop_task.cancel()
+                raise ChatStoppedError()
             stop_task.cancel()
-            raise ChatStoppedError()
-        stop_task.cancel()
-        resp = await query_task
-    else:
-        resp = await client.post(url, headers=headers, json=payload)
+            return await query_task
+        return await client.post(url, headers=headers, json=body)
 
-    resp.raise_for_status()
+    # ── C2 shape ladder: a template rejection downgrades the wire shape and
+    # retries inside THIS request (never surfaced as a user-visible failure);
+    # every other failure propagates on the first try.
+    model_id = str(payload.get("model", "") or "")
+    rungs = _rungs_from(_shape_for_send(url, payload))
+    send_payload = _reshape_for_template_fallback(payload, rungs[0])
+    resp = None
+    downgraded = False
+    for rung_index, shape in enumerate(rungs):
+        resp = await _post_once(send_payload)
+        if getattr(resp, "status_code", 200) < 400:
+            if _learned_shape(url, model_id) != shape:
+                _remember_shape(url, model_id, shape, persist=downgraded)
+            break
+        body_text = _response_error_text(resp)
+        remaining = rungs[rung_index + 1:]
+        if not (remaining and _looks_like_template_rejection(
+                resp.status_code, body_text)):
+            resp.raise_for_status()
+            raise ValueError(body_text
+                             or f"Provider returned HTTP {resp.status_code}")
+        candidate = _reshape_for_template_fallback(payload, remaining[0])
+        if candidate is send_payload:
+            # No tail left to move: the rejection is not ours to repair.
+            resp.raise_for_status()
+            raise ValueError(body_text
+                             or f"Provider returned HTTP {resp.status_code}")
+        logger.warning(
+            "Provider rejected the wire shape | shape=%s -> %s | %s | context=%s",
+            shape, remaining[0], body_text[:200], context,
+        )
+        send_payload = candidate
+        downgraded = True
+
+    assert resp is not None  # _rungs_from never returns an empty ladder
     data = resp.json()
 
     error_message = _extract_api_error_message(data)
