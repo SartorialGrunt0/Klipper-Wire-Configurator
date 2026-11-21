@@ -1119,6 +1119,7 @@ def _runtime_error_observation(messages: list[dict],
 def _prepare_messages(messages: list[dict],
                       edit_capable: bool = False, *,
                       skill_active: bool = False,
+                      macro_skill_active: bool = False,
                       native_mode: bool = False,
                       context_files: dict | None = None,
                       context_references: list | None = None,
@@ -1632,11 +1633,14 @@ EDIT_SKILL_DESCRIPTION = (
     "or any request that says not to change the files."
 )
 MACRO_SKILL_DESCRIPTION = (
-    "Writes, fixes, and explains [gcode_macro] gcode: Jinja rendering rules, "
-    "params defaults, the validate-and-simulate workflow, terse examples, and "
-    "common pitfalls. Use when drafting or fixing macro text, or when asked "
-    "what a macro will actually do or send to the printer. Do NOT use for "
-    "plain config-parameter changes or questions about non-macro sections."
+    "Writes, fixes, explains, VALIDATES, and simulates [gcode_macro] "
+    "gcode: Jinja rendering rules, params defaults, the validate-and-"
+    "simulate workflow, terse examples, and common pitfalls. Use when "
+    "drafting or fixing macro text, when asked to check or validate a "
+    "macro, or when asked what a macro will actually do or send to the "
+    "printer — it also unlocks the validate_macro and simulate_macro "
+    "tools. Do NOT use for plain config-parameter changes or questions "
+    "about non-macro sections."
 )
 
 LIST_HARDWARE_SPEC = {
@@ -1750,15 +1754,17 @@ _SKILL_INDEX_BLOCK = (
     "</available_skills>\n"
     "If the user's request is about editing their config, call load_skill "
     "with the skill name FIRST — the edit tools are not available until "
-    "you do. If the request is about WRITING, fixing, or explaining a "
-    "macro's gcode (Jinja, params, what it will send or do), also call "
-    "load_skill(name='macro-authoring') — the macro rules, examples, and "
-    "pitfalls live there; load config-editing on top only when the macro "
-    "must actually be saved. If the printer memory has blank fields you "
-    "need (or you are about to guess a hardware fact), "
-    "load_skill(name='printer-memory') and follow its playbook instead of "
-    "guessing. Questions about Klipper that need none of these never need "
-    "a skill."
+    "you do. If the request is about WRITING, fixing, explaining, "
+    "CHECKING, or VALIDATING a macro's gcode (Jinja, params, what it will "
+    "send or do), ALSO call load_skill(name='macro-authoring') — the "
+    "macro rules, examples, and pitfalls live there AND it unlocks the "
+    "validate_macro and simulate_macro tools; a macro request that needs "
+    "those tools without this load will fail. Load config-editing on top "
+    "only when the macro must actually be saved. If the printer memory "
+    "has blank fields you need (or you are about to guess a hardware "
+    "fact), load_skill(name='printer-memory') and follow its playbook "
+    "instead of guessing. Questions about Klipper that need none of these "
+    "never need a skill."
 )
 
 
@@ -1855,9 +1861,10 @@ MACRO_EX_PARK = (
 
 def _macro_skill_body() -> str:
     """The skill body returned by load_skill(name='macro-authoring'):
-    Klipper macro authoring law. No tools unlock — validate_macro and
-    simulate_macro are already advertised; what the body adds is the
-    WORKFLOW (simulate before you claim) and the rules the W2 engine
+    Klipper macro authoring law. The 2026-11-21 lazy gate made this load
+    the UNLOCK for validate_macro/simulate_macro (registry `gates_tools`) —
+    body and tools move together (Invariant A); what the body carries is
+    the WORKFLOW (simulate before you claim) and the rules the W2 engine
     actually enforces (no unenforced prose drift — W4 law).
 
     v2 (2026-11-17, double-blind review — both reviewers converged, each
@@ -2029,20 +2036,34 @@ _SKILL_REGISTRY: dict[str, dict] = {
         "body": _edit_skill_body,
         "gates_write": True,
         "sticky": True,
+        "gates_tools": [],
     },
     MEMORY_SKILL_NAME: {
         "description": MEMORY_SKILL_DESCRIPTION,
         "body": _memory_skill_body,
         "gates_write": False,
         "sticky": False,
+        "gates_tools": [],
     },
     MACRO_SKILL_NAME: {
         "description": MACRO_SKILL_DESCRIPTION,
         "body": _macro_skill_body,
         "gates_write": False,
         "sticky": True,
+        # Lazy-gated tool surface: these schemas are ~2.1k tokens of EVERY
+        # request's fixed head, and dogfood traces show the model already
+        # loads this skill before 33/39 validate/simulate calls. The gate
+        # mirrors config-editing: registry is the single source of the
+        # names; builders filter, dispatch kicks back, NEVER executes.
+        "gates_tools": ["validate_macro", "simulate_macro"],
     },
 }
+
+# Every tool name hidden behind a skill load (the ONLY place to add one is
+# the registry entry above — never at a builder or dispatch site).
+MACRO_GATED_TOOLS = frozenset(
+    name for _e in _SKILL_REGISTRY.values() for name in _e.get("gates_tools", ()))
+
 
 
 def _unknown_skill_text(requested: str) -> str:
@@ -2362,7 +2383,8 @@ def _render_work_ledger(rows: list | None,
 
 def _build_mcp_tool_context(edit_capable: bool = False, *,
                             skill_active: bool = False,
-                            native_mode: bool = False) -> str:
+                            native_mode: bool = False,
+                            macro_skill_active: bool = False) -> str:
     """Build the 'Available Tools' section for the system prompt.
 
     Every registered tool is advertised so text-protocol and native providers
@@ -2419,6 +2441,11 @@ def _build_mcp_tool_context(edit_capable: bool = False, *,
         "Tools:",
     ]
     for name, snippet in _MCP_TOOL_SNIPPETS.items():
+        # Lazy gate (registry `gates_tools`): the macro schemas are the
+        # biggest fixed cost in the head; they advertise ONLY while their
+        # skill is loaded — lock-step with _build_native_tools.
+        if name in MACRO_GATED_TOOLS and not macro_skill_active:
+            continue
         parts.append(f"- {name}: {snippet}")
     parts.append("")
     parts.append("Specialized tools (use only for specific problems):")
@@ -2438,20 +2465,20 @@ def _build_mcp_tool_context(edit_capable: bool = False, *,
         "or [output_pin led_strips]); no type = summary of everything "
         "present"
     )
-    if edit_capable:
-        if not skill_active:
-            # Model-triggered skill (product behavior): advertise the
-            # skill INDEX; write tools unlock only after the model calls
-            # load_skill itself.
-            parts.append("")
-            parts.append(_SKILL_INDEX_BLOCK)
-        else:
-            parts.append("")
-            parts.append("Config edit tools (changes are staged for user review, never saved directly):")
-            for name, snippet in _EDIT_TOOL_SNIPPETS.items():
-                parts.append(f"- {name}: {snippet}")
+    if edit_capable and skill_active:
         parts.append("")
-        parts.append(f"- load_skill: {_LOAD_SKILL_SNIPPET}")
+        parts.append("Config edit tools (changes are staged for user review, never saved directly):")
+        for name, snippet in _EDIT_TOOL_SNIPPETS.items():
+            parts.append(f"- {name}: {snippet}")
+    # The INDEX is the pointer at every locked surface: the write tools
+    # behind config-editing (edit-capable arm) and the macro tools behind
+    # macro-authoring (EVERY arm — load_skill is how a read-only turn
+    # unlocks validate/simulate). Ride whenever ANY gate is closed.
+    if (edit_capable and not skill_active) or not macro_skill_active:
+        parts.append("")
+        parts.append(_SKILL_INDEX_BLOCK)
+    parts.append("")
+    parts.append(f"- load_skill: {_LOAD_SKILL_SNIPPET}")
     parts.append("")
     parts.append(
         "Klipper G-code commands and macro names (e.g. G28, M104, BED_MESH_CALIBRATE, "
@@ -3871,36 +3898,44 @@ def _native_tool_object(tool: dict) -> dict:
 
 
 def _build_native_tools(edit_capable: bool = False, *,
-                        skill_active: bool = False) -> list[dict]:
+                        skill_active: bool = False,
+                        macro_skill_active: bool = False) -> list[dict]:
     """Build native function-calling tool definitions from the MCP server.
 
     Returns OpenAI-style tool objects:
         {"type": "function", "function": {"name", "description", "parameters"}}
 
     With edit_capable, the model-triggered skill gate is in force:
-    load_skill is advertised and the request-scoped write tools
-    (config_edit/config_write, defined in services.ai_edit_tools, not
-    registered on the MCP server) join the advertisement only once the
-    skill is active — kept in lock-step with the text protocol surface
-    (test_edit_tool_native_text_parity).
+    the request-scoped write tools (config_edit/config_write, defined in
+    services.ai_edit_tools, not registered on the MCP server) join the
+    advertisement only once config-editing is active — kept in lock-step
+    with the text protocol surface (test_edit_tool_native_text_parity).
+
+    The registry `gates_tools` surface (validate_macro/simulate_macro
+    behind macro-authoring) is filtered on EVERY arm — schemas for locked
+    tools cost every request their tokens and teach a tool the model is
+    not yet rules for. load_skill is advertised unconditionally: it is how
+    any arm unlocks any gated surface.
     """
     native: list[dict] = []
     for tool in _mcp_server._list_tools():
+        if tool["name"] in MACRO_GATED_TOOLS and not macro_skill_active:
+            continue
         native.append(_native_tool_object(tool))
     # Chat-layer read tool (working-state backed, see dispatch):
     # advertised on both protocols for parity.
     native.append(_native_tool_object(LIST_HARDWARE_SPEC))
-    if edit_capable:
-        native.append(_native_tool_object(LOAD_SKILL_SPEC))
-        if skill_active:
-            for tool in EDIT_TOOL_SPECS:
-                native.append(_native_tool_object(tool))
+    native.append(_native_tool_object(LOAD_SKILL_SPEC))
+    if edit_capable and skill_active:
+        for tool in EDIT_TOOL_SPECS:
+            native.append(_native_tool_object(tool))
     return native
 
 
 def _resolve_native_tools(provider: str, api_url: str, tool_protocol: str,
                           edit_capable: bool = False, *,
-                          skill_active: bool = False) -> list[dict] | None:
+                          skill_active: bool = False,
+                          macro_skill_active: bool = False) -> list[dict] | None:
     """Decide whether to pass native function-calling tools to the provider.
 
     tool_protocol values (frontend setting / harness via ChatRequest):
@@ -3921,7 +3956,8 @@ def _resolve_native_tools(provider: str, api_url: str, tool_protocol: str,
     if tool_protocol == "text":
         return None
     return _build_native_tools(edit_capable=edit_capable,
-                               skill_active=skill_active)
+                               skill_active=skill_active,
+                               macro_skill_active=macro_skill_active)
 
 
 def _extract_native_tool_calls(provider: str, data: dict) -> list[dict] | None:
@@ -5180,6 +5216,19 @@ async def chat_proxy(req: ChatRequest, request: Request):
         and (name in req.loadedSkills
              or _skill_load_in_trail(req.messages, name))
     ]
+    # Lazy macro gate (registry `gates_tools`): validate_macro/simulate_macro
+    # advertise ONLY while macro-authoring is loaded — same evidence as the
+    # sticky-body seam (client flag OR mechanical trail), so Invariant A
+    # holds by construction: the rulebook re-rides exactly when the tools do.
+    _macro_skill_state = {'active': (
+        MACRO_SKILL_NAME in req.loadedSkills
+        or _skill_load_in_trail(req.messages, MACRO_SKILL_NAME)
+    )}
+    # skill name -> the state dict its `gates_tools` ride on. The mid-loop
+    # load_skill arm flips through THIS map, so adding a skill with
+    # `gates_tools` needs one registry entry plus one line here — never a
+    # dispatch branch.
+    _gated_skill_state: dict[str, dict] = {MACRO_SKILL_NAME: _macro_skill_state}
 
     def _skill_gate_closed() -> bool:
         """True while the session's write tools stay locked behind
@@ -5189,6 +5238,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
     messages = _prepare_messages(req.messages,
                                  edit_capable=edit_capable,
                                  skill_active=_skill_state['active'],
+                                 macro_skill_active=_macro_skill_state['active'],
                                  context_files=req.contextFiles,
                                  context_references=req.context_references,
                                  # Invariant A (atomic armament): the body
@@ -5207,7 +5257,8 @@ async def chat_proxy(req: ChatRequest, request: Request):
                                  native_mode=_resolve_native_tools(
                                      req.apiProvider, req.apiUrl, req.toolProtocol,
                                      edit_capable=edit_capable,
-                                     skill_active=_skill_state['active']) is not None)
+                                     skill_active=_skill_state['active'],
+                                     macro_skill_active=_macro_skill_state['active']) is not None)
 
     # ── Log request summary ──
     msg_count = len(messages)
@@ -5245,7 +5296,8 @@ async def chat_proxy(req: ChatRequest, request: Request):
     # native server ignores the tools array, so degradation is graceful.
     native_tools = _resolve_native_tools(req.apiProvider, req.apiUrl, req.toolProtocol,
                                          edit_capable=edit_capable,
-                                         skill_active=_skill_state['active'])
+                                         skill_active=_skill_state['active'],
+                                         macro_skill_active=_macro_skill_state['active'])
     overflow = preflight_overflow(messages, req.knownContextWindow,
                                   tools=native_tools)
     if overflow is not None:
@@ -5795,7 +5847,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
                 known_tool_names = {t["name"] for t in _mcp_server._list_tools()}
                 if edit_capable:
                     known_tool_names |= EDIT_TOOL_NAMES
-                    known_tool_names.add(LOAD_SKILL_SPEC["name"])
+                known_tool_names.add(LOAD_SKILL_SPEC["name"])
                 known_tool_names.add(LIST_HARDWARE_SPEC["name"])
                 if tool_calls and current_content.strip() and all(
                     c.get("name") not in known_tool_names for c in tool_calls
@@ -5858,11 +5910,13 @@ async def chat_proxy(req: ChatRequest, request: Request):
                         )
                         results.append(result_text)
                         continue
-                    if edit_capable and tool_call.get('name') == 'load_skill':
-                        # Dispatch by REQUESTED skill name through the
-                        # registry — loading a knowledge skill must never
-                        # unlock the edit tools (only the config-editing
-                        # load flips the gate).
+                    if tool_call.get('name') == 'load_skill':
+                        # Chat-layer tool on EVERY arm (the read-only arm
+                        # needs it too — it is how any gated surface
+                        # unlocks). Dispatch by REQUESTED skill name through
+                        # the registry — loading a knowledge skill must
+                        # never unlock the edit tools (only the
+                        # config-editing load flips that gate).
                         edit_details = None
                         requested = str(
                             (tool_call.get('arguments') or {}).get('name', ''))
@@ -5876,7 +5930,8 @@ async def chat_proxy(req: ChatRequest, request: Request):
                                     req.apiProvider, req.apiUrl,
                                     req.toolProtocol,
                                     edit_capable=edit_capable,
-                                    skill_active=True)
+                                    skill_active=True,
+                                    macro_skill_active=_macro_skill_state['active'])
                                 logger.info(
                                     "Edit skill activated | write tools "
                                     "unlocked mid-request requestId=%s",
@@ -5884,12 +5939,45 @@ async def chat_proxy(req: ChatRequest, request: Request):
                             result_text = _edit_skill_body()
                         elif requested in _SKILL_REGISTRY:
                             result_text = _SKILL_REGISTRY[requested]["body"]()
-                            logger.info(
-                                "Skill loaded (knowledge) | name=%s "
-                                "requestId=%s", requested,
-                                req.requestId or 'none')
+                            # Registry-driven unlock: a skill with
+                            # `gates_tools` opens those tools THIS request
+                            # (same-turn unlock, edit precedent — body and
+                            # tools always move together, Invariant A).
+                            _entry_state = _gated_skill_state.get(requested)
+                            if (_entry_state is not None
+                                    and not _entry_state['active']):
+                                _entry_state['active'] = True
+                                native_tools = _resolve_native_tools(
+                                    req.apiProvider, req.apiUrl,
+                                    req.toolProtocol,
+                                    edit_capable=edit_capable,
+                                    skill_active=_skill_state['active'],
+                                    macro_skill_active=_macro_skill_state['active'])
+                                logger.info(
+                                    "Skill activated | gated tools unlocked "
+                                    "mid-request name=%s requestId=%s",
+                                    requested, req.requestId or 'none')
+                            else:
+                                logger.info(
+                                    "Skill loaded (knowledge) | name=%s "
+                                    "requestId=%s", requested,
+                                    req.requestId or 'none')
                         else:
                             result_text = _unknown_skill_text(requested)
+                    elif tool_call.get("name") in MACRO_GATED_TOOLS \
+                            and not _macro_skill_state['active']:
+                        # Closed-gate call (text protocol, or a native
+                        # server hallucinating an unadvertised tool): kick
+                        # back with the load step, NEVER execute.
+                        result_text = (
+                            f"'{tool_call.get('name')}' is not available yet. "
+                            f"Call load_skill(name='{MACRO_SKILL_NAME}') "
+                            "first — it returns the macro rules and unlocks "
+                            "the macro validator and simulator.")
+                        edit_details = None
+                        logger.warning(
+                            "Gated macro tool blocked | skill not loaded "
+                            "name=%s", tool_call.get('name'))
                     elif edit_session is not None and tool_call.get("name") in EDIT_TOOL_NAMES:
                         if _skill_gate_closed():
                             # Write tool used WITHOUT loading the skill:
@@ -6187,13 +6275,14 @@ async def chat_proxy(req: ChatRequest, request: Request):
                     # un-gated) staging write.
                     reprompt_results = []
                     for c in reprompt_calls[:MAX_MCP_TOOL_TURNS]:
-                        if edit_capable and c.get("name") == "load_skill":
+                        if c.get("name") == "load_skill":
                             # Round-2 review: mirror the main loop's
                             # load_skill arm — without it a load_skill on
                             # this path hit the MCP dispatcher and got
                             # "Unknown tool", contradicting the kickback
                             # the gate itself injects. Fails closed
-                            # either way; now it just works.
+                            # either way; now it just works. Chat-layer
+                            # tool on EVERY arm (macro gate included).
                             requested = str(
                                 (c.get("arguments") or {}).get("name", ""))
                             if requested in ("", EDIT_SKILL_NAME):
@@ -6206,9 +6295,31 @@ async def chat_proxy(req: ChatRequest, request: Request):
                             elif requested in _SKILL_REGISTRY:
                                 reprompt_results.append(
                                     _SKILL_REGISTRY[requested]["body"]())
+                                _entry_state = _gated_skill_state.get(requested)
+                                if (_entry_state is not None
+                                        and not _entry_state['active']):
+                                    _entry_state['active'] = True
+                                    native_tools = _resolve_native_tools(
+                                        req.apiProvider, req.apiUrl,
+                                        req.toolProtocol,
+                                        edit_capable=edit_capable,
+                                        skill_active=_skill_state['active'],
+                                        macro_skill_active=_macro_skill_state['active'])
+                                    logger.info(
+                                        "Skill activated on re-prompt path"
+                                        " | gated tools unlocked name=%s",
+                                        requested)
                             else:
                                 reprompt_results.append(
                                     _unknown_skill_text(requested))
+                        elif c.get("name") in MACRO_GATED_TOOLS \
+                                and not _macro_skill_state['active']:
+                            # Mirror of the main loop's closed-gate kickback.
+                            reprompt_results.append(
+                                f"'{c.get('name')}' is not available yet. "
+                                f"Call load_skill(name='{MACRO_SKILL_NAME}') "
+                                "first — it returns the macro rules and "
+                                "unlocks the macro validator and simulator.")
                         elif edit_session is not None and c.get("name") in EDIT_TOOL_NAMES:
                             if _skill_gate_closed():
                                 reprompt_results.append(

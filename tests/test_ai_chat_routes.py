@@ -974,7 +974,19 @@ def test_tool_context_format_law_matches_protocol():
     assert 'never write tool calls as text' in native
     assert '```tool' in text  # fallback law intact for tool_protocol=text
     for name in ai_routes._MCP_TOOL_SNIPPETS:
-        assert f"- {name}:" in native and f"- {name}:" in text
+        # Protocol parity holds per GATE STATE: a registry-gated tool is
+        # absent from BOTH surfaces until its skill loads (never advertised
+        # on one arm only — that would be the drift this loop exists to catch).
+        gated = name in ai_routes.MACRO_GATED_TOOLS
+        if gated:
+            assert f"- {name}:" not in native and f"- {name}:" not in text
+            armed_native = ai_routes._build_mcp_tool_context(
+                native_mode=True, macro_skill_active=True)
+            armed_text = ai_routes._build_mcp_tool_context(
+                native_mode=False, macro_skill_active=True)
+            assert f"- {name}:" in armed_native and f"- {name}:" in armed_text
+        else:
+            assert f"- {name}:" in native and f"- {name}:" in text
 
 
 def test_extract_provider_content():

@@ -1197,13 +1197,17 @@ def test_edit_system_prompt_carries_tool_surface(edit_flag, monkeypatch):
 
 
 def test_readonly_system_prompt_lean(edit_flag, monkeypatch):
-    # Read-only arm parity check: no write tools, no skill index.
+    # Read-only arm parity check: no WRITE tools, ever. The skill INDEX
+    # now rides EVERY arm (2026-11-21 macro gate): load_skill is a
+    # chat-layer tool everywhere and is how a read-only turn unlocks the
+    # gated validate_macro/simulate_macro surface — hiding the index here
+    # would strand those tools behind an unpointed lock.
     scripted = _install(monkeypatch, [_final_reply('ok')])
     client.post('/ai/chat', json=_chat_payload(
         [{'role': 'user', 'content': 'tweak my config'}], editTools=False))
     system_msg = scripted.payloads[0]['messages'][0]['content']
     assert '- config_edit:' not in system_msg
-    assert '<available_skills>' not in system_msg
+    assert '<available_skills>' in system_msg
 
 
 def test_locked_gate_kicks_back_before_load(edit_flag, monkeypatch):
