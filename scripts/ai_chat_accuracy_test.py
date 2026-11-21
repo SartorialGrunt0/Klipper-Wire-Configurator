@@ -5103,6 +5103,10 @@ def chat_request(base_url: str, question: TestQuestion, settings: dict,
         "temperature": settings["temperature"],
         "toolProtocol": question.tool_protocol or settings.get("tool_protocol", "auto"),
         "mergeSystemMessages": settings.get("merge_system_messages", False),
+        # 'default' = the backend sends nothing (model default). Any other
+        # level rides as top-level reasoning_effort; the backend forwards
+        # it for the openai-compatible provider only.
+        "reasoningEffort": settings.get("reasoning_effort", "default"),
     }
     # Tool-mediated editing: per-question override wins over the run flag;
     # both unset follows the server default, which is ON since the Phase-4
@@ -5426,6 +5430,7 @@ def resolve_settings(args: argparse.Namespace) -> dict:
         "temperature": float(temperature),
         "tool_protocol": args.tool_protocol or "auto",
         "merge_system_messages": args.merge_system_messages,
+        "reasoning_effort": (args.reasoning_effort or "default").strip() or "default",
         "edit_tools": edit_tools_setting(args),
         "force_skill_active": bool(getattr(args, "force_skill_active", False)),
         "base_url": base_url,
@@ -5563,6 +5568,11 @@ def main() -> int:
     parser.add_argument("--max-tokens", default=0, type=int, help="Max tokens per reply")
     parser.add_argument("--temperature", default=None, type=float,
                         help="Sampling temperature 0-2 (default 0.7)")
+    parser.add_argument("--reasoning-effort", default="default",
+                        help="Reasoning effort level sent to the provider "
+                             "('default' = send nothing, model decides; other levels ride as "
+                             "top-level reasoning_effort and are honored by the "
+                             "openai-compatible provider only — see /ai/reasoning-levels)")
     parser.add_argument("--tool-protocol", default="auto",
                         choices=["auto", "native", "text"],
                         help="Tool-calling protocol sent to the backend: "
