@@ -3988,12 +3988,13 @@ def _build_provider_payload(
         # silently ride along after a provider switch. "default"/"" sends
         # NOTHING (omitted field = model default on every server; a literal
         # "default" is an invalid level everywhere).
-        if (
-            provider == "openai-compatible"
-            and reasoning_effort
-            and reasoning_effort != "default"
-        ):
-            payload["reasoning_effort"] = reasoning_effort
+        # Trim at the boundary: the gate compares against 'default', so a
+        # padded level from a raw API caller (' high ', ' default ') must
+        # not ship untrimmed bytes (product clients all normalize, but this
+        # function IS the intended gate).
+        effort = (reasoning_effort or "").strip()
+        if provider == "openai-compatible" and effort and effort != "default":
+            payload["reasoning_effort"] = effort
 
     return payload
 
@@ -4085,10 +4086,14 @@ async def _query_provider(
             "Provider rejected reasoning_effort=%s | field dropped, request retried once | context=%s",
             payload.get("reasoning_effort"), context,
         )
-        if len(_effort_rejected_endpoints) < _EFFORT_REJECTED_ENDPOINTS_MAX:
-            _effort_rejected_endpoints.add(effort_remember_key)
         payload = {k: v for k, v in payload.items() if k != "reasoning_effort"}
         resp = await _post_once(payload)
+        # Remember the pair ONLY when the retry SUCCEEDED: an echo-shaped
+        # 4xx that merely quotes the field name (a pydantic validation body)
+        # would otherwise poison (url, model) for the whole process lifetime
+        # while the real failure still surfaces.
+        if getattr(resp, "status_code", 200) < 400 and len(_effort_rejected_endpoints) < _EFFORT_REJECTED_ENDPOINTS_MAX:
+            _effort_rejected_endpoints.add(effort_remember_key)
 
     resp.raise_for_status()
     data = resp.json()
@@ -4364,15 +4369,26 @@ async def reasoning_levels(req: ReasoningLevelsRequest):
     if not isinstance(caps, dict):
         # Older llama.cpp build / non-llama server: no caps block.
         return {"levels": [], "source": None}
-    levels = [
-        lv for lv in (caps.get("reasoning_effort_levels") or [])
-        if isinstance(lv, str) and lv.strip()
-    ]
-    rejected = {lv for lv in (caps.get("reasoning_effort_rejected") or []) if isinstance(lv, str)}
-    levels = [lv for lv in levels if lv not in rejected]
     if caps.get("supports_reasoning_effort") is not True:
         # Answered from props, and props says: no configurable effort here.
         return {"levels": [], "source": "props"}
+    raw_levels = caps.get("reasoning_effort_levels")
+    if not isinstance(raw_levels, (list, tuple)):
+        # Claims support but carries no usable level list (a number, a
+        # string, garbage): that is UNANSWERED, not an authoritative empty —
+        # degrade to the assumed ladder rather than pretending props listed
+        # nothing, and never TypeError the route.
+        return {"levels": [], "source": None}
+    raw_rejected = caps.get("reasoning_effort_rejected")
+    rejected = (
+        {lv for lv in raw_rejected if isinstance(lv, str)}
+        if isinstance(raw_rejected, (list, tuple))
+        else set()
+    )
+    levels = [
+        lv for lv in raw_levels
+        if isinstance(lv, str) and lv.strip() and lv not in rejected
+    ]
     logger.info("Reasoning levels | url=%s model=%s levels=%s", props_url, req.model, levels)
     return {"levels": levels, "source": "props"}
 

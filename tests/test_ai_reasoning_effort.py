@@ -102,6 +102,19 @@ def test_other_providers_never_receive_the_field():
     assert 'reasoning_effort' not in payload
 
 
+def test_builder_trims_at_the_boundary():
+    # This function IS the gate: a raw API caller's padded level is
+    # normalized, never shipped as untrimmed bytes, and padded 'default'
+    # still sends nothing.
+    payload = ai_routes._build_provider_payload(
+        'openai-compatible', MSGS, 'm', reasoning_effort=' high ')
+    assert payload['reasoning_effort'] == 'high'
+    for padded in (' default ', '   ', '\t'):
+        payload = ai_routes._build_provider_payload(
+            'openai-compatible', MSGS, 'm', reasoning_effort=padded)
+        assert 'reasoning_effort' not in payload, repr(padded)
+
+
 def test_enum_provider_compares_by_value():
     # The route passes req.apiProvider (the str-Enum); the provider gate
     # must fire on the enum too, not only on raw strings.
@@ -159,6 +172,39 @@ def test_rejected_field_retried_once_and_remembered():
     finally:
         ai_routes._effort_rejected_endpoints.clear()
         ai_routes._effort_rejected_endpoints.update(saved)
+
+
+def test_echo_4xx_retries_once_but_never_poisons_memory():
+    # A pydantic-style 400 whose body merely ECHOES the request (naming the
+    # field in an input dump) matches the literal matcher, but the retry
+    # fails too — the pair must NOT be remembered, or the user's setting
+    # silently dies for the process lifetime while the real failure (say,
+    # max_tokens) still surfaces on every request.
+    url = 'http://echo.test/v1/chat/completions'
+    posts = []
+
+    def post(u, headers, body):
+        posts.append(dict(body))
+        keys = list(body)
+        return DummyResponse({}, status_code=400,
+                             text=f'max_tokens too large; body keys={keys}')
+
+    saved = set(ai_routes._effort_rejected_endpoints)
+    try:
+        ai_routes._effort_rejected_endpoints.discard((url, 'm'))
+        payload = ai_routes._build_provider_payload(
+            'openai-compatible', MSGS, 'm', reasoning_effort='high')
+        try:
+            _run(ai_routes._query_provider(
+                FakeAsyncClient(post_handler=post), url, {}, payload, 'openai-compatible'))
+            raise AssertionError('expected HTTPStatusError')
+        except httpx.HTTPStatusError:
+            pass
+        assert len(posts) == 2          # retried once (matcher did fire)
+        assert 'reasoning_effort' not in posts[1]
+        assert (url, 'm') not in ai_routes._effort_rejected_endpoints  # NOT remembered
+    finally:
+        ai_routes._effort_rejected_endpoints.discard((url, 'm'))
 
 
 def test_unrelated_400_never_retries():
@@ -273,6 +319,32 @@ def test_probe_no_caps_is_unknown(monkeypatch):
         return DummyResponse({'total_slots': 1})  # old llama.cpp: no caps
     body = _probe(monkeypatch, get)
     assert body['levels'] == [] and body['source'] is None
+
+
+def test_probe_garbage_level_lists_are_unknown_not_500(monkeypatch):
+    # A server that CLAIMS support but carries a non-list level field
+    # (number, bare string) has not answered the enumeration question —
+    # degrade to unknown (assumed ladder), never TypeError the route and
+    # never iterate a string per character.
+    for garbage in (5, 'high', {'a': 1}):
+        def get(url, headers, params, _g=garbage):
+            return DummyResponse({'chat_template_caps': {
+                'supports_reasoning_effort': True,
+                'reasoning_effort_levels': _g,
+            }})
+        body = _probe(monkeypatch, get)
+        assert body['levels'] == [] and body['source'] is None, repr(garbage)
+
+
+def test_probe_garbage_rejected_field_is_ignored_not_500(monkeypatch):
+    def get(url, headers, params):
+        return DummyResponse({'chat_template_caps': {
+            'supports_reasoning_effort': True,
+            'reasoning_effort_levels': ['low', 'medium', 'xhigh'],
+            'reasoning_effort_rejected': 0,  # garbage: filter nothing
+        }})
+    body = _probe(monkeypatch, get)
+    assert body['levels'] == ['low', 'medium', 'xhigh'] and body['source'] == 'props'
 
 
 def test_probe_failure_degrades_never_500(monkeypatch):
