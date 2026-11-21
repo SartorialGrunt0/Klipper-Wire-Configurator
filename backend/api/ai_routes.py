@@ -1121,6 +1121,9 @@ def _prepare_messages(messages: list[dict],
     memory = load_printer_memory()
     memory_context = printer_memory_to_context(memory)
     memory_blank = is_printer_memory_blank(memory)
+    # S3b/C: the blank-memory auto-fill block rides the trailing seam; this
+    # holds the rendered text (empty = no block this request).
+    autofill_text = ""
 
     if no_system:
         # Experiment gate: no system content at all — no tools, no prompt,
@@ -1143,9 +1146,16 @@ def _prepare_messages(messages: list[dict],
         # product behavior since the Phase-6 flag removal).
 
         # If printer memory is completely blank and there are user messages
-        # to work with, add an auto-fill instruction asking the AI to
-        # investigate.
-        if memory_blank:
+        # to work with, prepare an auto-fill instruction asking the AI to
+        # investigate. S3b/C (2026-11-21): it rides the TRAILING SEAM, not
+        # the system head. The block embeds keystroke-derived facts
+        # (derive_machine_facts / derived hardware inventory) computed from
+        # the drafts the client sends, so its bytes change whenever the user
+        # edits a config — in the head that rewrites offset ~0 and busts the
+        # provider prefix cache for the whole transcript. Same content, same
+        # every-turn recurrence, stable head. The marker check (option A)
+        # keeps it idempotent if a trail already carries the block.
+        if memory_blank and not _autofill_in_trail(messages):
             auto_fill_prompt = (
                 "\n---\n"
                 "**Printer Memory Auto-Fill**\n\n"
@@ -1227,7 +1237,9 @@ def _prepare_messages(messages: list[dict],
                     "only for the chip/model nuance, never drop a named "
                     "board."
                 )
-            system_parts.append(auto_fill_prompt)
+            # S3b/C: staged for the trailing seam (see the block comment
+            # above the memory_blank gate) — never appended to the head.
+            autofill_text = auto_fill_prompt
 
     prepared: list[dict] = []
     for msg in messages:
@@ -1339,10 +1351,20 @@ def _prepare_messages(messages: list[dict],
         if observation:
             trace_messages = [{"role": "system", "content": observation}]
 
+    # S3b/C: blank-memory auto-fill rides the seam AHEAD of the task anchor.
+    # Rationale: on main it lived in the head with the anchor at the very end
+    # (anchor dominant); keeping it before the anchor preserves that salience
+    # order, while taking its keystroke-derived bytes out of the cached prefix.
+    # Ablation instruments (minimal/no_system) never carry it.
+    autofill_messages: list[dict] = []
+    if autofill_text and not (minimal or no_system):
+        autofill_messages = [{"role": "system", "content": autofill_text}]
+
     if prepared:
         return [
             *([] if no_system else [{"role": "system", "content": system_text}]),
             *prepared,
+            *autofill_messages,
             *([] if (minimal or no_system) else [{"role": "system", "content": task_anchor}]),
             *([] if (minimal or no_system) else reference_messages),
             *([] if (minimal or no_system) else skill_body_messages),
@@ -2075,6 +2097,30 @@ def _skill_body_in_trail(messages: list[dict], skill_name: str) -> bool:
         )
         _SKILL_TRAIL_RES[skill_name] = pattern
     return any(pattern.search(str(m.get("content", ""))) for m in messages)
+
+
+# Pinning marker: the full unique header (loose 'autofill'/'auto-fill'
+# prose must never suppress the block — see S3b tests).
+_AUTOFILL_TRAIL_RE = re.compile(
+    r"\*\*Printer Memory Auto-Fill\*\*"
+)
+
+
+def _autofill_in_trail(messages: list[dict]) -> bool:
+    """True when the conversation trail already carries the blank-memory
+    auto-fill block (S3b trail-idempotence).
+
+    The block embeds keystroke-derived facts (derive_machine_facts /
+    derived hardware inventory) in the joined system HEAD, i.e. the prefix
+    cache's first-appearance region. Re-emitting it every turn rewrites
+    bytes at offset ~0 as soon as the user's config changes, busting the
+    provider cache for the whole transcript. It is a first-request
+    artifact: once the trail carries it, the head must not re-emit it.
+    Mirrors _skill_body_in_trail's idempotence contract."""
+    return any(
+        _AUTOFILL_TRAIL_RE.search(str(m.get('content', '')))
+        for m in messages
+    )
 
 
 # W6 work-ledger: the client's action-record window. Mirrors the client

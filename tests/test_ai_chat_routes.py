@@ -220,14 +220,20 @@ def test_prepare_messages_starts_with_system_and_ends_with_task_anchor(monkeypat
     assert '# Available Tools' in prepared[0]['content']
     assert prepared[-1]['role'] == 'system'
     assert 'latest (last) message' in prepared[-1]['content']
-    assert prepared[-2] == {'role': 'user', 'content': 'Explain pressure advance.'}
+    # S3b/C: the conversation (and the blank-memory auto-fill seam) sit
+    # between the head and the anchor; the anchor is still the last word.
+    last_user = max(i for i, m in enumerate(prepared) if m['role'] == 'user')
+    assert prepared[last_user] == {'role': 'user', 'content': 'Explain pressure advance.'}
 
 
 def test_prepare_messages_includes_blank_memory_auto_fill(monkeypatch):
     _blank_memory(monkeypatch)
     prepared = ai_routes._prepare_messages([{'role': 'user', 'content': 'hi'}])
-    assert 'Printer Memory Auto-Fill' in prepared[0]['content']
-    assert 'printer-memory' in prepared[0]['content']
+    # S3b/C: the block rides the trailing seam, not the system head.
+    assert 'Printer Memory Auto-Fill' not in prepared[0]['content']
+    seam = [m for m in prepared if 'Printer Memory Auto-Fill' in str(m['content'])]
+    assert len(seam) == 1
+    assert 'printer-memory' in seam[0]['content']
 
 
 def test_prepare_messages_drops_empty_messages(monkeypatch):
@@ -386,10 +392,12 @@ def test_chat_route_carries_references_into_the_prompt(monkeypatch):
     assert messages[-1]['role'] == 'system'
     assert 'printer.cfg:120-122' in messages[-1]['content']
     assert 'enable_pin is not inverted' in messages[-1]['content']
-    # Order is [.., user, task anchor, references] — the anchor still points
-    # at the last user message, and the attached context follows it.
+    # Order is [.., user, (auto-fill seam), task anchor, references] — the
+    # anchor still points at the last user message, and the attached
+    # context follows it.
     assert 'latest (last) message' in messages[-2]['content']
-    assert messages[-3]['role'] == 'user'
+    last_user = max(i for i, m in enumerate(messages) if m['role'] == 'user')
+    assert messages[last_user]['role'] == 'user'
 
 
 def test_chat_route_is_unchanged_when_no_references_are_attached(monkeypatch):

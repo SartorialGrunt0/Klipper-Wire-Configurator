@@ -75,6 +75,22 @@ def build_body(args, messages: list, turn_index: int) -> dict:
         "apiUrl": args.api_url,
         "apiProvider": "openai-compatible",
     }
+    if args.drafts_change:
+        # S3b/C user scenario: the user edits a config between turns. The
+        # blank-memory auto-fill derives machine facts from these drafts, so
+        # before S3b/C the derived block sat in the system HEAD and moved its
+        # bytes on every turn -> whole-prefix cache bust.
+        body["contextFiles"] = {
+            "printer.cfg": {
+                "content": (
+                    "[printer]\nkinematics: corexy\n"
+                    f"[stepper_x]\nposition_max: {200 + turn_index * 10}\n"
+                    f"[stepper_y]\nposition_max: {200 + turn_index * 10}\n"
+                    "[stepper_z]\nposition_max: 210\n"
+                ),
+                "label": "printer.cfg",
+            },
+        }
     if args.ledger:
         # 'staged' verdict: no decision store involved, deterministic.
         # Client law offset = current - ordinal (current counts the user
@@ -99,6 +115,9 @@ def main() -> int:
     ap.add_argument("--turns", type=int, default=4, choices=range(2, len(TURNS) + 1))
     ap.add_argument("--ledger", action="store_true",
                     help="replay a ledger-present conversation (C1 failure mode)")
+    ap.add_argument("--drafts-change", action="store_true",
+                    help="S3b/C: send a config draft whose contents change every "
+                         "turn, as a user editing mid-conversation would")
     ap.add_argument("--timeout", type=int, default=600)
     ap.add_argument("--output", default="", help="write the full report JSON here")
     args = ap.parse_args()
