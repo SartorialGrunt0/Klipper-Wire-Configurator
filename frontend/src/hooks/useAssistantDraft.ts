@@ -12,7 +12,7 @@
  * preview anymore.
  */
 import { useCallback } from 'react';
-import type { ChatMessage, AiProvider } from '../stores/aiStore';
+import type { ChatMessage, MessageContextUsage, AiProvider } from '../stores/aiStore';
 import type { AiChatRole, PendingConfigEdit } from '../services/api';
 import * as api from '../services/api';
 import { rewriteConfigEqualsSeparators } from '../utils/chatUtils';
@@ -94,6 +94,10 @@ export function useAssistantDraft() {
       // loads a chat while this reply is in flight, the epoch moved and
       // this reply's telemetry must not land in the new conversation.
       const pressureEpoch = pressure.epoch;
+      // Context chip: the reply's wall-clock duration, measured where the
+      // user feels it — client send to reply in hand (loop retries included,
+      // since the backend performs them inside this one call).
+      const replyStartedAt = Date.now();
       const response = await api.aiChat(
         { ...chatRequestBase, knownContextWindow, messages: conversationMessages },
         options?.signal,
@@ -121,17 +125,45 @@ export function useAssistantDraft() {
           response.usage?.lastPromptTokens ?? null,
           response.usage?.lastCachedTokens ?? null,
         );
-        void pressure.ensureWindow({
-          apiKey: chatRequestBase.apiKey,
-          apiUrl: chatRequestBase.apiUrl,
-          apiProvider: chatRequestBase.apiProvider,
-          model: chatRequestBase.model,
-        });
+        // The Context chip freezes this reply's window onto the message, so
+        // the probe runs BEFORE the message is built: it is deduped per
+        // provider+model and the backend answers from router preset args, so
+        // the first reply of a session pays milliseconds. A probe that hangs
+        // must never hold the reply hostage — the wait is bounded, and a late
+        // answer still heals the chip through the store.
+        await Promise.race([
+          pressure.ensureWindow({
+            apiKey: chatRequestBase.apiKey,
+            apiUrl: chatRequestBase.apiUrl,
+            apiProvider: chatRequestBase.apiProvider,
+            model: chatRequestBase.model,
+          }),
+          new Promise<void>((resolve) => { setTimeout(resolve, 1500); }),
+        ]);
       }
+
+      // Context chip: freeze this reply's numbers onto the message. The
+      // window comes from the session's probe for the same provider+model;
+      // when the probe has not landed yet it stays null and the chip degrades
+      // to a token readout rather than inventing a percentage.
+      const pressureAfter = useContextPressureStore.getState();
+      const contextUsage: MessageContextUsage = {
+        promptTokens: typeof response.usage?.lastPromptTokens === 'number'
+          ? response.usage.lastPromptTokens
+          : null,
+        cachedTokens: typeof response.usage?.lastCachedTokens === 'number'
+          ? response.usage.lastCachedTokens
+          : null,
+        contextWindow: pressureAfter.probedKey === windowKey ? pressureAfter.contextWindow : null,
+        windowKey,
+        replyMs: Date.now() - replyStartedAt,
+        model: chatRequestBase.model ?? null,
+      };
 
       let assistantMessage: ChatMessage = {
         role: 'assistant',
         content: response.content || 'No response.',
+        contextUsage,
         mcpToolNames: response.mcpToolNames,
         toolCalls: response.toolCalls,
         repromptCount: response.repromptCount,

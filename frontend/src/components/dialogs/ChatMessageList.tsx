@@ -6,6 +6,7 @@
  */
 import React, { useState, useRef, useEffect, type ComponentPropsWithoutRef } from 'react';
 import { copyText } from '../../utils/clipboard';
+import ContextChip from './ContextChip';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -444,6 +445,15 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                         <path d="M9.5 4.5l2 2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
                       </svg>
                     </button>
+                  )}
+
+                  {/* Context chip: this reply's context use, left of Copy so
+                      the reading order stays "what did it cost" → "take it". */}
+                  {msg.role === 'assistant' && msg.contextUsage && (
+                    <ContextChip
+                      usage={msg.contextUsage}
+                      toolCalls={Array.isArray(msg.toolCalls) ? msg.toolCalls.length : 0}
+                    />
                   )}
 
                   {/* Copy raw markdown */}

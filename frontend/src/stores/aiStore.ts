@@ -42,6 +42,35 @@ export interface ChatMessage {
    * transcript even after later messages join the running total.
    */
   requestId?: string;
+  /** Per-reply context telemetry for the Context chip (see MessageContextUsage). */
+  contextUsage?: MessageContextUsage;
+}
+
+/**
+ * The provider's own numbers for the call that produced a reply, plus what
+ * the client measured. Persisted with the message (plain JSON) so a reloaded
+ * conversation keeps its receipts instead of losing them with the live store.
+ *
+ * Null means "not reported", never zero: a provider that omits cache numbers
+ * must not render as a 0% hit rate.
+ */
+export interface MessageContextUsage {
+  /** usage.lastPromptTokens of the reply's last provider call. */
+  promptTokens: number | null;
+  /** usage.lastCachedTokens of that same call. */
+  cachedTokens: number | null;
+  /** The model's real window, when the session had probed it. */
+  contextWindow: number | null;
+  /**
+   * Provider+model identity this reply was sent under (`apiUrl::model`, no
+   * key material). Lets a chip drawn before the window probe settled borrow
+   * the probe later — but only when the identity still matches.
+   */
+  windowKey?: string | null;
+  /** Wall-clock duration of the reply as the client measured it. */
+  replyMs: number | null;
+  /** Model that answered (survives a later model switch in settings). */
+  model: string | null;
 }
 
 export interface AiSettings {
