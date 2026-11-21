@@ -5571,18 +5571,20 @@ def main() -> int:
                              "calling), 'native' (force OpenAI native "
                              "tool_calls for local llama.cpp servers too), "
                              "'text' (force the text protocol everywhere)")
+    # C2 (improve/ai-chat-cache-hit-miss): the backend DEFAULT flipped to
+    # mergeSystemMessages=false — volatile seam blocks ride the tail (wire-shape
+    # ladder). The harness default MUST track the product default or a bank leg
+    # silently measures the retired head-merge path. --merge-system-messages is
+    # now a MEANINGFUL A/B control arm (pre-C2 shape via explicit override).
     parser.add_argument("--merge-system-messages", action="store_true",
-                        help="Deprecated no-op (kept for compat): the backend "
-                             "now merges system messages into a single leading "
-                             "one by default for every OpenAI-compatible "
-                             "request.")
+                        help="A/B control arm: send mergeSystemMessages=true "
+                             "to restore the pre-C2 head-merge wire shape.")
     parser.add_argument("--no-merge-system-messages", action="store_false",
                         dest="merge_system_messages",
-                        help="A/B opt-out: send mergeSystemMessages=false to "
-                             "keep the trailing task anchor as its own system "
-                             "message (positionally meaningful for permissive "
-                             "chat templates).")
-    parser.set_defaults(merge_system_messages=True)
+                        help="Product default (sent explicitly): keep seam "
+                             "blocks at the trailing position (wire-shape "
+                             "ladder handles strict templates).")
+    parser.set_defaults(merge_system_messages=False)
     parser.add_argument("--edit-tools", default="auto", choices=["auto", "on", "off"],
                         help="Tool-mediated editing for questions without a "
                              "per-question override: 'auto' follows the server "
