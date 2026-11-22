@@ -2497,7 +2497,7 @@ def _build_mcp_tool_context(edit_capable: bool = False, *,
         # arm would otherwise advertise the locked surfaces NOWHERE.
         if signpost_required:
             parts.append("")
-            parts.append(_SKILL_INDEX_BLOCK.strip())
+            parts.append(_SKILL_INDEX_BLOCK)
         parts.append("")
         parts.append(
             "Klipper G-code commands and macro names (e.g. G28, M104, BED_MESH_CALIBRATE, "
@@ -2537,10 +2537,6 @@ def _build_mcp_tool_context(edit_capable: bool = False, *,
         parts.append("Config edit tools (changes are staged for user review, never saved directly):")
         for name, snippet in _EDIT_TOOL_SNIPPETS.items():
             parts.append(f"- {name}: {snippet}")
-    # The INDEX is the pointer at every locked surface: the write tools
-    # behind config-editing (edit-capable arm) and the macro tools behind
-    # macro-authoring (EVERY arm — load_skill is how a read-only turn
-    # unlocks validate/simulate). Ride whenever ANY gate is closed.
     if signpost_required:
         parts.append("")
         parts.append(_SKILL_INDEX_BLOCK)
