@@ -175,21 +175,48 @@ def test_builder_default_still_ships_catalog():
         assert marker in ctx_native
 
 
-def test_builder_edit_and_skill_index_gone_with_catalog():
-    # The edit-tool snippets, skill INDEX and load_skill snippet are
-    # catalog content: gone with tools_catalog=False. Their surfaces are
-    # the native array on healthy native turns.
-    ctx = ai_routes._build_mcp_tool_context(
+def test_builder_edit_snippets_gone_but_skill_signpost_survives():
+    # AMENDED contract (bank regression 2026-11-22): schema snippets are
+    # catalog content — gone with tools_catalog=False. But the skill
+    # INDEX + unlock law are ROUTE POINTERS at skill-gated tools that the
+    # array CANNOT carry (macro tools are absent from the array until the
+    # skill loads; the array's load_skill enum says 'name from
+    # <available_skills>' — a dangling pointer without this block). They
+    # are LAWS and ride every arm while any gate is closed.
+    armed = ai_routes._build_mcp_tool_context(
         edit_capable=True, skill_active=True, macro_skill_active=False,
         native_mode=True, tools_catalog=False)
-    assert '- config_edit:' not in ctx
-    assert '<available_skills>' not in ctx
-    assert '- load_skill:' not in ctx
-    armed = ai_routes._build_mcp_tool_context(
+    assert '- config_edit:' not in armed          # schema: array's job
+    assert '- load_skill:' not in armed           # snippet: array's job
+    assert '<available_skills>' in armed          # signpost: LAW
+    assert 'macro-authoring' in armed
+    assert 'simulate_macro' in armed              # names the unlockable
+    closed = ai_routes._build_mcp_tool_context(
         edit_capable=True, skill_active=False, macro_skill_active=False,
         native_mode=True, tools_catalog=False)
-    assert '- config_edit:' not in armed
-    assert '<available_skills>' not in armed
+    assert '<available_skills>' in closed
+    assert 'not available until' in closed        # edit unlock law intact
+
+
+def test_builder_signpost_gone_when_every_gate_armed():
+    # All skills loaded = no locked surface to advertise: the block goes
+    # quiet on the trimmed arm (lock-step with the gate rule the catalog
+    # arm already follows).
+    ctx = ai_routes._build_mcp_tool_context(
+        edit_capable=True, skill_active=True, macro_skill_active=True,
+        native_mode=True, tools_catalog=False)
+    assert '<available_skills>' not in ctx
+
+
+def test_builder_signpost_identical_across_arms():
+    # Same block, byte-identical, catalog arm or trimmed arm — the
+    # signpost is not a per-channel translation.
+    kwargs = dict(edit_capable=True, skill_active=False,
+                  macro_skill_active=False, native_mode=True)
+    cat = ai_routes._build_mcp_tool_context(tools_catalog=True, **kwargs)
+    trim = ai_routes._build_mcp_tool_context(tools_catalog=False, **kwargs)
+    block = ai_routes._SKILL_INDEX_BLOCK  # RAW: a per-arm strip/whitespace
+    assert block in cat and block in trim  # translation would break this
 
 
 def test_builder_catalog_with_macro_gate_still_locksteps():

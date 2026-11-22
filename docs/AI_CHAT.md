@@ -547,6 +547,12 @@ python3 scripts/ai_chat_accuracy_test.py \
 - `--tool-protocol native` is correct for current llama.cpp servers (probe
   an endpoint before assuming otherwise); `auto` falls back to the text
   protocol per URL scheme.
+- `--native-catalog auto|off|always` pins the tool-schema channel: `auto`
+  is production (native turns trim the head catalog when the `tools`
+  array carries the schemas; the skill index + unlock signpost always
+  rides while a skill gate is closed). `always` forces the head catalog,
+  `off` forces the trim — the A/B lever for attributing tool-discovery
+  regressions between the two channels.
 - Subsets by qid: `--questions EDIT-01..06`, `--questions TRIDENT,AMBI-0*`,
   `--questions BULK`; `--question TEXT --check TEXT` for one ad-hoc case;
   `--list-questions` prints the bank (indices drift as it grows — search by
