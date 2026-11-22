@@ -2437,6 +2437,11 @@ def _build_mcp_tool_context(edit_capable: bool = False, *,
     endpoint was DETECTED tools-blind (the array is being ignored) or the
     arm was forced (harness A/B): insurance as a substitute, never a
     duplication on a healthy wire.
+
+    EXEMPT from the trim: the skill INDEX + unlock law (signpost). It
+    routes to skill-GATED tools that are absent from the array until the
+    skill loads, so no channel carries them except this block — while any
+    gate is closed it rides every arm (bank regression 2026-11-22).
     """
 
     parts = [
@@ -2479,10 +2484,20 @@ def _build_mcp_tool_context(edit_capable: bool = False, *,
         ]),
     ]
 
+    # The INDEX is the pointer at every locked surface: the write tools
+    # behind config-editing (edit-capable arm) and the macro tools behind
+    # macro-authoring (EVERY arm — load_skill is how a read-only turn
+    # unlocks validate/simulate). Ride whenever ANY gate is closed.
+    signpost_required = (edit_capable and not skill_active) or not macro_skill_active
     if not tools_catalog:
-        # Native-trimmed arm: LAWS above, ONE closing law below — the
-        # catalog (snippet lists, edit tools, skill index, load_skill
-        # snippet) rides the `tools` array on this arm.
+        # Native-trimmed arm: LAWS above, the SKILL SIGNPOST (while any
+        # gate is closed), ONE closing law below. The bank regression of
+        # 2026-11-22 proved the signpost is not catalog: skill-gated tools
+        # are absent from the array until the skill loads, so the trimmed
+        # arm would otherwise advertise the locked surfaces NOWHERE.
+        if signpost_required:
+            parts.append("")
+            parts.append(_SKILL_INDEX_BLOCK.strip())
         parts.append("")
         parts.append(
             "Klipper G-code commands and macro names (e.g. G28, M104, BED_MESH_CALIBRATE, "
@@ -2526,7 +2541,7 @@ def _build_mcp_tool_context(edit_capable: bool = False, *,
     # behind config-editing (edit-capable arm) and the macro tools behind
     # macro-authoring (EVERY arm — load_skill is how a read-only turn
     # unlocks validate/simulate). Ride whenever ANY gate is closed.
-    if (edit_capable and not skill_active) or not macro_skill_active:
+    if signpost_required:
         parts.append("")
         parts.append(_SKILL_INDEX_BLOCK)
     parts.append("")
