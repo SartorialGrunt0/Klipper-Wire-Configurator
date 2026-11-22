@@ -95,8 +95,16 @@ const ContextChip: React.FC<ContextChipProps> = ({ usage, toolCalls }) => {
       <button
         type="button"
         onClick={() => setOpen((prev) => !prev)}
-        onPointerEnter={() => setOpen(true)}
-        onPointerLeave={() => setOpen(false)}
+        // Review #9: a touch tap fires pointerenter BEFORE click, so an
+        // ungated enter opened the readout and the click then toggled it
+        // shut — tap could never open it. Hover-gate to mouse pointers;
+        // touch opens via the click toggle and closes via outside tap.
+        onPointerEnter={(event) => {
+          if (event.pointerType === 'mouse') setOpen(true);
+        }}
+        onPointerLeave={(event) => {
+          if (event.pointerType === 'mouse') setOpen(false);
+        }}
         onFocus={() => setOpen(true)}
         onBlur={() => setOpen(false)}
         onKeyDown={(event) => {

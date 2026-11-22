@@ -26,6 +26,7 @@ bodies incl. config text — treat the capture file as config-equivalent).
 import argparse
 import http.server
 import json
+import sys
 import urllib.error
 import urllib.request
 
@@ -35,6 +36,24 @@ PARSER.add_argument("port", nargs="?", type=int, default=18080)
 PARSER.add_argument("--target", default="http://192.168.1.34:8080",
                     help="upstream inference server base URL")
 ARGS = PARSER.parse_args()
+
+_capture_state = {"failed": False}
+
+
+def _capture_write(record) -> None:
+    """Append one JSONL row. A logging proxy must never break the chat it
+    observes — but a SILENTLY empty capture is worse: an LCP diff over a
+    truncated capture reads as 'no prefix divergence', a green that cannot
+    fail. The first write error warns on stderr and disables capture."""
+    if _capture_state["failed"]:
+        return
+    try:
+        with open(ARGS.capture, "a") as fh:
+            fh.write(json.dumps(record) + "\n")
+    except (ValueError, OSError) as exc:
+        _capture_state["failed"] = True
+        print(f"[proxy] capture DISABLED, cannot write {ARGS.capture}: {exc}",
+              file=sys.stderr)
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -59,11 +78,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if "/chat/completions" in self.path and body:
             try:
                 record = json.loads(body)
-                with open(ARGS.capture, "a") as fh:
-                    fh.write(json.dumps(record) + "\n")
-            except (ValueError, OSError):
-                # A logging proxy must never break the chat it observes.
-                pass
+            except ValueError:
+                record = None  # unparseable body: nothing to record
+            if record is not None:
+                _capture_write(record)
         ctype = upstream.headers.get("Content-Type", "application/json")
         self.send_response(upstream.status)
         self.send_header("Content-Type", ctype)
@@ -78,19 +96,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if "/chat/completions" in self.path:
                 try:
                     resp = json.loads(data)
-                    if isinstance(resp, dict) and "usage" in resp:
-                        u = resp.get("usage") or {}
-                        t = resp.get("timings") or {}
-                        with open(ARGS.capture, "a") as fh:
-                            fh.write(json.dumps({"_usage": {
-                                "prompt_tokens": u.get("prompt_tokens"),
-                                "cached_tokens": (u.get("prompt_tokens_details") or {}).get("cached_tokens"),
-                                "prompt_ms": t.get("prompt_ms"),
-                                "predicted_ms": t.get("predicted_ms"),
-                            }}) + "\n")
-                except (ValueError, OSError):
-                    # A logging proxy must never break the chat it observes.
-                    pass
+                except ValueError:
+                    resp = None
+                if isinstance(resp, dict) and "usage" in resp:
+                    u = resp.get("usage") or {}
+                    t = resp.get("timings") or {}
+                    _capture_write({"_usage": {
+                        "prompt_tokens": u.get("prompt_tokens"),
+                        "cached_tokens": (u.get("prompt_tokens_details") or {}).get("cached_tokens"),
+                        "prompt_ms": t.get("prompt_ms"),
+                        "predicted_ms": t.get("predicted_ms"),
+                    }})
         else:
             self.send_header("Transfer-Encoding", "chunked")
             self.end_headers()

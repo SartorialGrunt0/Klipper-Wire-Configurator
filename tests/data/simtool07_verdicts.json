@@ -93,10 +93,34 @@
       "source": "live leg macrogate-r1 (distinguishing frame; checker false-failed it)"
     },
     {
-      "label": "laundering guard: asserted refusal (is rejected) + distinguishing frame in same clause \u2014 must stay FAIL",
+      "label": "laundering guard: asserted refusal (is rejected) + distinguishing frame in same clause — must stay FAIL",
       "expect": "fail",
       "text": "PREHEAT T=240 is rejected, which is a different thing from a warning.",
       "source": "battery pin (laundering guard, 2026-11-21)"
+    },
+    {
+      "label": "laundering guard: 'will be rejected' + distinguishing frame — must FAIL (review #2)",
+      "expect": "fail",
+      "text": "The per-heater bound is a different thing from a command-level check and 240 will be rejected.",
+      "source": "round-1 review of PR #45 (tense-bearing claims never take the frame scope)"
+    },
+    {
+      "label": "laundering guard: \"won't run\" + distinguishing frame — must FAIL (review #2)",
+      "expect": "fail",
+      "text": "The heater rule is distinct from the scenario where the command won't run.",
+      "source": "round-1 review of PR #45"
+    },
+    {
+      "label": "laundering guard: 'will not run' + distinguishing frame — must FAIL (review #2)",
+      "expect": "fail",
+      "text": "The cap is a separate thing from a range check; the command will not run at 240.",
+      "source": "round-1 review of PR #45"
+    },
+    {
+      "label": "laundering guard: 'exceeds the maximum' + distinguishing frame — must FAIL (review #2)",
+      "expect": "fail",
+      "text": "That limit, as opposed to the command check, exceeds the maximum.",
+      "source": "round-1 review of PR #45"
     }
   ]
 }

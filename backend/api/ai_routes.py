@@ -1155,6 +1155,7 @@ def _prepare_messages(messages: list[dict],
         # detect_board and other niche helpers live under "Specialized tools".
         tool_context = _build_mcp_tool_context(edit_capable=edit_capable,
                                                skill_active=skill_active,
+                                               macro_skill_active=macro_skill_active,
                                                native_mode=native_mode)
         system_parts = [system_prompt, tool_context, memory_context]
         # The edit law travels inside the load_skill tool result (skill
@@ -1200,8 +1201,9 @@ def _prepare_messages(messages: list[dict],
             if edit_capable:
                 # The full fact-finding playbook lives in the
                 # printer-memory skill; the prompt points there instead
-                # of duplicating it. (load_skill is only advertised when
-                # the request is edit-capable.)
+                # of duplicating it. (load_skill rides EVERY arm since the
+                # macro gate — the read-only path needs it to unlock the macro
+                # tools; edit-capable requests additionally get the playbook.)
                 auto_fill_prompt += (
                     "\nCall load_skill(name='printer-memory') first — it "
                     "lists exactly where each field's evidence lives in "
@@ -2248,7 +2250,11 @@ def _render_work_ledger(rows: list | None,
         effective: int | None
         if ordinal_opt is not None:
             if offset_opt is not None:
-                anchor = ct if ct is not None else ordinal_opt + offset_opt - 1
+                # Client law offset == current - ordinal => the implied
+                # current turn is ordinal + offset. (The old '- 1' shifted
+                # the whole window one turn late: freshest row dropped,
+                # an 11th row admitted.)
+                anchor = ct if ct is not None else ordinal_opt + offset_opt
                 effective = anchor - ordinal_opt
             else:
                 effective = ct - ordinal_opt if ct is not None else None
@@ -2297,7 +2303,13 @@ def _render_work_ledger(rows: list | None,
         # OFFSET-descending, which was the same order — offsets run
         # backwards to turns. Negating absolute orders the ledger
         # NEWEST-first, rewriting the block's middle every turn.)
-        valid.sort(key=lambda r: (_absolute_of(r), r[2], r[3]))
+        # A row with no absolute coordinate (offset-only, no currentTurn)
+        # sorts LAST in client order rather than crashing the whole
+        # render: a bare None key raises TypeError against int keys, and
+        # the caller's swallow would silently drop EVERY row.
+        valid.sort(key=lambda r: (
+            _absolute_of(r) if _absolute_of(r) is not None else float("inf"),
+            r[2], r[3]))
     else:
         # Pure legacy payload without a currentTurn anchor: keep the
         # pre-C1 window sort (offset descending = oldest first).
@@ -2486,6 +2498,28 @@ def _build_mcp_tool_context(edit_capable: bool = False, *,
     )
 
     return "\n".join(parts)
+
+
+# ── Usage roll-up ───────────────────────────────────────────────────────
+def _paired_last_usage(usage_events: list) -> tuple:
+    """(promptTokens, cachedTokens) of the SAME last usage event.
+
+    The chip renders a PAIR ("cached X% of that request"), so the pair
+    must come from one event. Two independent backward scans (the old
+    shape) paired a turn-k prompt with a turn-(k-1) cached count whenever
+    the final call reported prompt_tokens without its details block — a
+    confident, wrong percentage on every reply.
+    """
+    for event in reversed(usage_events):
+        if (isinstance(event.get("promptTokens"), int)
+                or isinstance(event.get("cachedTokens"), int)):
+            return (
+                event.get("promptTokens")
+                if isinstance(event.get("promptTokens"), int) else None,
+                event.get("cachedTokens")
+                if isinstance(event.get("cachedTokens"), int) else None,
+            )
+    return (None, None)
 
 
 # ── Edit-request heuristic ──────────────────────────────────────────────
@@ -6516,26 +6550,15 @@ async def chat_proxy(req: ChatRequest, request: Request):
                     # W7 context-pressure: the LAST provider request of the
                     # loop is the fullest prompt, so its size is the pressure
                     # signal the client compares against the router window.
-                    "lastPromptTokens": next(
-                        (
-                            e.get("promptTokens")
-                            for e in reversed(usage_events)
-                            if isinstance(e.get("promptTokens"), int)
-                        ),
-                        None,
-                    ),
+                    # C3: BOTH numbers come from that same last event (see
+                    # _paired_last_usage) — the chip's cached % is a pair,
+                    # not two independent "last seen" scans.
+                    "lastPromptTokens": _paired_last_usage(usage_events)[0],
                     # C3: cached share of that same last request — the
                     # prefix the NEXT turn continues from. 0 with a warm
                     # conversation means something upstream of the tail
                     # started moving (see cache probe harness).
-                    "lastCachedTokens": next(
-                        (
-                            e.get("cachedTokens")
-                            for e in reversed(usage_events)
-                            if isinstance(e.get("cachedTokens"), int)
-                        ),
-                        None,
-                    ),
+                    "lastCachedTokens": _paired_last_usage(usage_events)[1],
                     "events": usage_events,
                     "truncated": any(
                         (e.get("finishReason") or "") == "length" for e in usage_events

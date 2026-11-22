@@ -4249,6 +4249,16 @@ _DISCRIMINATOR_BEFORE, _DISCRIMINATOR_AFTER = 75, 25
 _DISCRIMINATOR_RE = re.compile(
     r"(?i)\bdifferent\b[^.;:]{0,15}?\b(?:from|than)\b|\bas opposed to\b|"
     r"\bdistinct from\b|\bseparate\b[^.;:]{0,10}?\bfrom\b")
+# Review #2 (2026-11-21): the frame arm must rescue ONLY the bare
+# tense-free PHRASES ('out of range', 'outside the range'). Most claim
+# shapes carry a tense of their own ('will be rejected', "won't run",
+# 'exceeds', 'aborts') and a frame NEVER launders an assertion — the
+# old be-verb-in-window check missed exactly those, so fabricated
+# refusals inside a distinguishing frame graded PASS. macrogate-r1 stays
+# green: its claim match is the phrase 'out-of-range', no tense token.
+_REFUSAL_TENSED_MATCH_RE = re.compile(
+    r"(?i)\b(?:will|won'?t|is|are|was|were|be|been|being|exceeds?|exceeded|"
+    r"aborts?|aborted)\b")
 
 
 def _distinguishing_frame(clause: str, start: int) -> bool:
@@ -4761,7 +4771,8 @@ def criterion_ok(kind: str, value: str, content: str,
                     continue
                 if _REFUSAL_SCOPE_RE.search(clause):
                     continue
-                if _distinguishing_frame(clause, m.start()):
+                if (not _REFUSAL_TENSED_MATCH_RE.search(m.group(0))
+                        and _distinguishing_frame(clause, m.start())):
                     continue
                 return False
         return True

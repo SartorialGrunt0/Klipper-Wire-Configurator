@@ -87,6 +87,9 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
   const [reasoningProbe, setReasoningProbe] = useState<ReasoningProbe>(EMPTY_REASONING_PROBE);
   const [reasoningProbeLoading, setReasoningProbeLoading] = useState(false);
   const reasoningProbeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Review #10: sequence fence for the async probe — the LAST-STARTED
+  // request owns the answer, not the last-resolved one.
+  const reasoningProbeSeqRef = useRef(0);
 
   const refreshReasoningProbe = async (
     provider: AiProvider = editApiProvider,
@@ -94,12 +97,17 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
     apiKey: string = editApiKey,
     model: string = editModel.trim(),
   ) => {
+    const seq = ++reasoningProbeSeqRef.current;
     if (!reasoningSettingApplies(provider) || !model || !apiUrl.trim()) {
       setReasoningProbe(EMPTY_REASONING_PROBE);
       return;
     }
     setReasoningProbeLoading(true);
     const result = await api.probeReasoningLevels(provider, apiUrl, apiKey.trim(), model);
+    // A slow answer for the PREVIOUS model must never overwrite the
+    // current model's levels (a stale list would ship levels the
+    // selected endpoint never advertised).
+    if (seq !== reasoningProbeSeqRef.current) return;
     setReasoningProbe({ levels: result.levels, source: result.source });
     setReasoningProbeLoading(false);
   };

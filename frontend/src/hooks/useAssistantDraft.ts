@@ -112,6 +112,10 @@ export function useAssistantDraft() {
         }
         throw new Error(response.error);
       }
+      // Review #11: snapshot the reply time BEFORE the window-probe wait
+      // below — the chip measures generation, not the probe, and a hung
+      // probe must not inflate every reply's reported duration.
+      const replyMs = Date.now() - replyStartedAt;
 
       // W7 context-pressure telemetry: record the latest request's prompt
       // size and make sure the window for this provider+model has been
@@ -131,6 +135,7 @@ export function useAssistantDraft() {
         // the first reply of a session pays milliseconds. A probe that hangs
         // must never hold the reply hostage — the wait is bounded, and a late
         // answer still heals the chip through the store.
+        let probeGuard: ReturnType<typeof setTimeout> | undefined;
         await Promise.race([
           pressure.ensureWindow({
             apiKey: chatRequestBase.apiKey,
@@ -138,8 +143,11 @@ export function useAssistantDraft() {
             apiProvider: chatRequestBase.apiProvider,
             model: chatRequestBase.model,
           }),
-          new Promise<void>((resolve) => { setTimeout(resolve, 1500); }),
+          new Promise<void>((resolve) => { probeGuard = setTimeout(resolve, 1500); }),
         ]);
+        // Review #11: if the probe won the race, don't leave the 1.5s
+        // guard timer pending.
+        clearTimeout(probeGuard);
       }
 
       // Context chip: freeze this reply's numbers onto the message. The
@@ -156,7 +164,7 @@ export function useAssistantDraft() {
           : null,
         contextWindow: pressureAfter.probedKey === windowKey ? pressureAfter.contextWindow : null,
         windowKey,
-        replyMs: Date.now() - replyStartedAt,
+        replyMs,
         model: chatRequestBase.model ?? null,
       };
 

@@ -1343,6 +1343,54 @@ def test_chat_proxy_reports_last_cached_tokens(monkeypatch):
     assert usage['events'][0]['cachedTokens'] == 0
 
 
+def test_chat_proxy_pairs_last_usage_from_one_event(monkeypatch):
+    # Review #12: prompt+cached are a PAIR for the chip. When the final
+    # provider call reports prompt_tokens WITHOUT a details block, the
+    # roll-up must NOT borrow the previous call's cached count (that
+    # paired turn-k prompt with turn-(k-1) cached → a confident, wrong
+    # cached %). The honest shape is cached=null (row hidden).
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(ai_routes, '_execute_tool_call', lambda call: f"result for {call['name']}")
+
+    responses = [
+        {'choices': [{'message': {
+            'content': None,
+            'tool_calls': [{'type': 'function', 'id': 'call_1',
+                            'function': {'name': 'search_klipper_docs',
+                                         'arguments': '{"query": "bed_mesh"}'}}],
+        }}],
+         'usage': {'prompt_tokens': 100, 'completion_tokens': 5,
+                   'prompt_tokens_details': {'cached_tokens': 40}}},
+        {'choices': [{'message': {'content': 'done'}}],
+         'usage': {'prompt_tokens': 180, 'completion_tokens': 5}},
+    ]
+    seen = []
+
+    def fake_post(url, headers, payload):
+        resp = responses[min(len(seen), len(responses) - 1)]
+        seen.append(1)
+        return DummyResponse(resp, url=url)
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user', 'content': 'Explain bed_mesh.'}],
+            'apiKey': 'openai-token',
+            'model': 'gpt-4o',
+            'apiUrl': 'https://api.openai.com/v1/chat/completions',
+            'apiProvider': 'chatgpt',
+        },
+    )
+    assert response.status_code == 200
+    usage = response.json()['usage']
+    assert usage['lastPromptTokens'] == 180
+    assert usage['lastCachedTokens'] is None, (
+        'cached must come from the SAME last event, never borrowed from an '
+        'earlier one')
+
+
 def test_chat_proxy_reports_usage_and_truncation(monkeypatch):
     # A provider response that burned the whole max_tokens budget
     # (finish_reason=length) must surface in /ai/chat as truncated so the

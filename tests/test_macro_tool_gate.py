@@ -179,6 +179,33 @@ def test_head_shows_skill_index_while_macro_gate_closed():
     assert ai_routes.MACRO_SKILL_NAME in head
 
 
+def test_route_forwards_macro_arm_into_the_text_head(install):
+    # Review #1: _prepare_messages declared macro_skill_active but never
+    # forwarded it to _build_mcp_tool_context, so the TEXT head stayed
+    # gate-closed forever while the native array unlocked. Route level,
+    # BOTH directions.
+    scripted = install([_final_reply()])
+    r = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'validate my park macro'}],
+        loadedSkills=['macro-authoring'], toolProtocol='text'))
+    assert r.status_code == 200
+    head = scripted.payloads[0]['messages'][0]['content']
+    for tool in GATED:
+        assert f"- {tool}:" in head, f"armed text head must advertise {tool}"
+    # (The index may still ride for the OTHER gate — its condition is
+    # per-gate, same law as the native surface.)
+
+    scripted = install([_final_reply()])
+    r = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'validate my park macro'}],
+        toolProtocol='text'))
+    assert r.status_code == 200
+    head = scripted.payloads[0]['messages'][0]['content']
+    for tool in GATED:
+        assert f"- {tool}:" not in head
+    assert "<available_skills>" in head  # closed gate: index pointer rides
+
+
 def test_skill_index_names_the_unlocked_tools():
     # The activation lever is the index text (measured law): it must NAME
     # what loading unlocks, incl. validating/checking as a trigger.

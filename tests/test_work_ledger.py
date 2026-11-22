@@ -536,6 +536,53 @@ def test_cross_turn_merged_prefix_is_byte_stable(install):
     t1 = [m for m in p1 if m.get('role') != 'system']
     t2 = [m for m in p2 if m.get('role') != 'system']
     assert t2[:len(t1)] == t1
+    # Review #5: the head/transcript checks above NEVER look at the
+    # ledger block (in the shipped no-merge default it rides a TRAILING
+    # system message). Pin the ledger's own append-only law explicitly —
+    # this is the exact class C1 (absolute turn keys) exists to hold.
+    l1 = next((m['content'] for m in p1
+               if m.get('role') == 'system' and LEDGER_MARKER in m['content']), '')
+    l2 = next((m['content'] for m in p2
+               if m.get('role') == 'system' and LEDGER_MARKER in m['content']), '')
+    assert l1 and l2, 'ledger must ride a system message in every payload'
+    g1 = l1[l1.index('- turn 1:'):]
+    assert g1 in l2, 'turn-1 group bytes must be frozen (append-only ledger)'
+    assert l2.index('- turn 1:') < l2.index('- turn 2:'), 'ascending turn order'
+
+
+def test_dual_coordinate_rows_anchor_correctly_without_current_turn():
+    # Review #3: a row carrying BOTH coordinates with no
+    # workLedgerCurrentTurn must anchor on ordinal + offset (client law
+    # offset == current - ordinal). The old -1 made effective = offset-1:
+    # the FRESHEST row fell out of the window entirely.
+    rows = [{'turnOffset': 1, 'turnOrdinal': 5, 'file': 'printer.cfg',
+             'section': 'led', 'verdict': 'kept'}]
+    out = ai_routes._render_work_ledger(rows)
+    assert out is not None and '- turn 5:' in out
+
+
+def test_dual_coordinate_window_boundary_without_current_turn():
+    # The window's far edge under the same implied anchor: 11 turns back
+    # must drop, not get admitted.
+    rows = [{'turnOffset': 11, 'turnOrdinal': 1, 'file': 'printer.cfg',
+             'section': 'old', 'verdict': 'kept'}]
+    assert ai_routes._render_work_ledger(rows) is None
+
+
+def test_mixed_coordinate_rows_without_anchor_render():
+    # Review #4: absolute row + offset-only row with no currentTurn used
+    # to raise TypeError inside the sort ((int, None) key) and the
+    # caller's swallow dropped the ENTIRE ledger silently. Now: no raise,
+    # everything renders, unanchorable rows sort last.
+    rows = [
+        {'turnOffset': 2, 'turnOrdinal': 1, 'file': 'printer.cfg',
+         'section': 'alpha', 'verdict': 'kept'},
+        {'turnOffset': 2, 'file': 'printer.cfg',
+         'section': 'beta', 'verdict': 'kept'},
+    ]
+    out = ai_routes._render_work_ledger(rows)
+    assert out is not None
+    assert 'alpha' in out and 'beta' in out
 
 
 def test_ledger_headers_absolute_for_absolute_payloads(install):
