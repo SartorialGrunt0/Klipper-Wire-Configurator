@@ -1706,7 +1706,12 @@ LOAD_SKILL_SPEC = {
             "name": {
                 "type": "string",
                 "enum": [EDIT_SKILL_NAME, MEMORY_SKILL_NAME, MACRO_SKILL_NAME],
-                "description": "Skill name from <available_skills>",
+                "description": (
+                    "Skill name from <available_skills>: config-editing, "
+                    "printer-memory, macro-authoring (macro-authoring "
+                    "unlocks validate_macro and simulate_macro; "
+                    "config-editing unlocks the edit tools)"
+                ),
             },
         },
         "required": ["name"],
@@ -1715,8 +1720,9 @@ LOAD_SKILL_SPEC = {
 
 _LOAD_SKILL_SNIPPET = (
     "Load a skill's full instructions before using it — "
-    "name='config-editing' (unlocks the edit tools) or 'printer-memory' "
-    "(hardware fact-finding playbook)"
+    "name='config-editing' (unlocks the edit tools), 'printer-memory' "
+    "(hardware fact-finding playbook) or 'macro-authoring' (macro rules; "
+    "unlocks validate_macro and simulate_macro)"
 )
 
 # Nudge replacement while the skill gate is CLOSED: pointing at a locked
