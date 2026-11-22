@@ -220,14 +220,20 @@ def test_prepare_messages_starts_with_system_and_ends_with_task_anchor(monkeypat
     assert '# Available Tools' in prepared[0]['content']
     assert prepared[-1]['role'] == 'system'
     assert 'latest (last) message' in prepared[-1]['content']
-    assert prepared[-2] == {'role': 'user', 'content': 'Explain pressure advance.'}
+    # S3b/C: the conversation (and the blank-memory auto-fill seam) sit
+    # between the head and the anchor; the anchor is still the last word.
+    last_user = max(i for i, m in enumerate(prepared) if m['role'] == 'user')
+    assert prepared[last_user] == {'role': 'user', 'content': 'Explain pressure advance.'}
 
 
 def test_prepare_messages_includes_blank_memory_auto_fill(monkeypatch):
     _blank_memory(monkeypatch)
     prepared = ai_routes._prepare_messages([{'role': 'user', 'content': 'hi'}])
-    assert 'Printer Memory Auto-Fill' in prepared[0]['content']
-    assert 'printer-memory' in prepared[0]['content']
+    # S3b/C: the block rides the trailing seam, not the system head.
+    assert 'Printer Memory Auto-Fill' not in prepared[0]['content']
+    seam = [m for m in prepared if 'Printer Memory Auto-Fill' in str(m['content'])]
+    assert len(seam) == 1
+    assert 'printer-memory' in seam[0]['content']
 
 
 def test_prepare_messages_drops_empty_messages(monkeypatch):
@@ -386,10 +392,12 @@ def test_chat_route_carries_references_into_the_prompt(monkeypatch):
     assert messages[-1]['role'] == 'system'
     assert 'printer.cfg:120-122' in messages[-1]['content']
     assert 'enable_pin is not inverted' in messages[-1]['content']
-    # Order is [.., user, task anchor, references] — the anchor still points
-    # at the last user message, and the attached context follows it.
+    # Order is [.., user, (auto-fill seam), task anchor, references] — the
+    # anchor still points at the last user message, and the attached
+    # context follows it.
     assert 'latest (last) message' in messages[-2]['content']
-    assert messages[-3]['role'] == 'user'
+    last_user = max(i for i, m in enumerate(messages) if m['role'] == 'user')
+    assert messages[last_user]['role'] == 'user'
 
 
 def test_chat_route_is_unchanged_when_no_references_are_attached(monkeypatch):
@@ -966,7 +974,19 @@ def test_tool_context_format_law_matches_protocol():
     assert 'never write tool calls as text' in native
     assert '```tool' in text  # fallback law intact for tool_protocol=text
     for name in ai_routes._MCP_TOOL_SNIPPETS:
-        assert f"- {name}:" in native and f"- {name}:" in text
+        # Protocol parity holds per GATE STATE: a registry-gated tool is
+        # absent from BOTH surfaces until its skill loads (never advertised
+        # on one arm only — that would be the drift this loop exists to catch).
+        gated = name in ai_routes.MACRO_GATED_TOOLS
+        if gated:
+            assert f"- {name}:" not in native and f"- {name}:" not in text
+            armed_native = ai_routes._build_mcp_tool_context(
+                native_mode=True, macro_skill_active=True)
+            armed_text = ai_routes._build_mcp_tool_context(
+                native_mode=False, macro_skill_active=True)
+            assert f"- {name}:" in armed_native and f"- {name}:" in armed_text
+        else:
+            assert f"- {name}:" in native and f"- {name}:" in text
 
 
 def test_extract_provider_content():
@@ -1071,6 +1091,7 @@ def test_chat_proxy_local_openai_compatible_allows_missing_key(monkeypatch):
             'reasoningTokens': 0,
             'ackReprompts': 0,
             'lastPromptTokens': None,
+            'lastCachedTokens': None,
             'events': [],
             'truncated': False,
         },
@@ -1198,6 +1219,7 @@ def test_chat_proxy_returns_plain_content(monkeypatch):
             'reasoningTokens': 0,
             'ackReprompts': 0,
             'lastPromptTokens': None,
+            'lastCachedTokens': None,
             'events': [],
             'truncated': False,
         },
@@ -1217,6 +1239,7 @@ def test_extract_usage_info_captures_tokens_and_reasoning():
         'promptTokens': 5678,
         'completionTokens': 1234,
         'reasoningTokens': 700,
+        'cachedTokens': None,
         'finishReason': 'stop',
     }
 
@@ -1234,6 +1257,138 @@ def test_extract_usage_info_prompt_tokens_optional():
 def test_extract_usage_info_none_without_usage():
     assert ai_routes._extract_usage_info({'choices': [{'message': {'content': 'x'}}]}) is None
     assert ai_routes._extract_usage_info({}) is None
+
+
+def test_extract_usage_info_captures_cached_tokens():
+    # C3 prefix-cache telemetry: llama.cpp and OpenAI report the cached
+    # share of the prompt under usage.prompt_tokens_details.cached_tokens;
+    # Anthropic reports it as usage.cache_read_input_tokens. Same field
+    # either way — silent (None) when neither is present, never guessed.
+    info = ai_routes._extract_usage_info({
+        'choices': [{'message': {'content': 'x'}, 'finish_reason': 'stop'}],
+        'usage': {
+            'prompt_tokens': 5678,
+            'completion_tokens': 10,
+            'prompt_tokens_details': {'cached_tokens': 4321},
+        },
+    })
+    assert info['cachedTokens'] == 4321
+
+    anthropic = ai_routes._extract_usage_info({
+        'choices': [{'message': {'content': 'x'}, 'finish_reason': 'stop'}],
+        'usage': {'completion_tokens': 10, 'cache_read_input_tokens': 99},
+    })
+    assert anthropic['cachedTokens'] == 99
+
+    absent = ai_routes._extract_usage_info({
+        'choices': [{'message': {'content': 'x'}, 'finish_reason': 'stop'}],
+        'usage': {'prompt_tokens': 5, 'completion_tokens': 10},
+    })
+    assert absent['cachedTokens'] is None
+
+    garbage = ai_routes._extract_usage_info({
+        'choices': [{'message': {'content': 'x'}, 'finish_reason': 'stop'}],
+        'usage': {
+            'prompt_tokens': 5,
+            'completion_tokens': 10,
+            'prompt_tokens_details': {'cached_tokens': 'many'},
+        },
+    })
+    assert garbage['cachedTokens'] is None
+
+
+def test_chat_proxy_reports_last_cached_tokens(monkeypatch):
+    # Cache-hit roll-up: LAST provider request with an int cachedTokens is
+    # the one whose prefix the next turn continues from, mirroring the
+    # lastPromptTokens law (W7). Providers without details → null.
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(ai_routes, '_execute_tool_call', lambda call: f"result for {call['name']}")
+
+    responses = [
+        {'choices': [{'message': {
+            'content': None,
+            'tool_calls': [{'type': 'function', 'id': 'call_1',
+                            'function': {'name': 'search_klipper_docs',
+                                         'arguments': '{"query": "bed_mesh"}'}}],
+        }}],
+         'usage': {'prompt_tokens': 100, 'completion_tokens': 5,
+                   'prompt_tokens_details': {'cached_tokens': 0}}},
+        {'choices': [{'message': {'content': 'done'}}],
+         'usage': {'prompt_tokens': 180, 'completion_tokens': 5,
+                   'prompt_tokens_details': {'cached_tokens': 96}}},
+    ]
+    seen = []
+
+    def fake_post(url, headers, payload):
+        resp = responses[min(len(seen), len(responses) - 1)]
+        seen.append(1)
+        return DummyResponse(resp, url=url)
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user', 'content': 'Explain bed_mesh.'}],
+            'apiKey': 'openai-token',
+            'model': 'gpt-4o',
+            'apiUrl': 'https://api.openai.com/v1/chat/completions',
+            'apiProvider': 'chatgpt',
+        },
+    )
+    assert response.status_code == 200
+    usage = response.json()['usage']
+    assert usage['lastPromptTokens'] == 180
+    assert usage['lastCachedTokens'] == 96
+    assert usage['events'][0]['cachedTokens'] == 0
+
+
+def test_chat_proxy_pairs_last_usage_from_one_event(monkeypatch):
+    # Review #12: prompt+cached are a PAIR for the chip. When the final
+    # provider call reports prompt_tokens WITHOUT a details block, the
+    # roll-up must NOT borrow the previous call's cached count (that
+    # paired turn-k prompt with turn-(k-1) cached → a confident, wrong
+    # cached %). The honest shape is cached=null (row hidden).
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    monkeypatch.setattr(ai_routes, '_execute_tool_call', lambda call: f"result for {call['name']}")
+
+    responses = [
+        {'choices': [{'message': {
+            'content': None,
+            'tool_calls': [{'type': 'function', 'id': 'call_1',
+                            'function': {'name': 'search_klipper_docs',
+                                         'arguments': '{"query": "bed_mesh"}'}}],
+        }}],
+         'usage': {'prompt_tokens': 100, 'completion_tokens': 5,
+                   'prompt_tokens_details': {'cached_tokens': 40}}},
+        {'choices': [{'message': {'content': 'done'}}],
+         'usage': {'prompt_tokens': 180, 'completion_tokens': 5}},
+    ]
+    seen = []
+
+    def fake_post(url, headers, payload):
+        resp = responses[min(len(seen), len(responses) - 1)]
+        seen.append(1)
+        return DummyResponse(resp, url=url)
+
+    monkeypatch.setattr(httpx, 'AsyncClient', lambda *args, **kwargs: FakeAsyncClient(post_handler=fake_post))
+
+    response = client.post(
+        '/ai/chat',
+        json={
+            'messages': [{'role': 'user', 'content': 'Explain bed_mesh.'}],
+            'apiKey': 'openai-token',
+            'model': 'gpt-4o',
+            'apiUrl': 'https://api.openai.com/v1/chat/completions',
+            'apiProvider': 'chatgpt',
+        },
+    )
+    assert response.status_code == 200
+    usage = response.json()['usage']
+    assert usage['lastPromptTokens'] == 180
+    assert usage['lastCachedTokens'] is None, (
+        'cached must come from the SAME last event, never borrowed from an '
+        'earlier one')
 
 
 def test_chat_proxy_reports_usage_and_truncation(monkeypatch):

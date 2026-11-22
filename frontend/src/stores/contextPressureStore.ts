@@ -13,7 +13,7 @@
  */
 import { create } from 'zustand';
 import { fetchContextWindow, type ContextWindowCredentials } from '../services/api';
-import { evaluateContextPressure } from '../utils/contextPressure';
+import { computeCachedShare, evaluateContextPressure } from '../utils/contextPressure';
 import { CONTEXT_OVERFLOW_BANNER_FALLBACK } from '../utils/contextOverflow';
 
 /** Probe cache key: the endpoint + model decide the window; credentials don't. */
@@ -24,6 +24,14 @@ export function contextPressureWindowKey(creds: ContextWindowCredentials): strin
 interface ContextPressureState {
   /** Prompt tokens of the latest provider request (usage.lastPromptTokens). */
   lastPromptTokens: number | null;
+  /** Cached prefix tokens of that same request (usage.lastCachedTokens,
+   *  C3). Null when the provider doesn't report cache telemetry. */
+  lastCachedTokens: number | null;
+  /** Derived cached/prompt share 0..1 (utils/contextPressure), null when
+   *  either side is unknown. Monitored KPI: it should climb with
+   *  conversation length; a step drop = something upstream of the tail
+   *  started moving. */
+  cachedShare: number | null;
   /** The provider's real context window for the current model, if probed. */
   contextWindow: number | null;
   /** Key whose probe last settled (a null result is cached too — no retry storm). */
@@ -52,7 +60,7 @@ interface ContextPressureState {
    * quiet reply must not clear it; only `reset` (new/loaded chat) does.
    */
   overflowMessage: string | null;
-  recordUsage: (lastPromptTokens: number | null | undefined) => void;
+  recordUsage: (lastPromptTokens: number | null | undefined, lastCachedTokens?: number | null) => void;
   setWindow: (window: number | null) => void;
   /** Raise the overflow banner. Empty/absent message falls back to the
    *  canonical label (utils/contextOverflow) — the banner is never blank. */
@@ -64,6 +72,8 @@ interface ContextPressureState {
 
 export const useContextPressureStore = create<ContextPressureState>()((set, get) => ({
   lastPromptTokens: null,
+  lastCachedTokens: null,
+  cachedShare: null,
   contextWindow: null,
   probedKey: null,
   pendingKey: null,
@@ -72,13 +82,18 @@ export const useContextPressureStore = create<ContextPressureState>()((set, get)
   advisory: false,
   overflowMessage: null,
 
-  recordUsage: (lastPromptTokens) =>
+  recordUsage: (lastPromptTokens, lastCachedTokens) =>
     set((state) => {
       const tokens = typeof lastPromptTokens === 'number' && Number.isFinite(lastPromptTokens)
         ? lastPromptTokens
         : null;
+      const cached = typeof lastCachedTokens === 'number' && Number.isFinite(lastCachedTokens)
+        ? lastCachedTokens
+        : null;
       return {
         lastPromptTokens: tokens,
+        lastCachedTokens: cached,
+        cachedShare: computeCachedShare({ lastPromptTokens: tokens, lastCachedTokens: cached }),
         advisory: evaluateContextPressure({
           lastPromptTokens: tokens,
           contextWindow: state.contextWindow,
@@ -145,6 +160,8 @@ export const useContextPressureStore = create<ContextPressureState>()((set, get)
       // a moved epoch and write nothing.
       epoch: state.epoch + 1,
       lastPromptTokens: null,
+      lastCachedTokens: null,
+      cachedShare: null,
       contextWindow: null,
       probedKey: null,
       pendingKey: null,

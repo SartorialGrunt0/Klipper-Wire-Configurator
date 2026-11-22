@@ -228,6 +228,11 @@ class TestQuestion:
     # None follows the run's --tool-protocol. The ACK-* family pins both
     # protocols so guard parity is graded in one run (plan §6.5.5).
     tool_protocol: str | None = None
+    # Per-request ChatRequest.nativeCatalog override — A/B the head-trim
+    # channels (2026-11-22): None follows the run's --native-catalog;
+    # False forces the trimmed native head, True forces the head catalog,
+    # regardless of the endpoint's recorded tools-blind verdict.
+    native_catalog: bool | None = None
 
 
 # Shared config snippets used by several questions.
@@ -1497,8 +1502,8 @@ def build_simtool_questions() -> list[TestQuestion]:
                 # clean evidence.
                 ("tool_output_regex", "simulate_macro::L2: GLOW"),
                 ("tool_output_regex", "simulate_macro::SET_LED"),
-                ("regex", r"(?i)(get|gets|be) ?set[\s\S]*(0\.4|40%)|"
-                          r"(0\.4|40%)[\s\S]*(get|gets|be) ?set"),
+                ("regex", r"(?i)(get|gets|getting|be) ?set[\s\S]*(0\.4|40%)|"
+                          r"(0\.4|40%)[\s\S]*(get|gets|getting|be) ?set"),
             ),
         ),
     ]
@@ -4235,6 +4240,40 @@ _PRESENT_REFUSAL_RE = re.compile(
     r"(?:refused|rejected|exceed\w*|abort\w*|out[ -]of[ -]range)")
 
 
+# macrogate-r1 2026-11-21 (fourth member of the c08acff/F10/L-5 lineage):
+# a CORRECT answer may name the refusal it rules out inside a DISTINGUISHING
+# frame — "is a different thing from the command being rejected for an
+# out-of-range S=" — the SIMTOOL-07 doctrine (command level vs the per-heater
+# mechanism) spoken verbatim. Negator lists miss it (no negator) and irrealis
+# misses it (no modal). Structural arm, local like _irrealis_frame: the
+# discriminator must sit in the claim's OWN window, and a present-tense
+# refusal in that same window bars the scope — "PREHEAT is rejected, which is
+# a different thing from a warning" asserts the refusal and stays red
+# (laundering control pinned in simtool07_verdicts.json).
+_DISCRIMINATOR_BEFORE, _DISCRIMINATOR_AFTER = 75, 25
+_DISCRIMINATOR_RE = re.compile(
+    r"(?i)\bdifferent\b[^.;:]{0,15}?\b(?:from|than)\b|\bas opposed to\b|"
+    r"\bdistinct from\b|\bseparate\b[^.;:]{0,10}?\bfrom\b")
+# Review #2 (2026-11-21): the frame arm must rescue ONLY the bare
+# tense-free PHRASES ('out of range', 'outside the range'). Most claim
+# shapes carry a tense of their own ('will be rejected', "won't run",
+# 'exceeds', 'aborts') and a frame NEVER launders an assertion — the
+# old be-verb-in-window check missed exactly those, so fabricated
+# refusals inside a distinguishing frame graded PASS. macrogate-r1 stays
+# green: its claim match is the phrase 'out-of-range', no tense token.
+_REFUSAL_TENSED_MATCH_RE = re.compile(
+    r"(?i)\b(?:will|won'?t|is|are|was|were|be|been|being|exceeds?|exceeded|"
+    r"aborts?|aborted)\b")
+
+
+def _distinguishing_frame(clause: str, start: int) -> bool:
+    """Does a mechanism-distinguishing frame reference the claim at `start`?"""
+    window = clause[max(0, start - _DISCRIMINATOR_BEFORE):start + _DISCRIMINATOR_AFTER]
+    if not _DISCRIMINATOR_RE.search(window):
+        return False
+    return _PRESENT_REFUSAL_RE.search(window) is None
+
+
 def _irrealis_frame(clause: str, start: int) -> bool:
     """Does a modal frame the tense-free claim at `start` as a hypothesis?
 
@@ -4737,6 +4776,9 @@ def criterion_ok(kind: str, value: str, content: str,
                     continue
                 if _REFUSAL_SCOPE_RE.search(clause):
                     continue
+                if (not _REFUSAL_TENSED_MATCH_RE.search(m.group(0))
+                        and _distinguishing_frame(clause, m.start())):
+                    continue
                 return False
         return True
     if kind == "reply_not_regex":
@@ -5102,7 +5144,15 @@ def chat_request(base_url: str, question: TestQuestion, settings: dict,
         "maxTokens": settings["max_tokens"],
         "temperature": settings["temperature"],
         "toolProtocol": question.tool_protocol or settings.get("tool_protocol", "auto"),
+        # None = backend auto (head catalog only on text/blind channels).
+        "nativeCatalog": (question.native_catalog
+                          if question.native_catalog is not None
+                          else settings.get("native_catalog")),
         "mergeSystemMessages": settings.get("merge_system_messages", False),
+        # 'default' = the backend sends nothing (model default). Any other
+        # level rides as top-level reasoning_effort; the backend forwards
+        # it for the openai-compatible provider only.
+        "reasoningEffort": settings.get("reasoning_effort", "default"),
     }
     # Tool-mediated editing: per-question override wins over the run flag;
     # both unset follows the server default, which is ON since the Phase-4
@@ -5425,7 +5475,9 @@ def resolve_settings(args: argparse.Namespace) -> dict:
         "max_tokens": int(max_tokens),
         "temperature": float(temperature),
         "tool_protocol": args.tool_protocol or "auto",
+        "native_catalog": native_catalog_setting(args),
         "merge_system_messages": args.merge_system_messages,
+        "reasoning_effort": (args.reasoning_effort or "default").strip() or "default",
         "edit_tools": edit_tools_setting(args),
         "force_skill_active": bool(getattr(args, "force_skill_active", False)),
         "base_url": base_url,
@@ -5439,6 +5491,15 @@ def edit_tools_setting(args: argparse.Namespace) -> bool | None:
     arm for a whole run (write tools never advertised)."""
     value = getattr(args, "edit_tools", "auto")
     return {"on": True, "off": False}.get(value, None)
+
+
+def native_catalog_setting(args: argparse.Namespace) -> bool | None:
+    """--native-catalog auto/off/always -> None/False/True (the
+    ChatRequest.nativeCatalog wire shape). None = backend auto: the head
+    catalog rides only where it is the model's only channel (text turns,
+    tools-blind endpoints). 'always' = the pre-trim control arm."""
+    value = getattr(args, "native_catalog", "auto")
+    return {"off": False, "always": True}.get(value, None)
 
 
 # ── Question selection ─────────────────────────────────────────────────
@@ -5563,6 +5624,11 @@ def main() -> int:
     parser.add_argument("--max-tokens", default=0, type=int, help="Max tokens per reply")
     parser.add_argument("--temperature", default=None, type=float,
                         help="Sampling temperature 0-2 (default 0.7)")
+    parser.add_argument("--reasoning-effort", default="default",
+                        help="Reasoning effort level sent to the provider "
+                             "('default' = send nothing, model decides; other levels ride as "
+                             "top-level reasoning_effort and are honored by the "
+                             "openai-compatible provider only — see /ai/reasoning-levels)")
     parser.add_argument("--tool-protocol", default="auto",
                         choices=["auto", "native", "text"],
                         help="Tool-calling protocol sent to the backend: "
@@ -5571,18 +5637,30 @@ def main() -> int:
                              "calling), 'native' (force OpenAI native "
                              "tool_calls for local llama.cpp servers too), "
                              "'text' (force the text protocol everywhere)")
+    # 2026-11-22 head-trim A/B: 'auto' ships the product behavior (head
+    # catalog only on text turns / tools-blind endpoints), 'off' forces the
+    # trimmed native head, 'always' restores the pre-trim duplication tax.
+    parser.add_argument("--native-catalog", default="auto",
+                        choices=["auto", "off", "always"],
+                        help="Head tool-catalog channel for native turns: "
+                             "'auto' (product default: catalog only where "
+                             "it is the only channel), 'off' (always "
+                             "trimmed), 'always' (pre-trim shape — the "
+                             "A/B control arm)")
+    # C2 (improve/ai-chat-cache-hit-miss): the backend DEFAULT flipped to
+    # mergeSystemMessages=false — volatile seam blocks ride the tail (wire-shape
+    # ladder). The harness default MUST track the product default or a bank leg
+    # silently measures the retired head-merge path. --merge-system-messages is
+    # now a MEANINGFUL A/B control arm (pre-C2 shape via explicit override).
     parser.add_argument("--merge-system-messages", action="store_true",
-                        help="Deprecated no-op (kept for compat): the backend "
-                             "now merges system messages into a single leading "
-                             "one by default for every OpenAI-compatible "
-                             "request.")
+                        help="A/B control arm: send mergeSystemMessages=true "
+                             "to restore the pre-C2 head-merge wire shape.")
     parser.add_argument("--no-merge-system-messages", action="store_false",
                         dest="merge_system_messages",
-                        help="A/B opt-out: send mergeSystemMessages=false to "
-                             "keep the trailing task anchor as its own system "
-                             "message (positionally meaningful for permissive "
-                             "chat templates).")
-    parser.set_defaults(merge_system_messages=True)
+                        help="Product default (sent explicitly): keep seam "
+                             "blocks at the trailing position (wire-shape "
+                             "ladder handles strict templates).")
+    parser.set_defaults(merge_system_messages=False)
     parser.add_argument("--edit-tools", default="auto", choices=["auto", "on", "off"],
                         help="Tool-mediated editing for questions without a "
                              "per-question override: 'auto' follows the server "

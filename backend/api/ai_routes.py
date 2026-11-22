@@ -326,6 +326,10 @@ class ContextWindowRequest(ModelsRequest):
     model: str = ""
 
 
+class ReasoningLevelsRequest(ContextWindowRequest):
+    """Reasoning-effort discovery: the same credentials + active model."""
+
+
 class ChatRequest(BaseModel):
     messages: list[dict]
     apiKey: str
@@ -349,14 +353,34 @@ class ChatRequest(BaseModel):
     # --jinja 2026-09); the loop still regex-extracts text calls as a
     # fallback. "text" forces the ```tool protocol (escape hatch for
     # servers that advertise tools but emit template garbage); "native"
-    # pins native explicitly. scripts/ai_chat_accuracy_test.py A/Bs these.
+    #    pins native explicitly. scripts/ai_chat_accuracy_test.py A/Bs these.
     toolProtocol: str = "auto"
+    # Reasoning-effort override (frontend setting / harness runs). The level
+    # string is forwarded verbatim as top-level `reasoning_effort`, and ONLY
+    # for the openai-compatible provider (scope call 2026-11-21) — the field
+    # is the OpenAI-standard one and every OpenAI-compatible server that
+    # honors reasoning accepts it (llama.cpp, vLLM, Ollama /v1; llama-swap
+    # forwards unknown body keys untouched to its upstream). "default" or
+    # "" = send NOTHING: an omitted field means the model default on every
+    # server, while a literal "default" string is not a valid level anywhere
+    # (llama.cpp would pass it into the chat template). Levels come from
+    # POST /ai/reasoning-levels; a server that rejects the chosen value gets
+    # the field stripped and the request retried ONCE inside _query_provider.
+    reasoningEffort: str = "default"
     # Tool-mediated editing override (harness A/B runs ONLY; the frontend
     # never sends it). The write tools are unconditional product behavior
     # since the Phase-6 flag removal (2026-09-24); True/False forces
     # them on/off for this request only (False = read-only arm). Mirrors
     # the toolProtocol precedent so A/B runs don't need backend restarts.
     editTools: bool | None = None
+    # Native-turn head catalog override (harness A/B runs ONLY; the
+    # frontend never sends it). None (default) = AUTO: the per-tool
+    # snippet catalog rides the head ONLY on text turns or endpoints
+    # detected tools-blind (native turns ship tools once, via the array).
+    # False/True force the catalog off/on for this request regardless of
+    # the recorded verdict (scripts/ai_chat_accuracy_test.py
+    # --native-catalog).
+    nativeCatalog: bool | None = None
     # Skill-gate override (harness A/B runs ONLY; the frontend never
     # sends it). The model-triggered skill gate is product behavior:
     # write tools stay hidden until the model calls load_skill itself.
@@ -391,6 +415,14 @@ class ChatRequest(BaseModel):
     # (review law: the backend re-delivers the record, decisions stay
     # client-side); names + verdicts only, no payloads.
     workLedger: list[dict] = []
+    # C1 ledger byte-stability: the client's user-message count at send
+    # time (the absolute turn the ledger is rendered against). With rows
+    # carrying absolute turnOrdinal values the rendered '- turn N:'
+    # headers stop recomputing every send — the merged system prefix
+    # stays byte-identical turn to turn and the provider's prefix cache
+    # keeps hitting. Absent = legacy client: rows render via turnOffset
+    # with the old relative labels.
+    workLedgerCurrentTurn: int | None = None
     # Approval-gate override (harness A/B runs ONLY; the frontend never
     # sends it). INERT since the post-hoc review change (2026-10-02):
     # nothing in the edit path suspends, so there is no wait to skip and
@@ -421,7 +453,13 @@ class ChatRequest(BaseModel):
     # single leading system message is the canonical shape every server
     # accepts. Set False explicitly only for A/B testing the trailing
     # task-anchor position.
-    mergeSystemMessages: bool = True
+    # C2 (2026-11-20): the DEFAULT FLIPPED to False. Merging every system
+    # block into messages[0] is what parked the volatile work-ledger AHEAD of
+    # the replayed transcript, so its first-appearance byte busted ~11K tokens
+    # of cache. Strict system-first templates (Qwen3.x) are now answered by
+    # the wire-shape ladder in _query_provider instead of by this flag, which
+    # stays available as an explicit override.
+    mergeSystemMessages: bool = False
     # Explicitly attached context from the docked text-view panel: highlighted
     # line ranges and pinned tree rows, each with the findings in its scope as
     # the FRONTEND resolved them (severity visibility is frontend state, so the
@@ -1089,12 +1127,15 @@ def _runtime_error_observation(messages: list[dict],
 def _prepare_messages(messages: list[dict],
                       edit_capable: bool = False, *,
                       skill_active: bool = False,
+                      macro_skill_active: bool = False,
                       native_mode: bool = False,
                       context_files: dict | None = None,
                       context_references: list | None = None,
                       inject_edit_skill_body: bool = False,
                       loaded_skills: list | None = None,
-                      work_ledger: list | None = None) -> list[dict]:
+                      work_ledger: list | None = None,
+                      work_ledger_current_turn: int | None = None,
+                      tools_catalog: bool = True) -> list[dict]:
     """Build a clean system prompt with MCP tool descriptions, printer memory,
     and user messages.
     """
@@ -1106,6 +1147,9 @@ def _prepare_messages(messages: list[dict],
     memory = load_printer_memory()
     memory_context = printer_memory_to_context(memory)
     memory_blank = is_printer_memory_blank(memory)
+    # S3b/C: the blank-memory auto-fill block rides the trailing seam; this
+    # holds the rendered text (empty = no block this request).
+    autofill_text = ""
 
     if no_system:
         # Experiment gate: no system content at all — no tools, no prompt,
@@ -1114,13 +1158,18 @@ def _prepare_messages(messages: list[dict],
     elif minimal:
         # Experiment gate: tools only — no SYSTEM_PROMPT, no printer memory,
         # no auto-fill, no task anchor.
-        system_parts = [_build_mcp_tool_context()]
+        system_parts = [_build_mcp_tool_context(tools_catalog=tools_catalog)]
     else:
-        # All tools are advertised unconditionally (native/text parity);
-        # detect_board and other niche helpers live under "Specialized tools".
+        # The catalog's channel depends on the arm: TEXT turns advertise
+        # every tool here (their only channel); NATIVE turns ship schemas
+        # once in the `tools` array and the head keeps only the behavioral
+        # laws — unless the endpoint was detected tools-blind (or the arm
+        # was forced), where the catalog substitutes back in.
         tool_context = _build_mcp_tool_context(edit_capable=edit_capable,
                                                skill_active=skill_active,
-                                               native_mode=native_mode)
+                                               macro_skill_active=macro_skill_active,
+                                               native_mode=native_mode,
+                                               tools_catalog=tools_catalog)
         system_parts = [system_prompt, tool_context, memory_context]
         # The edit law travels inside the load_skill tool result (skill
         # body), persisting in conversation history exactly once — it is
@@ -1128,9 +1177,16 @@ def _prepare_messages(messages: list[dict],
         # product behavior since the Phase-6 flag removal).
 
         # If printer memory is completely blank and there are user messages
-        # to work with, add an auto-fill instruction asking the AI to
-        # investigate.
-        if memory_blank:
+        # to work with, prepare an auto-fill instruction asking the AI to
+        # investigate. S3b/C (2026-11-21): it rides the TRAILING SEAM, not
+        # the system head. The block embeds keystroke-derived facts
+        # (derive_machine_facts / derived hardware inventory) computed from
+        # the drafts the client sends, so its bytes change whenever the user
+        # edits a config — in the head that rewrites offset ~0 and busts the
+        # provider prefix cache for the whole transcript. Same content, same
+        # every-turn recurrence, stable head. The marker check (option A)
+        # keeps it idempotent if a trail already carries the block.
+        if memory_blank and not _autofill_in_trail(messages):
             auto_fill_prompt = (
                 "\n---\n"
                 "**Printer Memory Auto-Fill**\n\n"
@@ -1158,8 +1214,9 @@ def _prepare_messages(messages: list[dict],
             if edit_capable:
                 # The full fact-finding playbook lives in the
                 # printer-memory skill; the prompt points there instead
-                # of duplicating it. (load_skill is only advertised when
-                # the request is edit-capable.)
+                # of duplicating it. (load_skill rides EVERY arm since the
+                # macro gate — the read-only path needs it to unlock the macro
+                # tools; edit-capable requests additionally get the playbook.)
                 auto_fill_prompt += (
                     "\nCall load_skill(name='printer-memory') first — it "
                     "lists exactly where each field's evidence lives in "
@@ -1212,7 +1269,9 @@ def _prepare_messages(messages: list[dict],
                     "only for the chip/model nuance, never drop a named "
                     "board."
                 )
-            system_parts.append(auto_fill_prompt)
+            # S3b/C: staged for the trailing seam (see the block comment
+            # above the memory_blank gate) — never appended to the head.
+            autofill_text = auto_fill_prompt
 
     prepared: list[dict] = []
     for msg in messages:
@@ -1299,7 +1358,8 @@ def _prepare_messages(messages: list[dict],
     ledger_messages: list[dict] = []
     if not (minimal or no_system):
         try:
-            ledger_text = _render_work_ledger(work_ledger)
+            ledger_text = _render_work_ledger(work_ledger,
+                                             current_turn=work_ledger_current_turn)
         except Exception:
             logger.warning("work-ledger render failed", exc_info=True)
             ledger_text = None
@@ -1323,10 +1383,20 @@ def _prepare_messages(messages: list[dict],
         if observation:
             trace_messages = [{"role": "system", "content": observation}]
 
+    # S3b/C: blank-memory auto-fill rides the seam AHEAD of the task anchor.
+    # Rationale: on main it lived in the head with the anchor at the very end
+    # (anchor dominant); keeping it before the anchor preserves that salience
+    # order, while taking its keystroke-derived bytes out of the cached prefix.
+    # Ablation instruments (minimal/no_system) never carry it.
+    autofill_messages: list[dict] = []
+    if autofill_text and not (minimal or no_system):
+        autofill_messages = [{"role": "system", "content": autofill_text}]
+
     if prepared:
         return [
             *([] if no_system else [{"role": "system", "content": system_text}]),
             *prepared,
+            *autofill_messages,
             *([] if (minimal or no_system) else [{"role": "system", "content": task_anchor}]),
             *([] if (minimal or no_system) else reference_messages),
             *([] if (minimal or no_system) else skill_body_messages),
@@ -1578,11 +1648,14 @@ EDIT_SKILL_DESCRIPTION = (
     "or any request that says not to change the files."
 )
 MACRO_SKILL_DESCRIPTION = (
-    "Writes, fixes, and explains [gcode_macro] gcode: Jinja rendering rules, "
-    "params defaults, the validate-and-simulate workflow, terse examples, and "
-    "common pitfalls. Use when drafting or fixing macro text, or when asked "
-    "what a macro will actually do or send to the printer. Do NOT use for "
-    "plain config-parameter changes or questions about non-macro sections."
+    "Writes, fixes, explains, VALIDATES, and simulates [gcode_macro] "
+    "gcode: Jinja rendering rules, params defaults, the validate-and-"
+    "simulate workflow, terse examples, and common pitfalls. Use when "
+    "drafting or fixing macro text, when asked to check or validate a "
+    "macro, or when asked what a macro will actually do or send to the "
+    "printer — it also unlocks the validate_macro and simulate_macro "
+    "tools. Do NOT use for plain config-parameter changes or questions "
+    "about non-macro sections."
 )
 
 LIST_HARDWARE_SPEC = {
@@ -1696,15 +1769,17 @@ _SKILL_INDEX_BLOCK = (
     "</available_skills>\n"
     "If the user's request is about editing their config, call load_skill "
     "with the skill name FIRST — the edit tools are not available until "
-    "you do. If the request is about WRITING, fixing, or explaining a "
-    "macro's gcode (Jinja, params, what it will send or do), also call "
-    "load_skill(name='macro-authoring') — the macro rules, examples, and "
-    "pitfalls live there; load config-editing on top only when the macro "
-    "must actually be saved. If the printer memory has blank fields you "
-    "need (or you are about to guess a hardware fact), "
-    "load_skill(name='printer-memory') and follow its playbook instead of "
-    "guessing. Questions about Klipper that need none of these never need "
-    "a skill."
+    "you do. If the request is about WRITING, fixing, explaining, "
+    "CHECKING, or VALIDATING a macro's gcode (Jinja, params, what it will "
+    "send or do), ALSO call load_skill(name='macro-authoring') — the "
+    "macro rules, examples, and pitfalls live there AND it unlocks the "
+    "validate_macro and simulate_macro tools; a macro request that needs "
+    "those tools without this load will fail. Load config-editing on top "
+    "only when the macro must actually be saved. If the printer memory "
+    "has blank fields you need (or you are about to guess a hardware "
+    "fact), load_skill(name='printer-memory') and follow its playbook "
+    "instead of guessing. Questions about Klipper that need none of these "
+    "never need a skill."
 )
 
 
@@ -1801,9 +1876,10 @@ MACRO_EX_PARK = (
 
 def _macro_skill_body() -> str:
     """The skill body returned by load_skill(name='macro-authoring'):
-    Klipper macro authoring law. No tools unlock — validate_macro and
-    simulate_macro are already advertised; what the body adds is the
-    WORKFLOW (simulate before you claim) and the rules the W2 engine
+    Klipper macro authoring law. The 2026-11-21 lazy gate made this load
+    the UNLOCK for validate_macro/simulate_macro (registry `gates_tools`) —
+    body and tools move together (Invariant A); what the body carries is
+    the WORKFLOW (simulate before you claim) and the rules the W2 engine
     actually enforces (no unenforced prose drift — W4 law).
 
     v2 (2026-11-17, double-blind review — both reviewers converged, each
@@ -1975,20 +2051,34 @@ _SKILL_REGISTRY: dict[str, dict] = {
         "body": _edit_skill_body,
         "gates_write": True,
         "sticky": True,
+        "gates_tools": [],
     },
     MEMORY_SKILL_NAME: {
         "description": MEMORY_SKILL_DESCRIPTION,
         "body": _memory_skill_body,
         "gates_write": False,
         "sticky": False,
+        "gates_tools": [],
     },
     MACRO_SKILL_NAME: {
         "description": MACRO_SKILL_DESCRIPTION,
         "body": _macro_skill_body,
         "gates_write": False,
         "sticky": True,
+        # Lazy-gated tool surface: these schemas are ~2.1k tokens of EVERY
+        # request's fixed head, and dogfood traces show the model already
+        # loads this skill before 33/39 validate/simulate calls. The gate
+        # mirrors config-editing: registry is the single source of the
+        # names; builders filter, dispatch kicks back, NEVER executes.
+        "gates_tools": ["validate_macro", "simulate_macro"],
     },
 }
+
+# Every tool name hidden behind a skill load (the ONLY place to add one is
+# the registry entry above — never at a builder or dispatch site).
+MACRO_GATED_TOOLS = frozenset(
+    name for _e in _SKILL_REGISTRY.values() for name in _e.get("gates_tools", ()))
+
 
 
 def _unknown_skill_text(requested: str) -> str:
@@ -2061,6 +2151,30 @@ def _skill_body_in_trail(messages: list[dict], skill_name: str) -> bool:
     return any(pattern.search(str(m.get("content", ""))) for m in messages)
 
 
+# Pinning marker: the full unique header (loose 'autofill'/'auto-fill'
+# prose must never suppress the block — see S3b tests).
+_AUTOFILL_TRAIL_RE = re.compile(
+    r"\*\*Printer Memory Auto-Fill\*\*"
+)
+
+
+def _autofill_in_trail(messages: list[dict]) -> bool:
+    """True when the conversation trail already carries the blank-memory
+    auto-fill block (S3b trail-idempotence).
+
+    The block embeds keystroke-derived facts (derive_machine_facts /
+    derived hardware inventory) in the joined system HEAD, i.e. the prefix
+    cache's first-appearance region. Re-emitting it every turn rewrites
+    bytes at offset ~0 as soon as the user's config changes, busting the
+    provider cache for the whole transcript. It is a first-request
+    artifact: once the trail carries it, the head must not re-emit it.
+    Mirrors _skill_body_in_trail's idempotence contract."""
+    return any(
+        _AUTOFILL_TRAIL_RE.search(str(m.get('content', '')))
+        for m in messages
+    )
+
+
 # W6 work-ledger: the client's action-record window. Mirrors the client
 # law (utils/chatWorkLedger WORK_LEDGER_MAX_TURNS); rows outside it are
 # dropped server-side as a defensive re-cap, never a guess.
@@ -2096,7 +2210,8 @@ def _ledger_field(raw: object, cap: int) -> str:
     return text
 
 
-def _render_work_ledger(rows: list | None) -> str | None:
+def _render_work_ledger(rows: list | None,
+                       current_turn: int | None = None) -> str | None:
     """Render client-derived work-ledger rows as ONE system message body.
 
     Verbatim re-delivery: names + verdicts only, no interpretation — the
@@ -2106,26 +2221,112 @@ def _render_work_ledger(rows: list | None) -> str | None:
     so the rendered text stays stable for the KV cache. Malformed rows
     drop silently — an absent line claims nothing, a garbage line would.
     """
-    valid: list[tuple[int, str, str, str, str]] = []
+    # Pass 1: judge each row's turn coordinates ONCE and pair them with
+    # the row — a separate filter pass over `rows` would have to
+    # re-implement this exact predicate and drift from it (a bool
+    # `turnOffset` is `is not None` yet not an int: precisely such a
+    # drift). Pass 2 then reads the same pairs.
+    ct = current_turn if (isinstance(current_turn, int)
+                          and not isinstance(current_turn, bool)
+                          and current_turn > 0) else None
+    paired: list[tuple[dict, int | None, int | None]] = []
+    has_any_ordinal = False
     for row in rows or []:
         if not isinstance(row, dict):
             continue
-        offset = row.get("turnOffset")
-        if isinstance(offset, bool) or not isinstance(offset, int):
+        raw_offset = row.get("turnOffset")
+        offset_opt = (raw_offset if isinstance(raw_offset, int)
+                      and not isinstance(raw_offset, bool) else None)
+        raw_ordinal = row.get("turnOrdinal")
+        # C1: absolute creation turn (the client is ground truth for its
+        # own event). A payload with NO ordinals anywhere is a legacy
+        # client and keeps the old relative rendering untouched; offset-
+        # only rows inside an absolute payload anchor on currentTurn.
+        ordinal_opt = (raw_ordinal if isinstance(raw_ordinal, int)
+                       and not isinstance(raw_ordinal, bool)
+                       and raw_ordinal > 0 else None)
+        if offset_opt is None and ordinal_opt is None:
             continue
-        if offset < 1 or offset > WORK_LEDGER_MAX_TURNS:
+        if ordinal_opt is not None:
+            has_any_ordinal = True
+        paired.append((row, offset_opt, ordinal_opt))
+    if not paired:
+        return None
+
+    valid: list[tuple[int, int | None, str, str, str, str]] = []
+    for row, offset_opt, ordinal_opt in paired:
+        # Window law offset: for absolute rows it is anchored on the
+        # request currentTurn, else on the row's own offset (a coherent
+        # client keeps offset == current - ordinal). Rows with neither an
+        # offset nor an anchor are unjudgeable against the window —
+        # render them (absence would claim more than presence does).
+        effective: int | None
+        if ordinal_opt is not None:
+            if offset_opt is not None:
+                # Client law offset == current - ordinal => the implied
+                # current turn is ordinal + offset. (The old '- 1' shifted
+                # the whole window one turn late: freshest row dropped,
+                # an 11th row admitted.)
+                anchor = ct if ct is not None else ordinal_opt + offset_opt
+                effective = anchor - ordinal_opt
+            else:
+                effective = ct - ordinal_opt if ct is not None else None
+        else:
+            # Pre-C1 law, kept: a row whose turnOffset is missing OR not
+            # an int has no place in the ledger — in ANY payload mode
+            # (a garbage offset claims nothing even beside good rows).
+            if offset_opt is None:
+                continue
+            # Offset-only row inside an absolute payload anchors on
+            # currentTurn for the window check.
+            effective = offset_opt if ct is None else ct - offset_opt
+        if effective is not None and not (1 <= effective <= WORK_LEDGER_MAX_TURNS):
             continue
+        window_offset = effective if effective is not None else 1
+        # Absolute header iff the payload is an absolute one (some row
+        # carries a creation turn); legacy relative header otherwise.
+        rendered_ordinal: int | None = None
+        if has_any_ordinal:
+            rendered_ordinal = ordinal_opt if ordinal_opt is not None else (
+                ct - offset_opt if (ct is not None and offset_opt is not None) else None)
         file = _ledger_field(row.get("file"), _LEDGER_FIELD_MAX)
         section = _ledger_field(row.get("section"), _LEDGER_FIELD_MAX)
         verdict = str(row.get("verdict") or "").strip()
         if not file or verdict not in _LEDGER_VERDICTS:
             continue
         detail = _ledger_field(row.get("detail"), _LEDGER_DETAIL_MAX)
-        valid.append((offset, file, section, verdict, detail))
+        valid.append((window_offset, rendered_ordinal, file, section, verdict, detail))
     if not valid:
         return None
     # Oldest turn first, newest last; deterministic within a turn.
-    valid.sort(key=lambda r: (-r[0], r[1], r[2]))
+    # C1: the group key is the ABSOLUTE turn (descending = oldest
+    # first), not the per-send window offset — otherwise adding a new
+    # turn shifts every older group header down one line and rewrites
+    # the block's middle. Absolute groups are frozen once written: the
+    # ledger block becomes append-only, which is what keeps the merged
+    # prefix byte-stable across turns. Legacy offset-only rows anchor on
+    # currentTurn (ct - offset, their absolute turn anyway); without a
+    # currentTurn every key is None and the stable sort keeps the
+    # client's oldest-first row order (the documented row law).
+    def _absolute_of(r):
+        return r[1] if r[1] is not None else (
+            ct - r[0] if ct is not None else None)
+    if any(_absolute_of(r) is not None for r in valid):
+        # ASCENDING absolute = oldest first. (The pre-C1 key was
+        # OFFSET-descending, which was the same order — offsets run
+        # backwards to turns. Negating absolute orders the ledger
+        # NEWEST-first, rewriting the block's middle every turn.)
+        # A row with no absolute coordinate (offset-only, no currentTurn)
+        # sorts LAST in client order rather than crashing the whole
+        # render: a bare None key raises TypeError against int keys, and
+        # the caller's swallow would silently drop EVERY row.
+        valid.sort(key=lambda r: (
+            _absolute_of(r) if _absolute_of(r) is not None else float("inf"),
+            r[2], r[3]))
+    else:
+        # Pure legacy payload without a currentTurn anchor: keep the
+        # pre-C1 window sort (offset descending = oldest first).
+        valid.sort(key=lambda r: (-r[0], r[2], r[3]))
     # PR #43 B-04: the flood cap must drop the OLDEST rows — turnOffset 1
     # is the NEWEST turn (utils/chatWorkLedger), so with the list sorted
     # oldest-first the tail is what the model needs. The old
@@ -2165,13 +2366,40 @@ def _render_work_ledger(rows: list | None) -> str | None:
         "undone, or still-pending from it; 'read' = section re-read in a "
         "later turn."
     )
+    if ct is not None:
+        # #13 ruling (2026-11-22): the absolute '- turn N' group headers
+        # replaced the old '- previous turn:' labels, which carried the
+        # recency anchor implicitly — the model could no longer order N
+        # against 'now'. State the anchor once in the header. Cache
+        # position: the DEFAULT wire shape (tail_system) delivers this
+        # block AFTER the transcript, so a per-turn header rewrite
+        # churns only the volatile tail; on the rare `merged` downgrade
+        # rung it churns the head — correctness (recency) over cache
+        # there, ladder downgrade is already the degraded path.
+        header += f" This request is being sent at conversation turn {ct}."
     lines: list[str] = []
-    current_offset = None
-    for offset, file, section, verdict, detail in valid:
-        if offset != current_offset:
-            when = "previous turn" if offset == 1 else f"{offset} turns ago"
+    current_key = None
+    for offset, row_ordinal, file, section, verdict, detail in valid:
+        # Group on the SAME absolute key the sort used, so two rows that
+        # share a turn never double-header even if a client's offsets
+        # drifted within the payload.
+        group_key = row_ordinal if row_ordinal is not None else (
+            ct - offset if ct is not None else offset)
+        if group_key != current_key:
+            # C1: with absolute turn numbers the header bytes are stable
+            # across every later send of the same conversation — the
+            # point of the whole exercise. Legacy offset-only rows keep
+            # the relative labels (baseline behavior).
+            if row_ordinal is not None:
+                when = f"turn {row_ordinal}"
+            elif has_any_ordinal and ct is not None:
+                # Offset-only row inside an absolute payload: anchors on
+                # currentTurn — same absolute string, group_key holds it.
+                when = f"turn {group_key}"
+            else:
+                when = "previous turn" if offset == 1 else f"{offset} turns ago"
             lines.append(f"- {when}:")
-            current_offset = offset
+            current_key = group_key
         # Created files are file-level write rows; touched rows mark
         # what earlier turns grounded on.
         if verdict == "touched":
@@ -2191,19 +2419,24 @@ def _render_work_ledger(rows: list | None) -> str | None:
 
 def _build_mcp_tool_context(edit_capable: bool = False, *,
                             skill_active: bool = False,
-                            native_mode: bool = False) -> str:
+                            native_mode: bool = False,
+                            macro_skill_active: bool = False,
+                            tools_catalog: bool = True) -> str:
     """Build the 'Available Tools' section for the system prompt.
 
-    Every registered tool is advertised so text-protocol and native providers
-    see the SAME tool surface (parity). The everyday tools get a one-line
-    snippet each; niche helpers (board detection, rotation_distance math) are
-    grouped under a "Specialized tools" heading so they stay visible without
-    distracting from the tools that matter for the current task.
+    The TEXT arm advertises every registered tool here (one-line snippets;
+    niche helpers under a "Specialized tools" heading) — for a
+    text-protocol turn this catalog is the ONLY channel, so param coverage
+    is enforced by test_api_routes
+    test_tool_context_snippets_cover_schema_params.
 
-    Param-coverage note: every inputSchema param of an advertised tool must
-    appear in its snippet (enforced by test_api_routes
-    test_tool_context_snippets_cover_schema_params) so text-protocol models
-    can discover the same affordances as native function calling.
+    NATIVE turns ship it once in the `tools` array instead (2026-11-22
+    industry posture: schemas travel in the array; the head carries
+    behavioral laws, not a catalog — see tests/test_native_catalog_trim.py
+    + the skill dossier). `tools_catalog=True` on a native turn means the
+    endpoint was DETECTED tools-blind (the array is being ignored) or the
+    arm was forced (harness A/B): insurance as a substitute, never a
+    duplication on a healthy wire.
     """
 
     parts = [
@@ -2244,10 +2477,27 @@ def _build_mcp_tool_context(edit_capable: bool = False, *,
             "",
             "The tool runs and the result is returned as a follow-up message — use it to answer.",
         ]),
-        "",
-        "Tools:",
     ]
+
+    if not tools_catalog:
+        # Native-trimmed arm: LAWS above, ONE closing law below — the
+        # catalog (snippet lists, edit tools, skill index, load_skill
+        # snippet) rides the `tools` array on this arm.
+        parts.append("")
+        parts.append(
+            "Klipper G-code commands and macro names (e.g. G28, M104, BED_MESH_CALIBRATE, "
+            "SET_FAN_SPEED, PRINT_START) are NOT tools — never wrap them in tool blocks."
+        )
+        return "\n".join(parts)
+
+    parts.append("")
+    parts.append("Tools:")
     for name, snippet in _MCP_TOOL_SNIPPETS.items():
+        # Lazy gate (registry `gates_tools`): the macro schemas are the
+        # biggest fixed cost in the head; they advertise ONLY while their
+        # skill is loaded — lock-step with _build_native_tools.
+        if name in MACRO_GATED_TOOLS and not macro_skill_active:
+            continue
         parts.append(f"- {name}: {snippet}")
     parts.append("")
     parts.append("Specialized tools (use only for specific problems):")
@@ -2267,20 +2517,20 @@ def _build_mcp_tool_context(edit_capable: bool = False, *,
         "or [output_pin led_strips]); no type = summary of everything "
         "present"
     )
-    if edit_capable:
-        if not skill_active:
-            # Model-triggered skill (product behavior): advertise the
-            # skill INDEX; write tools unlock only after the model calls
-            # load_skill itself.
-            parts.append("")
-            parts.append(_SKILL_INDEX_BLOCK)
-        else:
-            parts.append("")
-            parts.append("Config edit tools (changes are staged for user review, never saved directly):")
-            for name, snippet in _EDIT_TOOL_SNIPPETS.items():
-                parts.append(f"- {name}: {snippet}")
+    if edit_capable and skill_active:
         parts.append("")
-        parts.append(f"- load_skill: {_LOAD_SKILL_SNIPPET}")
+        parts.append("Config edit tools (changes are staged for user review, never saved directly):")
+        for name, snippet in _EDIT_TOOL_SNIPPETS.items():
+            parts.append(f"- {name}: {snippet}")
+    # The INDEX is the pointer at every locked surface: the write tools
+    # behind config-editing (edit-capable arm) and the macro tools behind
+    # macro-authoring (EVERY arm — load_skill is how a read-only turn
+    # unlocks validate/simulate). Ride whenever ANY gate is closed.
+    if (edit_capable and not skill_active) or not macro_skill_active:
+        parts.append("")
+        parts.append(_SKILL_INDEX_BLOCK)
+    parts.append("")
+    parts.append(f"- load_skill: {_LOAD_SKILL_SNIPPET}")
     parts.append("")
     parts.append(
         "Klipper G-code commands and macro names (e.g. G28, M104, BED_MESH_CALIBRATE, "
@@ -2288,6 +2538,28 @@ def _build_mcp_tool_context(edit_capable: bool = False, *,
     )
 
     return "\n".join(parts)
+
+
+# ── Usage roll-up ───────────────────────────────────────────────────────
+def _paired_last_usage(usage_events: list) -> tuple:
+    """(promptTokens, cachedTokens) of the SAME last usage event.
+
+    The chip renders a PAIR ("cached X% of that request"), so the pair
+    must come from one event. Two independent backward scans (the old
+    shape) paired a turn-k prompt with a turn-(k-1) cached count whenever
+    the final call reported prompt_tokens without its details block — a
+    confident, wrong percentage on every reply.
+    """
+    for event in reversed(usage_events):
+        if (isinstance(event.get("promptTokens"), int)
+                or isinstance(event.get("cachedTokens"), int)):
+            return (
+                event.get("promptTokens")
+                if isinstance(event.get("promptTokens"), int) else None,
+                event.get("cachedTokens")
+                if isinstance(event.get("cachedTokens"), int) else None,
+            )
+    return (None, None)
 
 
 # ── Edit-request heuristic ──────────────────────────────────────────────
@@ -3700,36 +3972,44 @@ def _native_tool_object(tool: dict) -> dict:
 
 
 def _build_native_tools(edit_capable: bool = False, *,
-                        skill_active: bool = False) -> list[dict]:
+                        skill_active: bool = False,
+                        macro_skill_active: bool = False) -> list[dict]:
     """Build native function-calling tool definitions from the MCP server.
 
     Returns OpenAI-style tool objects:
         {"type": "function", "function": {"name", "description", "parameters"}}
 
     With edit_capable, the model-triggered skill gate is in force:
-    load_skill is advertised and the request-scoped write tools
-    (config_edit/config_write, defined in services.ai_edit_tools, not
-    registered on the MCP server) join the advertisement only once the
-    skill is active — kept in lock-step with the text protocol surface
-    (test_edit_tool_native_text_parity).
+    the request-scoped write tools (config_edit/config_write, defined in
+    services.ai_edit_tools, not registered on the MCP server) join the
+    advertisement only once config-editing is active — kept in lock-step
+    with the text protocol surface (test_edit_tool_native_text_parity).
+
+    The registry `gates_tools` surface (validate_macro/simulate_macro
+    behind macro-authoring) is filtered on EVERY arm — schemas for locked
+    tools cost every request their tokens and teach a tool the model is
+    not yet rules for. load_skill is advertised unconditionally: it is how
+    any arm unlocks any gated surface.
     """
     native: list[dict] = []
     for tool in _mcp_server._list_tools():
+        if tool["name"] in MACRO_GATED_TOOLS and not macro_skill_active:
+            continue
         native.append(_native_tool_object(tool))
     # Chat-layer read tool (working-state backed, see dispatch):
     # advertised on both protocols for parity.
     native.append(_native_tool_object(LIST_HARDWARE_SPEC))
-    if edit_capable:
-        native.append(_native_tool_object(LOAD_SKILL_SPEC))
-        if skill_active:
-            for tool in EDIT_TOOL_SPECS:
-                native.append(_native_tool_object(tool))
+    native.append(_native_tool_object(LOAD_SKILL_SPEC))
+    if edit_capable and skill_active:
+        for tool in EDIT_TOOL_SPECS:
+            native.append(_native_tool_object(tool))
     return native
 
 
 def _resolve_native_tools(provider: str, api_url: str, tool_protocol: str,
                           edit_capable: bool = False, *,
-                          skill_active: bool = False) -> list[dict] | None:
+                          skill_active: bool = False,
+                          macro_skill_active: bool = False) -> list[dict] | None:
     """Decide whether to pass native function-calling tools to the provider.
 
     tool_protocol values (frontend setting / harness via ChatRequest):
@@ -3750,7 +4030,111 @@ def _resolve_native_tools(provider: str, api_url: str, tool_protocol: str,
     if tool_protocol == "text":
         return None
     return _build_native_tools(edit_capable=edit_capable,
-                               skill_active=skill_active)
+                               skill_active=skill_active,
+                               macro_skill_active=macro_skill_active)
+
+
+# ── Tools-blindness detection (native-turn head trim) ───────────────────────
+# (url, model) -> True/False: does this endpoint SILENTLY IGNORE the `tools`
+# array? Same process-global shared-cache precedent as the reasoning-levels
+# DECLARATIONS cache: an UNKNOWN entry reads healthy (trimmed native head),
+# never blind. Rationale (2026-11-22): the bank fleet proved 9/9 slots
+# (down to gemma-4-e2b) receive the array through the chat template; the
+# reachable ignore-cases are a llama.cpp template that never reads the
+# `tools` var, legacy --no-jinja builds, and tool-less GGUFs — all of which
+# answer 200 with a prompt_token count IDENTICAL to the no-tools request
+# (llama.cpp#27129). The delta probe is vendor-neutral proof of exactly
+# that. Cloud providers are statically healthy (documented always-deliver:
+# OpenAI/Anthropic), so no probe traffic ever leaves the LAN.
+_NATIVE_TOOLS_BLIND: dict[tuple, bool] = {}
+_NATIVE_TOOLS_PROBE_PENDING: set = set()
+
+
+def _url_model_key(api_url: str, model: str) -> tuple:
+    return (api_url, model)
+
+
+def _record_native_tools_blind(key: tuple, blind: bool, *, reason: str) -> None:
+    """The cache's ONLY writer (tests seed through here — an unseeded
+    gate reads healthy, same discipline as the declaration cache)."""
+    _NATIVE_TOOLS_BLIND[key] = blind
+    logger.info("Native tools probe | %s blind=%s (%s)",
+                key[1], blind, reason)
+
+
+def _native_tools_blind(api_url: str, model: str) -> bool | None:
+    return _NATIVE_TOOLS_BLIND.get(_url_model_key(api_url, model))
+
+
+async def _probe_native_tools_support(key: tuple, api_url: str, model: str,
+                                      api_key: str) -> None:
+    """Prompt-token delta: identical request ±tools at max_tokens=1.
+
+    Equal prompt_tokens proves the template never read the schemas (HTTP
+    200 is NOT evidence the tools arrived). A LARGER with-tools count
+    proves they did. A probe that cannot run records NOT-blind + a warning
+    — never blind on a guess (fail-healthy: the trim is the healthy
+    posture, re-adding the catalog on a flaky probe would silently restore
+    the duplication tax on a fine endpoint)."""
+    probe_messages = [{"role": "user", "content": "Hi."}]
+    probe_tools = [{
+        "type": "function",
+        "function": {
+            "name": "list_user_configs",
+            "description": "List the user's Klipper config files.",
+            "parameters": {"type": "object", "properties": {},
+                           "required": []},
+        },
+    }]
+    try:
+        counts = []
+        async with httpx.AsyncClient(
+                timeout=httpx.Timeout(20, connect=5)) as http:
+            for with_tools in (True, False):
+                body = {"model": model, "messages": probe_messages,
+                        "max_tokens": 1, "temperature": 0}
+                if with_tools:
+                    body["tools"] = probe_tools
+                r = await http.post(api_url,
+                                    headers=_provider_auth_headers(
+                                        "openai-compatible", api_url, api_key),
+                                    json=body)
+                r.raise_for_status()
+                counts.append(int(
+                    (r.json().get("usage") or {})["prompt_tokens"]))
+    except Exception:
+        _record_native_tools_blind(
+            key, False, reason="probe failed; assuming tools honored")
+        logger.warning("Native tools probe failed for %s | assuming the "
+                       "tools array is honored", model, exc_info=True)
+        return
+    with_t, without_t = counts
+    if with_t > without_t:
+        _record_native_tools_blind(
+            key, False, reason=f"delta +{with_t - without_t} tokens")
+    else:
+        _record_native_tools_blind(
+            key, True, reason=f"prompt_tokens identical ({with_t} vs "
+            f"{without_t}) — endpoint ignores the tools array")
+
+
+def _spawn_native_tools_probe(key: tuple, api_url: str, model: str,
+                              api_key: str) -> None:
+    """Fire-and-forget, deduped per (url, model) for the process lifetime.
+    The model is already loaded (this is first real use), so the two
+    max_tokens=1 calls are cheap prefill — the per-model probe-only law
+    against boot-thrash is honoured by construction."""
+    if key in _NATIVE_TOOLS_PROBE_PENDING:
+        return
+    _NATIVE_TOOLS_PROBE_PENDING.add(key)
+
+    async def _run() -> None:
+        try:
+            await _probe_native_tools_support(key, api_url, model, api_key)
+        finally:
+            _NATIVE_TOOLS_PROBE_PENDING.discard(key)
+
+    asyncio.get_running_loop().create_task(_run())
 
 
 def _extract_native_tool_calls(provider: str, data: dict) -> list[dict] | None:
@@ -3879,6 +4263,243 @@ def _build_native_tool_followup(
     return [assistant_message, *tool_messages]
 
 
+# ── C2: provider wire-shape ladder (prefix cache vs strict templates) ─────
+#
+# WHY THREE SHAPES. The volatile per-turn blocks (work ledger, W3 runtime
+# observation) must ride at the END of the payload: providers cache the exact
+# longest-common-prefix of the rendered prompt, so anything that changes
+# between turns inside the leading system message re-prefills the whole
+# replayed transcript (measured 2026-11-20: ~11K tokens busted the moment the
+# ledger's first row landed). But open-weight chat templates fight back: the
+# Qwen3.x Jinja template raises
+# 'System message must be at the beginning' the instant a system message
+# appears after position 0 — verified live on qwen/Qwen3.8-flash-next
+# (HTTP 500, pre-generation) while gemma and gpt-oss slots accept it. The
+# same collision is reported upstream for Claude Code / Codex on Qwen
+# (llama.cpp #27081, #27367; Qwen3.8-27B discussion #148) and LiteLLM added a
+# static `supports_mid_conversation_system: false` capability flag for it.
+#
+# So the shape is a capability, and capabilities are learned — guessing wrong
+# must not cost the user a turn. Precedence:
+#   1. the shape learned for this (url, model) — persisted when it was earned
+#      from a real rejection,
+#   2. `_STRICT_SYSTEM_FIRST_MODEL_PATTERNS` for templates documented strict,
+#   3. `tail_system` (best framing, best cache) as the optimistic default.
+# A genuine template rejection then walks down one rung and retries in the
+# SAME request — the user never sees the 500 — and the working shape is
+# remembered so the rejection is paid once per endpoint, not once per turn.
+#
+# A template rejection is PRE-GENERATION (the failure happens while rendering
+# the Jinja template, before any token is produced), so the retry cannot
+# double-charge. Non-template failures (401/429/5xx/timeout) never reshape
+# and never retry here — see `_looks_like_template_rejection`.
+
+PROVIDER_SHAPES = ("tail_system", "tail_user", "merged")
+
+# The tail-user rung recasts harness blocks as a user message (the Claude
+# Code / Pydantic-AI pattern: volatile context in the system role sits at the
+# front and busts the prefix). The label keeps the model from reading them as
+# human prose.
+VOLATILE_TAIL_LABEL = ("[Harness context — recorded by the app during this "
+                       "conversation, not typed by the user]")
+
+# Templates documented (upstream reports, or probed on this network) to
+# require system-at-index-0. Only a starting hint: `_provider_shape_memory`
+# overrides it the moment the wire proves otherwise.
+_STRICT_SYSTEM_FIRST_MODEL_PATTERNS = ("qwen3",)
+
+# Learned shapes, keyed by (url, model). Loaded lazily from disk so a restart
+# does not re-pay the rejection.
+_provider_shape_memory: dict[tuple[str, str], str] = {}
+_shape_memory_loaded = False
+
+# File name only: AI_DATA_DIR is defined further down this module, and the
+# helpers below resolve it at CALL time (import order must not force a move).
+_SHAPE_FILE_NAME = "provider_shapes.json"
+
+
+def _shape_memory_key(url: str, model: str) -> tuple[str, str]:
+    return (str(url or "").rstrip("/"), str(model or ""))
+
+
+def _shape_file_path() -> Path:
+    return AI_DATA_DIR / _SHAPE_FILE_NAME
+
+
+def _ensure_shape_memory_loaded() -> None:
+    global _shape_memory_loaded
+    if _shape_memory_loaded:
+        return
+    _shape_memory_loaded = True
+    try:
+        saved = _load_ai_json(_shape_file_path())
+    except Exception:
+        logger.warning("provider shape memory load failed", exc_info=True)
+        return
+    for key, shape in saved.items():
+        if not isinstance(key, str) or shape not in PROVIDER_SHAPES:
+            continue
+        url, _, model = key.partition("\x00")
+        _provider_shape_memory[(url, model)] = str(shape)
+
+
+def _learned_shape(url: str, model: str) -> str | None:
+    _ensure_shape_memory_loaded()
+    return _provider_shape_memory.get(_shape_memory_key(url, model))
+
+
+def _remember_shape(url: str, model: str, shape: str,
+                    persist: bool = False) -> None:
+    """Record the shape that worked.
+
+    `persist=True` is reserved for shapes learned from an ACTUAL rejection:
+    that evidence is expensive (it cost a round trip) and not inferable from
+    the hint table, so it survives a restart. A plain optimistic success is
+    process-local — it says nothing a retry could not re-derive, and writing
+    it would let unit-test traffic poison a production artifact (it did).
+    """
+    if shape not in PROVIDER_SHAPES:
+        return
+    _ensure_shape_memory_loaded()
+    key = _shape_memory_key(url, model)
+    if _provider_shape_memory.get(key) == shape and not persist:
+        return
+    _provider_shape_memory[key] = shape
+    if not persist:
+        return
+    try:
+        saved = _load_ai_json(_shape_file_path())
+        saved["\x00".join(key)] = shape
+        _save_ai_json(_shape_file_path(), saved)
+    except Exception:
+        # Learning is an optimization: losing the persistence write costs a
+        # future rejection-retry, never a turn. Loud, not silent (B-L4 law).
+        logger.warning("provider shape memory save failed", exc_info=True)
+
+
+def _default_shape(model: str) -> str:
+    """Rung for an endpoint with nothing learned yet: a template documented
+    (or probed) strict starts at tail_user, everything else gets the
+    optimistic tail_system."""
+    name = str(model or "").lower()
+    if any(pat in name for pat in _STRICT_SYSTEM_FIRST_MODEL_PATTERNS):
+        return "tail_user"
+    return "tail_system"
+
+
+def _rungs_from(shape: str) -> list[str]:
+    """The ladder starting at `shape` (an already-chosen rung is not retried
+    against itself)."""
+    try:
+        start = PROVIDER_SHAPES.index(shape)
+    except ValueError:
+        start = 0
+    return list(PROVIDER_SHAPES[start:])
+
+
+def _volatile_tail(messages: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Split (stable body, volatile tail blocks).
+
+    A system message appearing AFTER the first non-system message is a
+    trailing-seam block (`_prepare_messages` appends anchor / references /
+    skill body / ledger / observation there); a leading run of system
+    messages is the stable head and is never tail material.
+    """
+    first_non_system = next(
+        (i for i, m in enumerate(messages) if m.get("role") != "system"), None)
+    if first_non_system is None:
+        return list(messages), []
+    body = [m for i, m in enumerate(messages) if i < first_non_system
+            or m.get("role") != "system"]
+    tail = [m for i, m in enumerate(messages)
+            if i >= first_non_system and m.get("role") == "system"]
+    return body, tail
+
+
+def _reshape_for_template_fallback(payload: dict, shape: str) -> dict:
+    """Re-place the volatile tail of an already-built OpenAI-format payload.
+
+    Identity-preserving: returns the SAME object when nothing moves, so a
+    caller can tell 'no-op' from 'reshaped' without diffing.
+
+    Placement law (why these are in-place, not "move to the end"): the route
+    loop appends per-reprompt directives (ack-guard, edit nudge, steer) AFTER
+    the prepared seam, and that directive is the thing the model must act on
+    now — it stays the last message on the wire. Reordering the seam behind it
+    buried the directive under ~1.5K chars of ledger (caught by
+    tests/test_ai_progress_ack_guard.py).
+
+    tail_system : identity — `_build_provider_payload` already built this shape.
+    tail_user   : collapse the system run that sits after the transcript into
+                  ONE labeled user message, IN PLACE.
+    merged      : hoist every system block into messages[0] (the pre-C2 wire).
+    """
+    messages = payload.get("messages")
+    if not isinstance(messages, list) or "system" in payload:
+        # Anthropic-shaped (top-level system field) — no tail concept there.
+        return payload
+    _body, tail = _volatile_tail(messages)
+    if not tail:
+        return payload
+    if shape == "tail_system":
+        return payload
+    if shape == "tail_user":
+        first_tail_index = next(
+            idx for idx, m in enumerate(messages)
+            if idx and m.get("role") == "system")
+        joined = "\n\n".join(str(m.get("content", "")) for m in tail)
+        # One labeled user block at the seam's ORIGINAL position; anything the
+        # loop appended after the seam keeps its place behind it.
+        rebuilt = []
+        inserted = False
+        for idx, msg in enumerate(messages):
+            is_tail = idx >= first_tail_index and msg.get("role") == "system"
+            if is_tail:
+                if not inserted:
+                    rebuilt.append({"role": "user",
+                                    "content": f"{VOLATILE_TAIL_LABEL}\n\n{joined}"})
+                    inserted = True
+            else:
+                rebuilt.append(msg)
+    elif shape == "merged":
+        head_blocks = [m for m in messages if m.get("role") == "system"]
+        parts = [str(m.get("content", "")) for m in head_blocks]
+        merged_head = {"role": "system", "content": "\n\n".join(parts)}
+        rebuilt = [merged_head] + [m for m in messages
+                                   if m.get("role") != "system"]
+    else:
+        return payload
+    if rebuilt == messages:
+        return payload
+    return {**payload, "messages": rebuilt}
+
+
+# Deliberately narrow: a signature that says the MESSAGE SHAPE was rejected.
+# Anything else (auth, quota, capacity, model bugs) must surface to the user
+# untouched — reshaping around a 401 would hide a real failure behind retries.
+_TEMPLATE_REJECTION_PATTERNS = (
+    "system message must be at the beginning",
+    "system role must be the first",
+    "must be the first message",
+    "unexpected role",
+    "raise_exception",
+    "jinja exception",
+    "template error",
+    "unsupported role",
+    "invalid role",
+)
+
+
+def _looks_like_template_rejection(status: int, body: str) -> bool:
+    if status not in (400, 500):
+        return False
+    text = str(body or "").lower()
+    if not text:
+        return False
+    return any(pat in text for pat in _TEMPLATE_REJECTION_PATTERNS)
+
+
+
 def _build_provider_payload(
     provider: str,
     messages: list[dict],
@@ -3887,6 +4508,7 @@ def _build_provider_payload(
     temperature: float | None = None,
     tools: list[dict] | None = None,
     merge_system: bool = True,
+    reasoning_effort: str | None = None,
 ) -> dict:
     """Build the request payload for the given provider.
 
@@ -3955,7 +4577,22 @@ def _build_provider_payload(
             if system_parts:
                 filtered_messages.insert(0, {"role": "system", "content": "\n\n".join(system_parts)})
         else:
-            filtered_messages = messages
+            # C2 rung 1 (`tail_system`): merge ONLY the leading system run and
+            # leave the rest of the list exactly where the caller put it.
+            # Multi-leading-system is its own strict-template failure class,
+            # and the leading blocks are stable across turns, so folding them
+            # costs nothing. Reordering is NOT part of shaping: the route loop
+            # appends re-prompt directives after the prepared seam, and sliding
+            # the seam behind them buries the instruction the model must act on
+            # (pinned by tests/test_ai_progress_ack_guard.py).
+            leading = 0
+            while leading < len(messages) and messages[leading].get("role") == "system":
+                leading += 1
+            head = ([{"role": "system",
+                      "content": "\n\n".join(str(m.get("content", ""))
+                                             for m in messages[:leading])}]
+                    if leading else [])
+            filtered_messages = head + list(messages[leading:])
         payload = {
             "model": model,
             "messages": filtered_messages,
@@ -3964,7 +4601,111 @@ def _build_provider_payload(
         }
         if tools:
             payload["tools"] = tools
+        # Reasoning effort: openai-compatible ONLY (scope 2026-11-21). The
+        # chatgpt/google/github paths share this OpenAI-shaped branch but
+        # deliberately never receive the field — cloud effort support is
+        # out of scope, and a setting saved under a local endpoint must not
+        # silently ride along after a provider switch. "default"/"" sends
+        # NOTHING (omitted field = model default on every server; a literal
+        # "default" is an invalid level everywhere).
+        # Trim at the boundary: the gate compares against 'default', so a
+        # padded level from a raw API caller (' high ', ' default ') must
+        # not ship untrimmed bytes (product clients all normalize, but this
+        # function IS the intended gate).
+        effort = (reasoning_effort or "").strip()
+        if provider == "openai-compatible" and effort and effort != "default":
+            payload["reasoning_effort"] = effort
 
+    return payload
+
+
+def _response_error_text(resp) -> str:
+    """Best-effort provider error text, for the rejection-signature check."""
+    data = None
+    try:
+        data = resp.json()
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        err = data.get("error")
+        if isinstance(err, dict):
+            return str(err.get("message") or err)
+        if isinstance(err, str):
+            return err
+        for field in ("message", "detail"):
+            if data.get(field):
+                return str(data[field])
+    return str(getattr(resp, "text", "") or "")
+
+
+def _shape_for_send(url: str, payload: dict) -> str:
+    """Which wire shape this request goes out in: the shape learned for THIS
+    (url, model), else the documented-strict hint, else optimistic
+    tail_system. (A UI-level override is deliberately not wired up yet — one
+    resolution path, added only if a real endpoint needs pinning.)
+    """
+    model = str(payload.get("model", "") or "")
+    return _learned_shape(url, model) or _default_shape(model)
+
+
+# (url, model) pairs that 400'd the reasoning_effort field — omit the field
+# PROACTIVELY for them afterwards (LibreChat's drop-on-incompatible rule,
+# server-side: at most one wasted round-trip per pair instead of one per
+# request). In-process state, same lifetime class as the stop-event registry.
+_effort_rejected_endpoints: set[tuple[str, str]] = set()
+_EFFORT_REJECTED_ENDPOINTS_MAX = 256
+
+
+def _looks_like_reasoning_effort_rejection(status: int, body_text: str) -> bool:
+    """True when a 4xx is the server rejecting OUR reasoning_effort field.
+    Literal matcher only: the response must name the field. Never infer
+    intent from prose (intent law)."""
+    if status not in (400, 422):
+        return False
+    lowered = body_text.lower()
+    return "reasoning_effort" in lowered or "reasoning effort" in lowered
+
+
+# (props-url, model) -> the levels the endpoint DECLARED via /props
+# (probe source=='props'; an empty set is an authoritative "no
+# configurable effort"). #6 ruling (2026-11-22): reasoning_effort ships
+# ONLY for a declared level — an assumed-ladder pick on an endpoint that
+# never advertised levels is never sent, so a server that rejects
+# unknown fields with an opaque body can never break a chat that worked
+# before. Populated by the probe route; the 4xx drop-retry below stays
+# as the fallback for a server that declares a level but lies about it.
+_declared_effort_levels: dict[tuple[str, str], frozenset[str]] = {}
+_DECLARED_EFFORT_LEVELS_MAX = 256
+
+
+def _effort_declare_key(api_url: str, model: str) -> tuple[str, str]:
+    """Identity shared by the probe (req.apiUrl) and the send (chat url).
+
+    The props URL normalizes away both the /v1 prefix and the chat path,
+    so 'http://h:8080/v1' and 'http://h:8080/v1/chat/completions' key
+    identically.
+    """
+    return (_props_url_from_chat_url(api_url), str(model or ""))
+
+
+def _gate_reasoning_effort(payload: dict, url: str) -> dict:
+    """Drop reasoning_effort unless the endpoint declared that level.
+
+    The builder attaches the field for any non-default openai-compatible
+    level (unit-level law); this is the SEND gate: an endpoint never
+    probed, or one whose declared set lacks the level, gets a plain
+    request. Known-rejected pairs keep their proactive omit from before.
+    """
+    if "reasoning_effort" not in payload:
+        return payload
+    key = _effort_declare_key(url, str(payload.get("model", "") or ""))
+    if key in _effort_rejected_endpoints:
+        # Already proven incompatible — omit without paying for the 400
+        # again.
+        return {k: v for k, v in payload.items() if k != "reasoning_effort"}
+    declared = _declared_effort_levels.get(key)
+    if declared is None or str(payload["reasoning_effort"]) not in declared:
+        return {k: v for k, v in payload.items() if k != "reasoning_effort"}
     return payload
 
 
@@ -4001,25 +4742,87 @@ async def _query_provider(
         context,
     )
 
-    if stop_event is not None:
-        # Race the provider request against the stop event so a user stop
-        # cancels the in-flight request instead of waiting for it to finish.
-        query_task = asyncio.create_task(client.post(url, headers=headers, json=payload))
-        stop_task = asyncio.create_task(stop_event.wait())
-        done, _pending = await asyncio.wait(
-            {query_task, stop_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        if stop_task in done:
-            query_task.cancel()
+    async def _post_once(body: dict):
+        if stop_event is not None:
+            # Race the provider request against the stop event so a user stop
+            # cancels the in-flight request instead of waiting for it to
+            # finish.
+            query_task = asyncio.create_task(
+                client.post(url, headers=headers, json=body))
+            stop_task = asyncio.create_task(stop_event.wait())
+            done, _pending = await asyncio.wait(
+                {query_task, stop_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if stop_task in done:
+                query_task.cancel()
+                stop_task.cancel()
+                raise ChatStoppedError()
             stop_task.cancel()
-            raise ChatStoppedError()
-        stop_task.cancel()
-        resp = await query_task
-    else:
-        resp = await client.post(url, headers=headers, json=payload)
+            return await query_task
+        return await client.post(url, headers=headers, json=body)
 
-    resp.raise_for_status()
+    effort_remember_key = _effort_declare_key(
+        url, str(payload.get("model", "") or ""))
+    payload = _gate_reasoning_effort(payload, url)
+
+    # ── C2 shape ladder: a template rejection downgrades the wire shape and
+    # retries inside THIS request (never surfaced as a user-visible failure);
+    # every other failure propagates on the first try.
+    model_id = str(payload.get("model", "") or "")
+    rungs = _rungs_from(_shape_for_send(url, payload))
+    send_payload = _reshape_for_template_fallback(payload, rungs[0])
+    resp = None
+    downgraded = False
+    for rung_index, shape in enumerate(rungs):
+        resp = await _post_once(send_payload)
+        if getattr(resp, "status_code", 200) < 400:
+            if _learned_shape(url, model_id) != shape:
+                _remember_shape(url, model_id, shape, persist=downgraded)
+            break
+        body_text = _response_error_text(resp)
+        # Reasoning-effort degradation lives INSIDE the current rung: a 4xx
+        # that NAMES the field we added is OUR input, not the provider's
+        # failure — drop the field and retry this shape once (the matcher is
+        # literal, intent law, so no unrelated error is swallowed). The pair
+        # is remembered only when that retry SUCCEEDS; if it still fails,
+        # the fresh body falls through to the shape-ladder logic below.
+        if "reasoning_effort" in send_payload and _looks_like_reasoning_effort_rejection(
+                resp.status_code, body_text):
+            logger.warning(
+                "Provider rejected reasoning_effort=%s | field dropped, request retried once | context=%s",
+                send_payload.get("reasoning_effort"), context,
+            )
+            payload = {k: v for k, v in payload.items() if k != "reasoning_effort"}
+            send_payload = _reshape_for_template_fallback(payload, shape)
+            resp = await _post_once(send_payload)
+            if getattr(resp, "status_code", 200) < 400:
+                if len(_effort_rejected_endpoints) < _EFFORT_REJECTED_ENDPOINTS_MAX:
+                    _effort_rejected_endpoints.add(effort_remember_key)
+                if _learned_shape(url, model_id) != shape:
+                    _remember_shape(url, model_id, shape, persist=downgraded)
+                break
+            body_text = _response_error_text(resp)
+        remaining = rungs[rung_index + 1:]
+        if not (remaining and _looks_like_template_rejection(
+                resp.status_code, body_text)):
+            resp.raise_for_status()
+            raise ValueError(body_text
+                             or f"Provider returned HTTP {resp.status_code}")
+        candidate = _reshape_for_template_fallback(payload, remaining[0])
+        if candidate is send_payload:
+            # No tail left to move: the rejection is not ours to repair.
+            resp.raise_for_status()
+            raise ValueError(body_text
+                             or f"Provider returned HTTP {resp.status_code}")
+        logger.warning(
+            "Provider rejected the wire shape | shape=%s -> %s | %s | context=%s",
+            shape, remaining[0], body_text[:200], context,
+        )
+        send_payload = candidate
+        downgraded = True
+
+    assert resp is not None  # _rungs_from never returns an empty ladder
     data = resp.json()
 
     error_message = _extract_api_error_message(data)
@@ -4028,6 +4831,17 @@ async def _query_provider(
         raise ValueError(error_message)
 
     content = _extract_provider_content(provider, data) or ""
+
+    # C3: one grep-able cache line per provider request (probe harness +
+    # post-hoc forensics). Only when the provider reported the field.
+    _usage_raw = data.get("usage") if isinstance(data, dict) else None
+    _pdetails = (_usage_raw or {}).get("prompt_tokens_details")
+    _cached = _pdetails.get("cached_tokens") if isinstance(_pdetails, dict) else None
+    if isinstance(_cached, int):
+        logger.info(
+            "Provider cache | prompt=%s cached=%s context=%s",
+            (_usage_raw or {}).get("prompt_tokens"), _cached, context,
+        )
 
     logger.info(
         "Provider response | chars=%d context=%s preview=%s",
@@ -4100,10 +4914,26 @@ def _extract_usage_info(data: dict) -> dict | None:
         rt = details.get("reasoning_tokens")
         if isinstance(rt, int):
             reasoning_tokens = rt
+    # C3 prefix-cache telemetry: the cached share of the prompt. llama.cpp
+    # and OpenAI report usage.prompt_tokens_details.cached_tokens;
+    # Anthropic reports usage.cache_read_input_tokens. One field either
+    # way — silent (None) when neither is present, never guessed (same law
+    # as promptTokens above).
+    cached_tokens = None
+    pdetails = usage.get("prompt_tokens_details")
+    if isinstance(pdetails, dict):
+        ct = pdetails.get("cached_tokens")
+        if isinstance(ct, int) and not isinstance(ct, bool):
+            cached_tokens = ct
+    if cached_tokens is None:
+        crt = usage.get("cache_read_input_tokens")
+        if isinstance(crt, int) and not isinstance(crt, bool):
+            cached_tokens = crt
     return {
         "promptTokens": prompt_tokens,
         "completionTokens": completion_tokens,
         "reasoningTokens": reasoning_tokens,
+        "cachedTokens": cached_tokens,
         "finishReason": choice.get("finish_reason") or "",
     }
 
@@ -4142,6 +4972,20 @@ def _models_url_from_chat_url(api_url: str) -> str:
             break
     models_path = f"{path.rstrip('/')}/models"
     return urlunparse((parsed.scheme, parsed.netloc, models_path, "", "", ""))
+
+
+def _props_url_from_chat_url(api_url: str) -> str:
+    """llama.cpp-style capability endpoint at the server ROOT.
+
+    The chat URL's version prefix is NOT part of it:
+      http://host:8080/v1/chat/completions -> http://host:8080/props
+    (GET /props is llama-server's; llama-swap answers it too and proxies
+    ?model=<id> to the upstream llama-server.)
+    """
+    parsed = urlparse(api_url)
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return urlunparse((parsed.scheme, parsed.netloc, "/props", "", "", ""))
 
 
 def _provider_auth_headers(provider: str, api_url: str, api_key: str) -> dict:
@@ -4205,6 +5049,118 @@ async def list_models(req: ModelsRequest):
                     ids.append(m["id"])
     logger.info("Model list | provider=%s url=%s count=%d", provider, models_url, len(ids))
     return {"models": ids}
+
+
+@router.post("/ai/reasoning-levels")
+async def reasoning_levels(req: ReasoningLevelsRequest):
+    """Discover the reasoning-effort levels an endpoint accepts for one model.
+
+    Effort CONTROL is wired for the openai-compatible provider only (scope
+    2026-11-21), so every other provider answers empty and the UI shows the
+    setting nowhere. The metadata source is llama.cpp's GET /props
+    (chat_template_caps.reasoning_effort_levels — ordered lowest->highest;
+    reasoning_effort_rejected values are filtered out; llama-swap proxies
+    ?model=<id> through to its upstream). Probing the router's /props may
+    BOOT the model on demand, which is why only the SELECTED model is ever
+    probed, never the whole list.
+
+    The source field is the contract:
+      "props" -> authoritative. `levels` are exactly what the server
+                 accepts; [] means the server says this model has NO
+                 configurable effort — the client must show Default alone,
+                 never an assumed ladder.
+      null    -> nothing advertised (vLLM/Ollama cards, an older llama.cpp
+                 build without chat_template_caps, or an unreachable /props)
+                 -> the client may offer its conservative assumed ladder
+                 (low/medium/high), clearly labelled as assumed.
+    """
+    provider = req.apiProvider.value if hasattr(req.apiProvider, "value") else req.apiProvider
+    if provider != "openai-compatible":
+        return {"levels": [], "source": None}
+    props_url = _props_url_from_chat_url(req.apiUrl)
+    if not props_url:
+        return {"levels": [], "source": None}
+
+    headers = _provider_auth_headers(provider, req.apiUrl, req.apiKey)
+    timeout = httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=30.0)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            try:
+                res = await client.get(props_url, headers=headers)
+                res.raise_for_status()
+            except httpx.HTTPError:
+                if not req.model:
+                    raise
+                # llama-swap's /props REQUIRES ?model=<id> (it may boot the
+                # model on demand to answer); llama.cpp router mode answers
+                # bare and is handled below. Retry the documented shape
+                # before declaring nothing advertised.
+                res = await client.get(props_url, params={"model": req.model}, headers=headers)
+                res.raise_for_status()
+            data = res.json()
+            if isinstance(data, dict) and data.get("role") == "router" and req.model:
+                # Multi-model router: caps are per model, so ask for the
+                # selected one (see the boot-on-demand note above).
+                res = await client.get(props_url, params={"model": req.model}, headers=headers)
+                res.raise_for_status()
+                data = res.json()
+    except httpx.TimeoutException:
+        logger.warning("Reasoning levels timeout | url=%s", props_url)
+        return {"levels": [], "source": None, "error": "Timed out probing reasoning levels"}
+    except httpx.HTTPError as e:
+        logger.warning("Reasoning levels probe failed | url=%s error=%s", props_url, e)
+        return {"levels": [], "source": None, "error": f"Failed to probe reasoning levels: {e}"}
+    except ValueError:
+        # Same lesson as the W7 route: a 200 with a non-JSON body (a
+        # mis-pointed apiUrl hitting a landing page) degrades gracefully,
+        # it must never 500.
+        logger.warning("Reasoning levels probe got non-JSON body | url=%s", props_url)
+        return {"levels": [], "source": None, "error": "Reasoning levels probe returned a non-JSON body"}
+
+    if not isinstance(data, dict):
+        return {"levels": [], "source": None}
+    caps = data.get("chat_template_caps")
+    if not isinstance(caps, dict):
+        # Older llama.cpp build / non-llama server: no caps block.
+        return {"levels": [], "source": None}
+    if caps.get("supports_reasoning_effort") is not True:
+        # Answered from props, and props says: no configurable effort here.
+        _remember_declared_effort(req.apiUrl, req.model, [])
+        return {"levels": [], "source": "props"}
+    raw_levels = caps.get("reasoning_effort_levels")
+    if not isinstance(raw_levels, (list, tuple)):
+        # Claims support but carries no usable level list (a number, a
+        # string, garbage): that is UNANSWERED, not an authoritative empty —
+        # degrade to the assumed ladder rather than pretending props listed
+        # nothing, and never TypeError the route.
+        return {"levels": [], "source": None}
+    raw_rejected = caps.get("reasoning_effort_rejected")
+    rejected = (
+        {lv for lv in raw_rejected if isinstance(lv, str)}
+        if isinstance(raw_rejected, (list, tuple))
+        else set()
+    )
+    levels = [
+        lv for lv in raw_levels
+        if isinstance(lv, str) and lv.strip() and lv not in rejected
+    ]
+    logger.info("Reasoning levels | url=%s model=%s levels=%s", props_url, req.model, levels)
+    _remember_declared_effort(req.apiUrl, req.model, levels)
+    return {"levels": levels, "source": "props"}
+
+
+def _remember_declared_effort(api_url: str, model: str,
+                              levels: list[str]) -> None:
+    """Cache a props-answered declaration for the send gate (#6 ruling).
+
+    Only source=='props' answers reach here: [] is authoritative 'no
+    configurable effort' (never ship the field), a level list is exactly
+    what the server accepts. Unanswered probes deliberately do NOT
+    write — absence of an entry means 'never declared', also unsent.
+    """
+    if len(_declared_effort_levels) >= _DECLARED_EFFORT_LEVELS_MAX:
+        _declared_effort_levels.pop(next(iter(_declared_effort_levels)))
+    _declared_effort_levels[_effort_declare_key(api_url, model)] = frozenset(levels)
 
 
 def _positive_int(value: object) -> int | None:
@@ -4494,15 +5450,52 @@ async def chat_proxy(req: ChatRequest, request: Request):
         and (name in req.loadedSkills
              or _skill_load_in_trail(req.messages, name))
     ]
+    # Lazy macro gate (registry `gates_tools`): validate_macro/simulate_macro
+    # advertise ONLY while macro-authoring is loaded — same evidence as the
+    # sticky-body seam (client flag OR mechanical trail), so Invariant A
+    # holds by construction: the rulebook re-rides exactly when the tools do.
+    _macro_skill_state = {'active': (
+        MACRO_SKILL_NAME in req.loadedSkills
+        or _skill_load_in_trail(req.messages, MACRO_SKILL_NAME)
+    )}
+    # skill name -> the state dict its `gates_tools` ride on. The mid-loop
+    # load_skill arm flips through THIS map, so adding a skill with
+    # `gates_tools` needs one registry entry plus one line here — never a
+    # dispatch branch.
+    _gated_skill_state: dict[str, dict] = {MACRO_SKILL_NAME: _macro_skill_state}
 
     def _skill_gate_closed() -> bool:
         """True while the session's write tools stay locked behind
         load_skill (only meaningful when a session exists)."""
         return not _skill_state['active']
 
+    _native_tools = _resolve_native_tools(
+        req.apiProvider, req.apiUrl, req.toolProtocol,
+        edit_capable=edit_capable,
+        skill_active=_skill_state['active'],
+        macro_skill_active=_macro_skill_state['active'])
+    # Native-turn head trim (2026-11-22): the catalog rides the head only
+    # where it is the model's ONLY channel — a text turn, an endpoint
+    # detected tools-blind, or a forced A/B arm. AUTO (nativeCatalog None)
+    # reads the verdict cache; a still-unknown local endpoint gets its
+    # delta probe fired in the background (never blind without proof).
+    _native_mode = _native_tools is not None
+    _blind = (_native_tools_blind(req.apiUrl, req.model)
+              if _native_mode else None)
+    if req.nativeCatalog is not None:
+        _tools_catalog = req.nativeCatalog
+    else:
+        _tools_catalog = not _native_mode or _blind is True
+    if (_native_mode and req.nativeCatalog is None
+            and req.toolProtocol == "auto" and _blind is None
+            and req.apiProvider == AiProvider.openai_compatible):
+        _spawn_native_tools_probe(_url_model_key(req.apiUrl, req.model),
+                                  req.apiUrl, req.model, req.apiKey)
+
     messages = _prepare_messages(req.messages,
                                  edit_capable=edit_capable,
                                  skill_active=_skill_state['active'],
+                                 macro_skill_active=_macro_skill_state['active'],
                                  context_files=req.contextFiles,
                                  context_references=req.context_references,
                                  # Invariant A (atomic armament): the body
@@ -4517,10 +5510,9 @@ async def chat_proxy(req: ChatRequest, request: Request):
                                  # W6: re-deliver the client's action record
                                  # verbatim (never interpreted here).
                                  work_ledger=req.workLedger,
-                                 native_mode=_resolve_native_tools(
-                                     req.apiProvider, req.apiUrl, req.toolProtocol,
-                                     edit_capable=edit_capable,
-                                     skill_active=_skill_state['active']) is not None)
+                                 work_ledger_current_turn=req.workLedgerCurrentTurn,
+                                 native_mode=_native_mode,
+                                 tools_catalog=_tools_catalog)
 
     # ── Log request summary ──
     msg_count = len(messages)
@@ -4558,7 +5550,8 @@ async def chat_proxy(req: ChatRequest, request: Request):
     # native server ignores the tools array, so degradation is graceful.
     native_tools = _resolve_native_tools(req.apiProvider, req.apiUrl, req.toolProtocol,
                                          edit_capable=edit_capable,
-                                         skill_active=_skill_state['active'])
+                                         skill_active=_skill_state['active'],
+                                         macro_skill_active=_macro_skill_state['active'])
     overflow = preflight_overflow(messages, req.knownContextWindow,
                                   tools=native_tools)
     if overflow is not None:
@@ -4614,6 +5607,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
                 temperature=req.temperature,
                 tools=native_tools,
                 merge_system=req.mergeSystemMessages,
+                reasoning_effort=req.reasoningEffort,
             )
 
             current_content, current_data = await _query_provider(
@@ -4795,6 +5789,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
                         temperature=req.temperature,
                         tools=native_tools,
                         merge_system=req.mergeSystemMessages,
+                        reasoning_effort=req.reasoningEffort,
                     )
                     current_content, current_data = await _query_provider(
                         client, req.apiUrl, headers, _steer_payload,
@@ -4847,6 +5842,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
                             temperature=req.temperature,
                             tools=native_tools,
                             merge_system=req.mergeSystemMessages,
+                            reasoning_effort=req.reasoningEffort,
                         )
                         current_content, current_data = await _query_provider(
                             client, req.apiUrl, headers, malformed_payload, req.apiProvider,
@@ -4957,6 +5953,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
                             temperature=req.temperature,
                             tools=native_tools,
                             merge_system=req.mergeSystemMessages,
+                            reasoning_effort=req.reasoningEffort,
                         )
                         current_content, current_data = await _query_provider(
                             client, req.apiUrl, headers, nudge_payload,
@@ -5008,6 +6005,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
                                 temperature=req.temperature,
                                 tools=native_tools,
                                 merge_system=req.mergeSystemMessages,
+                                reasoning_effort=req.reasoningEffort,
                             )
                             current_content, current_data = await _query_provider(
                                 client, req.apiUrl, headers, verdict_payload,
@@ -5077,6 +6075,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
                             temperature=req.temperature,
                             tools=native_tools,
                             merge_system=req.mergeSystemMessages,
+                            reasoning_effort=req.reasoningEffort,
                         )
                         current_content, current_data = await _query_provider(
                             client, req.apiUrl, headers, ack_payload,
@@ -5102,7 +6101,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
                 known_tool_names = {t["name"] for t in _mcp_server._list_tools()}
                 if edit_capable:
                     known_tool_names |= EDIT_TOOL_NAMES
-                    known_tool_names.add(LOAD_SKILL_SPEC["name"])
+                known_tool_names.add(LOAD_SKILL_SPEC["name"])
                 known_tool_names.add(LIST_HARDWARE_SPEC["name"])
                 if tool_calls and current_content.strip() and all(
                     c.get("name") not in known_tool_names for c in tool_calls
@@ -5165,11 +6164,13 @@ async def chat_proxy(req: ChatRequest, request: Request):
                         )
                         results.append(result_text)
                         continue
-                    if edit_capable and tool_call.get('name') == 'load_skill':
-                        # Dispatch by REQUESTED skill name through the
-                        # registry — loading a knowledge skill must never
-                        # unlock the edit tools (only the config-editing
-                        # load flips the gate).
+                    if tool_call.get('name') == 'load_skill':
+                        # Chat-layer tool on EVERY arm (the read-only arm
+                        # needs it too — it is how any gated surface
+                        # unlocks). Dispatch by REQUESTED skill name through
+                        # the registry — loading a knowledge skill must
+                        # never unlock the edit tools (only the
+                        # config-editing load flips that gate).
                         edit_details = None
                         requested = str(
                             (tool_call.get('arguments') or {}).get('name', ''))
@@ -5183,7 +6184,8 @@ async def chat_proxy(req: ChatRequest, request: Request):
                                     req.apiProvider, req.apiUrl,
                                     req.toolProtocol,
                                     edit_capable=edit_capable,
-                                    skill_active=True)
+                                    skill_active=True,
+                                    macro_skill_active=_macro_skill_state['active'])
                                 logger.info(
                                     "Edit skill activated | write tools "
                                     "unlocked mid-request requestId=%s",
@@ -5191,12 +6193,45 @@ async def chat_proxy(req: ChatRequest, request: Request):
                             result_text = _edit_skill_body()
                         elif requested in _SKILL_REGISTRY:
                             result_text = _SKILL_REGISTRY[requested]["body"]()
-                            logger.info(
-                                "Skill loaded (knowledge) | name=%s "
-                                "requestId=%s", requested,
-                                req.requestId or 'none')
+                            # Registry-driven unlock: a skill with
+                            # `gates_tools` opens those tools THIS request
+                            # (same-turn unlock, edit precedent — body and
+                            # tools always move together, Invariant A).
+                            _entry_state = _gated_skill_state.get(requested)
+                            if (_entry_state is not None
+                                    and not _entry_state['active']):
+                                _entry_state['active'] = True
+                                native_tools = _resolve_native_tools(
+                                    req.apiProvider, req.apiUrl,
+                                    req.toolProtocol,
+                                    edit_capable=edit_capable,
+                                    skill_active=_skill_state['active'],
+                                    macro_skill_active=_macro_skill_state['active'])
+                                logger.info(
+                                    "Skill activated | gated tools unlocked "
+                                    "mid-request name=%s requestId=%s",
+                                    requested, req.requestId or 'none')
+                            else:
+                                logger.info(
+                                    "Skill loaded (knowledge) | name=%s "
+                                    "requestId=%s", requested,
+                                    req.requestId or 'none')
                         else:
                             result_text = _unknown_skill_text(requested)
+                    elif tool_call.get("name") in MACRO_GATED_TOOLS \
+                            and not _macro_skill_state['active']:
+                        # Closed-gate call (text protocol, or a native
+                        # server hallucinating an unadvertised tool): kick
+                        # back with the load step, NEVER execute.
+                        result_text = (
+                            f"'{tool_call.get('name')}' is not available yet. "
+                            f"Call load_skill(name='{MACRO_SKILL_NAME}') "
+                            "first — it returns the macro rules and unlocks "
+                            "the macro validator and simulator.")
+                        edit_details = None
+                        logger.warning(
+                            "Gated macro tool blocked | skill not loaded "
+                            "name=%s", tool_call.get('name'))
                     elif edit_session is not None and tool_call.get("name") in EDIT_TOOL_NAMES:
                         if _skill_gate_closed():
                             # Write tool used WITHOUT loading the skill:
@@ -5346,6 +6381,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
                     temperature=req.temperature,
                     tools=native_tools,
                     merge_system=req.mergeSystemMessages,
+                    reasoning_effort=req.reasoningEffort,
                 )
                 current_content, current_data = await _query_provider(
                     client, req.apiUrl, headers, tool_payload, req.apiProvider,
@@ -5445,6 +6481,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
                     temperature=req.temperature,
                     tools=None,
                     merge_system=req.mergeSystemMessages,
+                    reasoning_effort=req.reasoningEffort,
                 )
                 current_content, current_data = await _query_provider(
                     client, req.apiUrl, headers, retry_payload, req.apiProvider,
@@ -5492,13 +6529,14 @@ async def chat_proxy(req: ChatRequest, request: Request):
                     # un-gated) staging write.
                     reprompt_results = []
                     for c in reprompt_calls[:MAX_MCP_TOOL_TURNS]:
-                        if edit_capable and c.get("name") == "load_skill":
+                        if c.get("name") == "load_skill":
                             # Round-2 review: mirror the main loop's
                             # load_skill arm — without it a load_skill on
                             # this path hit the MCP dispatcher and got
                             # "Unknown tool", contradicting the kickback
                             # the gate itself injects. Fails closed
-                            # either way; now it just works.
+                            # either way; now it just works. Chat-layer
+                            # tool on EVERY arm (macro gate included).
                             requested = str(
                                 (c.get("arguments") or {}).get("name", ""))
                             if requested in ("", EDIT_SKILL_NAME):
@@ -5511,9 +6549,31 @@ async def chat_proxy(req: ChatRequest, request: Request):
                             elif requested in _SKILL_REGISTRY:
                                 reprompt_results.append(
                                     _SKILL_REGISTRY[requested]["body"]())
+                                _entry_state = _gated_skill_state.get(requested)
+                                if (_entry_state is not None
+                                        and not _entry_state['active']):
+                                    _entry_state['active'] = True
+                                    native_tools = _resolve_native_tools(
+                                        req.apiProvider, req.apiUrl,
+                                        req.toolProtocol,
+                                        edit_capable=edit_capable,
+                                        skill_active=_skill_state['active'],
+                                        macro_skill_active=_macro_skill_state['active'])
+                                    logger.info(
+                                        "Skill activated on re-prompt path"
+                                        " | gated tools unlocked name=%s",
+                                        requested)
                             else:
                                 reprompt_results.append(
                                     _unknown_skill_text(requested))
+                        elif c.get("name") in MACRO_GATED_TOOLS \
+                                and not _macro_skill_state['active']:
+                            # Mirror of the main loop's closed-gate kickback.
+                            reprompt_results.append(
+                                f"'{c.get('name')}' is not available yet. "
+                                f"Call load_skill(name='{MACRO_SKILL_NAME}') "
+                                "first — it returns the macro rules and "
+                                "unlocks the macro validator and simulator.")
                         elif edit_session is not None and c.get("name") in EDIT_TOOL_NAMES:
                             if _skill_gate_closed():
                                 reprompt_results.append(
@@ -5710,14 +6770,15 @@ async def chat_proxy(req: ChatRequest, request: Request):
                     # W7 context-pressure: the LAST provider request of the
                     # loop is the fullest prompt, so its size is the pressure
                     # signal the client compares against the router window.
-                    "lastPromptTokens": next(
-                        (
-                            e.get("promptTokens")
-                            for e in reversed(usage_events)
-                            if isinstance(e.get("promptTokens"), int)
-                        ),
-                        None,
-                    ),
+                    # C3: BOTH numbers come from that same last event (see
+                    # _paired_last_usage) — the chip's cached % is a pair,
+                    # not two independent "last seen" scans.
+                    "lastPromptTokens": _paired_last_usage(usage_events)[0],
+                    # C3: cached share of that same last request — the
+                    # prefix the NEXT turn continues from. 0 with a warm
+                    # conversation means something upstream of the tail
+                    # started moving (see cache probe harness).
+                    "lastCachedTokens": _paired_last_usage(usage_events)[1],
                     "events": usage_events,
                     "truncated": any(
                         (e.get("finishReason") or "") == "length" for e in usage_events

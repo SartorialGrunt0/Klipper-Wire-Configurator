@@ -25,7 +25,7 @@ import {
 } from '../../utils/approvalDiff';
 import { buildChatRequestCredentials } from '../../utils/chatRequestBase';
 import { loadedSkillNames } from '../../utils/chatSkillTrace';
-import { buildWorkLedger } from '../../utils/chatWorkLedger';
+import { buildWorkLedger, countUserTurns } from '../../utils/chatWorkLedger';
 import { selectUnsavedDrafts } from '../../utils/chatContext';
 import { buildReferenceContext, mentionMatches, nodeToReference, referenceLabel, type ChatReference, type MentionSource } from '../../utils/chatReferences';
 import { isNearBottom, nextStickToBottom } from '../../utils/chatScroll';
@@ -246,6 +246,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const [editMaxTokens, setEditMaxTokens] = useState(String(settings.maxTokens ?? 4096));
   const [editTemperature, setEditTemperature] = useState(String(settings.temperature ?? 0.7));
   const [editToolProtocol, setEditToolProtocol] = useState<'auto' | 'native' | 'text'>(settings.toolProtocol ?? 'auto');
+  const [editReasoningEffort, setEditReasoningEffort] = useState(settings.reasoningEffort ?? 'default');
 
   const resolvedEditApiUrl = resolveProviderApiUrl(
     editApiProvider,
@@ -297,6 +298,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       setEditMaxTokens(String(settings.maxTokens ?? 4096));
       setEditTemperature(String(settings.temperature ?? 0.7));
       setEditToolProtocol(settings.toolProtocol ?? 'auto');
+      setEditReasoningEffort(settings.reasoningEffort ?? 'default');
       setError(null);
       // Opening the dialog consumes any background completion signal — the
       // toolbar button returns to its default color (the user is looking at
@@ -418,6 +420,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
       maxTokens: Math.max(256, parseInt(editMaxTokens, 10) || 4096),
       temperature: parseTemperature(editTemperature),
       toolProtocol: editToolProtocol,
+      reasoningEffort: editReasoningEffort.trim() || 'default',
     });
     setShowSettings(false);
   }, [
@@ -430,6 +433,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     editProviderModels,
     editTemperature,
     editToolProtocol,
+    editReasoningEffort,
     resolvedEditApiUrl,
     setSettings,
   ]);
@@ -584,6 +588,10 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
             });
             return rows.length > 0 ? rows : undefined;
           })(),
+          // C1: absolute turn anchor for the ledger block (same count law
+          // as turnOrdinal — see buildWorkLedger). The renderer's group
+          // headers then never rewrite: byte-stable merged prefix.
+          workLedgerCurrentTurn: countUserTurns(newMessages),
         };
 
         // No context-file picker (2026-10-03): a request carries the editor's
@@ -1271,6 +1279,8 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     setEditTemperature,
     editToolProtocol,
     setEditToolProtocol,
+    editReasoningEffort,
+    setEditReasoningEffort,
     resolvedEditApiUrl,
     onSaveSettings: handleSaveSettings,
   };

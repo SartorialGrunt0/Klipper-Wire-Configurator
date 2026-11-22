@@ -115,4 +115,24 @@ describe('contextPressureStore — W8 overflow banner', () => {
     useContextPressureStore.getState().reset();
     expect(useContextPressureStore.getState().overflowMessage).toBeNull();
   });
+
+  it('records the cached tokens of the latest request and derives cachedShare (C3)', () => {
+    useContextPressureStore.getState().recordUsage(180, 96);
+    let state = useContextPressureStore.getState();
+    expect(state.lastCachedTokens).toBe(96);
+    expect(state.cachedShare).toBeCloseTo(96 / 180);
+    // A reply without cache telemetry clears the share — never carries a
+    // stale hit-rate across providers that don't report it.
+    useContextPressureStore.getState().recordUsage(200);
+    state = useContextPressureStore.getState();
+    expect(state.lastCachedTokens).toBeNull();
+    expect(state.cachedShare).toBeNull();
+  });
+
+  it('reset clears the cache telemetry with the rest of the conversation', () => {
+    useContextPressureStore.getState().recordUsage(180, 96);
+    useContextPressureStore.getState().reset();
+    expect(useContextPressureStore.getState().lastCachedTokens).toBeNull();
+    expect(useContextPressureStore.getState().cachedShare).toBeNull();
+  });
 });

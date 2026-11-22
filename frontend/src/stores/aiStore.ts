@@ -42,6 +42,35 @@ export interface ChatMessage {
    * transcript even after later messages join the running total.
    */
   requestId?: string;
+  /** Per-reply context telemetry for the Context chip (see MessageContextUsage). */
+  contextUsage?: MessageContextUsage;
+}
+
+/**
+ * The provider's own numbers for the call that produced a reply, plus what
+ * the client measured. Persisted with the message (plain JSON) so a reloaded
+ * conversation keeps its receipts instead of losing them with the live store.
+ *
+ * Null means "not reported", never zero: a provider that omits cache numbers
+ * must not render as a 0% hit rate.
+ */
+export interface MessageContextUsage {
+  /** usage.lastPromptTokens of the reply's last provider call. */
+  promptTokens: number | null;
+  /** usage.lastCachedTokens of that same call. */
+  cachedTokens: number | null;
+  /** The model's real window, when the session had probed it. */
+  contextWindow: number | null;
+  /**
+   * Provider+model identity this reply was sent under (`apiUrl::model`, no
+   * key material). Lets a chip drawn before the window probe settled borrow
+   * the probe later — but only when the identity still matches.
+   */
+  windowKey?: string | null;
+  /** Wall-clock duration of the reply as the client measured it. */
+  replyMs: number | null;
+  /** Model that answered (survives a later model switch in settings). */
+  model: string | null;
 }
 
 export interface AiSettings {
@@ -62,6 +91,16 @@ export interface AiSettings {
    * https → native function calling; 'native'/'text' force either.
    */
   toolProtocol: 'auto' | 'native' | 'text';
+  /**
+   * Reasoning effort for openai-compatible providers (the ONLY provider
+   * this is wired for, scope 2026-11-21). 'default' (default value) sends
+   * nothing at all — the model decides. Any other string is forwarded
+   * verbatim as top-level `reasoning_effort`. Offered levels come from
+   * the /ai/reasoning-levels probe (utils/chatReasoning); a level saved
+   * under another endpoint survives a provider switch in this store but
+   * is never sent to non-openai-compatible providers (backend-gated).
+   */
+  reasoningEffort: string;
 }
 
 interface PersistedAiState {
@@ -169,6 +208,12 @@ function buildAiSettings(settings: Partial<AiSettings>): AiSettings {
     ...merged,
     providerModels,
     model: modelToUse,
+    // A persisted state file with a missing/blank/garbage value must land
+    // on 'default' (send-nothing), never on an accidental level.
+    reasoningEffort:
+      typeof merged.reasoningEffort === 'string' && merged.reasoningEffort.trim()
+        ? merged.reasoningEffort.trim()
+        : 'default',
   };
 }
 
@@ -209,6 +254,7 @@ const DEFAULT_SETTINGS: AiSettings = {
   maxTokens: 4096,
   temperature: 0.7,
   toolProtocol: 'auto',
+  reasoningEffort: 'default',
 };
 
 export const useAiStore = create<AiState>()((set, get) => {

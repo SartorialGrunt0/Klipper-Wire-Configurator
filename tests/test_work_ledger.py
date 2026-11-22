@@ -151,23 +151,53 @@ def test_empty_ledger_injects_nothing(install):
     assert _ledger_messages(scripted.payloads[0]) == []
 
 
-def test_ledger_rides_after_skill_body_in_the_merged_prompt(install):
-    """Provider payloads merge every system message into the leading one
-    (merge_system default, 2026-09 KV/provider law) — so the ordering law
-    is asserted inside the merged text: references/body first, ledger
-    after them, nothing before the ledger moves."""
-    scripted = install([_final_reply()])
-    client.post('/ai/chat', json=_chat_payload(
-        [{'role': 'user', 'content': 'keep going'}],
-        loadedSkills=['config-editing'],
-        workLedger=ROWS,
-    ))
-    system_text = scripted.payloads[0]['messages'][0]['content']
+def test_ledger_rides_after_skill_body_in_both_wire_shapes(install):
+    """Ordering law — references/body first, ledger after them, nothing before
+    the ledger moves — asserted in BOTH shapes.
+
+    AMENDED 2026-11-20 (C2, same commit as the default flip, not silently):
+    `mergeSystemMessages` now defaults to False, so the seam blocks are their
+    own messages after the transcript instead of living inside messages[0].
+    The ORDER law is unchanged; only the container moved. The merged shape
+    stays pinned below as the explicit override, exactly as the 2026-09
+    KV/provider law asserted it."""
+    def post(**extra):
+        scripted = install([_final_reply()])
+        client.post('/ai/chat', json=_chat_payload(
+            [{'role': 'user', 'content': 'keep going'}],
+            loadedSkills=['config-editing'],
+            workLedger=ROWS,
+            **extra,
+        ))
+        return scripted.payloads[0]['messages']
+
+    # ── tail shape (new default): seam blocks ride after the transcript ──
+    messages = post()
+    assert [m['role'] for m in messages][:1] == ['system']
+    seam = [m['content'] for m in messages
+            if m.get('role') == 'system' and m is not messages[0]]
+    seam_text = '\n\n'.join(seam)
+    assert BODY_MARKER in seam_text
+    assert LEDGER_MARKER in seam_text
+    assert seam_text.index(BODY_MARKER) < seam_text.index(LEDGER_MARKER)
+    # The ledger runs to the very end of the payload (no W3 observation fires
+    # on this trail), and exactly one ledger is present.
+    assert messages[-1]['content'].endswith('[led] in printer.cfg -> undone by user')
+    assert sum(str(m.get('content', '')).count(LEDGER_MARKER) for m in messages) == 1
+    # And the human's message still precedes the seam (the seam never moves
+    # ahead of the transcript — that was the whole point of C2).
+    assert max(i for i, m in enumerate(messages) if m['role'] == 'user') < \
+        min(i for i, m in enumerate(messages)
+            if m.get('role') == 'system' and m is not messages[0])
+
+    # ── merged shape (explicit override): the pre-C2 wire, law intact ──
+    merged = post(mergeSystemMessages=True)
+    # Exactly one system message: everything hoisted into the leading block.
+    assert sum(1 for m in merged if m.get('role') == 'system') == 1
+    system_text = merged[0]['content']
     assert BODY_MARKER in system_text
     assert LEDGER_MARKER in system_text
     assert system_text.index(BODY_MARKER) < system_text.index(LEDGER_MARKER)
-    # No W3 observation fires on this trail — the ledger runs to the very
-    # end of the merged prompt (its deterministically-last row last).
     assert system_text.endswith('[led] in printer.cfg -> undone by user')
     assert system_text.count(LEDGER_MARKER) == 1
 
@@ -353,3 +383,228 @@ def test_renderer_collapses_and_caps_file_and_section_fields():
     # One arrow per row line: no smuggled second row.
     arrow_lines = [l for l in text.splitlines() if '->' in l]
     assert len(arrow_lines) == 2
+
+
+# ── C1: absolute turn numbers — ledger byte-stability across turns ───
+# (plan 2026-11-20_ai-chat-cache-hit-miss.md) Providers cache the exact
+# longest-common-prefix of the prompt; the relative label ("previous
+# turn" -> "2 turns ago") mutated one row-header byte every turn, ahead
+# of the whole transcript, so a ledger-present conversation missed the
+# prefix cache on EVERY turn (measured live 2026-11-20: warm mean cached
+# share 0.312 with a ledger vs 0.982 without). Rows now carry the
+# absolute turnOrdinal plus workLedgerCurrentTurn, and render as
+# "turn N:" headers that never change. turnOffset-only payloads (legacy
+# clients) keep the old relative rendering — the wire switch is additive.
+
+def test_absolute_labels_when_ordinal_and_current_turn_present():
+    text = ai_routes._render_work_ledger(
+        [{'turnOffset': 2, 'turnOrdinal': 3, 'file': 'p.cfg',
+          'section': 'led', 'verdict': 'kept'}],
+        current_turn=5)
+    assert '- turn 3:' in text
+    assert 'turns ago' not in text
+    assert 'previous turn' not in text
+
+
+def test_ledger_bytes_identical_across_consecutive_turns():
+    # The cache contract (C1 law + #13 anchor ruling): same rows + same
+    # verdicts => byte-identical ROW SECTION at every later send. Only
+    # the header's current-turn anchor moves with the turn — on the
+    # default tail_system wire shape this block rides AFTER the
+    # transcript, so the anchor churns only the volatile tail; the rows
+    # stay append-only. (Before #13 the whole block, header included,
+    # was frozen; the anchor was the sanctioned exception.)
+    row = {'turnOrdinal': 3, 'file': 'printer.cfg', 'section': 'led',
+           'verdict': 'kept'}
+    a = ai_routes._render_work_ledger([dict(row)], current_turn=4)
+    b = ai_routes._render_work_ledger([dict(row)], current_turn=9)
+    assert a.split("\n", 1)[1] == b.split("\n", 1)[1]
+    assert 'conversation turn 4.' in a
+    assert 'conversation turn 9.' in b
+
+
+def test_legacy_payload_without_current_turn_has_no_anchor():
+    # The anchor sentence exists only in absolute mode (currentTurn
+    # present); legacy renders keep their pre-#13 bytes untouched.
+    text = ai_routes._render_work_ledger(
+        [{'turnOffset': 1, 'file': 'p.cfg', 'section': 'led', 'verdict': 'kept'}])
+    assert 'conversation turn' not in text
+
+
+def test_ordinal_preferred_when_offset_inconsistent():
+    # The client is ground truth for its own event creation turn; when
+    # both fields ride and disagree, the absolute ordinal wins.
+    text = ai_routes._render_work_ledger(
+        [{'turnOffset': 9, 'turnOrdinal': 4, 'file': 'p.cfg',
+          'section': 'led', 'verdict': 'kept'}],
+        current_turn=5)
+    assert '- turn 4:' in text
+
+
+def test_legacy_offset_only_payloads_keep_relative_labels():
+    # Backward compatibility: an old client sends no ordinal/currentTurn;
+    # rendering must keep working exactly as before (measured baseline).
+    text = ai_routes._render_work_ledger(
+        [{'turnOffset': 1, 'file': 'p.cfg', 'section': 'led', 'verdict': 'kept'}])
+    assert '- previous turn:' in text
+    text2 = ai_routes._render_work_ledger(
+        [{'turnOffset': 3, 'file': 'p.cfg', 'section': 'led', 'verdict': 'kept'}])
+    assert '- 3 turns ago:' in text2
+
+
+def test_window_law_enforced_via_current_turn_for_ordinal_rows():
+    # Absolute ordinals are window-checked against current_turn with the
+    # classic client law (offset = current - ordinal; current counts the
+    # user message being sent, so offset 0 = staged this turn = not yet
+    # reviewable = not in the ledger).
+    rows = [
+        {'turnOrdinal': 1, 'turnOffset': 11, 'file': 'p.cfg', 'section': 'old', 'verdict': 'kept'},
+        {'turnOrdinal': 2, 'turnOffset': 10, 'file': 'p.cfg', 'section': 'edge', 'verdict': 'kept'},
+        {'turnOrdinal': 11, 'turnOffset': 1, 'file': 'p.cfg', 'section': 'fresh', 'verdict': 'kept'},
+    ]
+    text = ai_routes._render_work_ledger(rows, current_turn=12)
+    assert '[old]' not in text       # 11 turns back — outside the window
+    assert '[edge] in p.cfg -> kept' in text  # exactly 10 — inside
+    assert '[fresh] in p.cfg -> kept' in text
+
+
+def test_current_turn_falls_back_to_offset_sum_when_absent():
+    # Ordinal rows without a request-level currentTurn: the newest row
+    # anchors the scale (ordinal + offset = now). Same bytes every turn
+    # as long as the client keeps the offsets coherent — still far more
+    # stable than recomputing every label.
+    text = ai_routes._render_work_ledger(
+        [{'turnOrdinal': 3, 'turnOffset': 2, 'file': 'p.cfg',
+          'section': 'led', 'verdict': 'kept'}])
+    assert '- turn 3:' in text
+
+
+def test_route_injects_stable_ledger_with_current_turn(install):
+    # End-to-end: a client sending ordinals + workLedgerCurrentTurn gets
+    # absolute headers in the injected trailing ledger message.
+    scripted = install([_final_reply()])
+    response = client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'Hi'}],
+        workLedger=[{'turnOrdinal': 1, 'turnOffset': 1, 'file': 'printer.cfg',
+                     'section': 'led', 'verdict': 'pending'}],
+        workLedgerCurrentTurn=2,
+    ))
+    assert response.status_code == 200
+    ledgers = _ledger_messages(scripted.payloads[0])
+    assert len(ledgers) == 1
+    assert '- turn 1:' in ledgers[0]
+    assert 'turns ago' not in ledgers[0]
+
+
+# ── C1 LCP guard: the cross-turn prefix contract (plan 2026-11-20) ───
+
+ABS_ROWS = [
+    {'turnOffset': 2, 'turnOrdinal': 1, 'file': 'printer.cfg',
+     'section': 'stepper', 'verdict': 'kept'},
+    {'turnOffset': 1, 'turnOrdinal': 2, 'file': 'printer.cfg',
+     'section': 'led', 'verdict': 'undone'},
+]
+
+
+def test_cross_turn_merged_prefix_is_byte_stable(install):
+    """The whole branch in one assertion: with an ABSOLUTE ledger, the
+    full provider payload for turn k is a byte-prefix of turn k+1's
+    (same conversation, one more Q/A pair, unchanged verdicts). The
+    pre-C1 relative labels broke this on every turn — measured live:
+    warm cached share 0.312 with a ledger vs 0.982 without. This is the
+    provider-independent necessary condition for any token-prefix cache;
+    scripts/ai_chat_cache_probe.py measures the ground truth."""
+    scripted1 = install([_final_reply('First answer.')])
+    client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'stage an LED edit please'}],
+        workLedger=[{'turnOffset': 1, 'turnOrdinal': 1,
+                     'file': 'printer.cfg', 'section': 'led',
+                     'verdict': 'pending'}],
+        workLedgerCurrentTurn=2,
+    ))
+    # Turn 2 STAGES A NEW SECTION: same-led-row-with-changed-verdict is
+    # a legitimate in-place mutation (the record updating itself), not a
+    # cache bug — the guard pins the no-verdict-change case.
+    scripted2 = install([_final_reply('Second answer.')])
+    client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'stage an LED edit please'},
+         {'role': 'assistant', 'content': 'First answer.'},
+         {'role': 'user', 'content': 'now check the stepper section'}],
+        workLedger=[
+            {'turnOffset': 2, 'turnOrdinal': 1, 'file': 'printer.cfg',
+             'section': 'led', 'verdict': 'pending'},
+            {'turnOffset': 1, 'turnOrdinal': 2, 'file': 'printer.cfg',
+             'section': 'stepper', 'verdict': 'pending'},
+        ],
+        workLedgerCurrentTurn=3,
+    ))
+    p1 = scripted1.payloads[0]['messages']
+    p2 = scripted2.payloads[0]['messages']
+    s1 = next(m['content'] for m in p1 if m.get('role') == 'system')
+    s2 = next(m['content'] for m in p2 if m.get('role') == 'system')
+    assert s2.startswith(s1), (
+        'C1 violated: the merged system prefix changed bytes between '
+        'turns — something upstream of the tail is mutating per send')
+    # And the transcript tail replays byte-stable too.
+    t1 = [m for m in p1 if m.get('role') != 'system']
+    t2 = [m for m in p2 if m.get('role') != 'system']
+    assert t2[:len(t1)] == t1
+    # Review #5: the head/transcript checks above NEVER look at the
+    # ledger block (in the shipped no-merge default it rides a TRAILING
+    # system message). Pin the ledger's own append-only law explicitly —
+    # this is the exact class C1 (absolute turn keys) exists to hold.
+    l1 = next((m['content'] for m in p1
+               if m.get('role') == 'system' and LEDGER_MARKER in m['content']), '')
+    l2 = next((m['content'] for m in p2
+               if m.get('role') == 'system' and LEDGER_MARKER in m['content']), '')
+    assert l1 and l2, 'ledger must ride a system message in every payload'
+    g1 = l1[l1.index('- turn 1:'):]
+    assert g1 in l2, 'turn-1 group bytes must be frozen (append-only ledger)'
+    assert l2.index('- turn 1:') < l2.index('- turn 2:'), 'ascending turn order'
+
+
+def test_dual_coordinate_rows_anchor_correctly_without_current_turn():
+    # Review #3: a row carrying BOTH coordinates with no
+    # workLedgerCurrentTurn must anchor on ordinal + offset (client law
+    # offset == current - ordinal). The old -1 made effective = offset-1:
+    # the FRESHEST row fell out of the window entirely.
+    rows = [{'turnOffset': 1, 'turnOrdinal': 5, 'file': 'printer.cfg',
+             'section': 'led', 'verdict': 'kept'}]
+    out = ai_routes._render_work_ledger(rows)
+    assert out is not None and '- turn 5:' in out
+
+
+def test_dual_coordinate_window_boundary_without_current_turn():
+    # The window's far edge under the same implied anchor: 11 turns back
+    # must drop, not get admitted.
+    rows = [{'turnOffset': 11, 'turnOrdinal': 1, 'file': 'printer.cfg',
+             'section': 'old', 'verdict': 'kept'}]
+    assert ai_routes._render_work_ledger(rows) is None
+
+
+def test_mixed_coordinate_rows_without_anchor_render():
+    # Review #4: absolute row + offset-only row with no currentTurn used
+    # to raise TypeError inside the sort ((int, None) key) and the
+    # caller's swallow dropped the ENTIRE ledger silently. Now: no raise,
+    # everything renders, unanchorable rows sort last.
+    rows = [
+        {'turnOffset': 2, 'turnOrdinal': 1, 'file': 'printer.cfg',
+         'section': 'alpha', 'verdict': 'kept'},
+        {'turnOffset': 2, 'file': 'printer.cfg',
+         'section': 'beta', 'verdict': 'kept'},
+    ]
+    out = ai_routes._render_work_ledger(rows)
+    assert out is not None
+    assert 'alpha' in out and 'beta' in out
+
+
+def test_ledger_headers_absolute_for_absolute_payloads(install):
+    scripted = install([_final_reply()])
+    client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'why is my LED change gone?'}],
+        workLedger=ABS_ROWS,
+        workLedgerCurrentTurn=3,
+    ))
+    text = _ledger_messages(scripted.payloads[0])[0]
+    assert '- turn 1:' in text and '- turn 2:' in text
+    assert 'turns ago' not in text and 'previous turn' not in text

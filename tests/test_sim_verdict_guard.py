@@ -186,6 +186,12 @@ def _chat_payload(messages):
         'apiProvider': 'chatgpt',
         'contextFiles': {'printer.cfg': {'content': GLOW_CFG}},
         'editSkill': True,
+        # The 2026-11-21 macro gate: simulate_macro is advertised only
+        # while macro-authoring is loaded, so the scripted trace must
+        # carry the same sticky flag a real macro conversation sends —
+        # otherwise the simulate call would kick back, never execute,
+        # and the guard's sim-trace could not form.
+        'loadedSkills': ['macro-authoring'],
     }
 
 

@@ -898,6 +898,12 @@ export interface AiChatRequest {
   /** Tool-calling protocol override: 'auto' (scheme split), 'native', 'text'. */
   toolProtocol?: 'auto' | 'native' | 'text';
   /**
+   * Reasoning effort for openai-compatible endpoints ('default' = send
+   * nothing). The backend forwards the string verbatim as top-level
+   * reasoning_effort and ONLY for that provider.
+   */
+  reasoningEffort?: string;
+  /**
    * Loaded user-config content (filename -> {content, label}) for the
    * backend's config-grounding fallback. Held server-side only — it is NOT
    * injected into the prompt; the backend uses it when the model answers a
@@ -934,6 +940,16 @@ export interface AiChatRequest {
    */
   workLedger?: WorkLedgerRow[];
   /**
+   * C1 cache-stability: the absolute user-turn count of the sent trail
+   * INCLUDING the message being sent — the same count law as each row's
+   * turnOrdinal (utils/chatWorkLedger.countUserTurns). Lets the backend
+   * renderer anchor offset-only rows on an absolute turn instead of
+   * re-deriving a moving "previous turn" label, keeping the ledger block
+   * append-only so the provider's prefix cache survives across turns.
+   * Meaningless without a workLedger; ignored when absent (legacy).
+   */
+  workLedgerCurrentTurn?: number;
+  /**
    * W8 pre-flight: the model's REAL context window already probed this
    * session via /ai/context-window (contextPressureStore). Lets the
    * backend refuse an obviously-over prompt without a provider round-trip
@@ -959,6 +975,10 @@ export interface AiChatUsageEvent {
   promptTokens?: number | null;
   completionTokens: number;
   reasoningTokens?: number | null;
+  /** C3: cached prefix tokens of this request's prompt (llama.cpp/OpenAI
+   *  prompt_tokens_details.cached_tokens; Anthropic cache_read_input_tokens).
+   *  Undefined when the provider doesn't report cache telemetry. */
+  cachedTokens?: number | null;
   finishReason: string;
   /** Which leg of the loop produced it ('initial', 'steer-N', 'retry', …). */
   context?: string;
@@ -970,6 +990,9 @@ export interface AiChatUsage {
   ackReprompts?: number;
   /** Prompt tokens of the LAST provider call that reported usage. */
   lastPromptTokens?: number | null;
+  /** C3: cached prefix tokens of that same last call — the prefix the NEXT
+   *  turn continues from. Null/undefined when no call reported it. */
+  lastCachedTokens?: number | null;
   events: AiChatUsageEvent[];
   truncated: boolean;
 }
@@ -1181,6 +1204,45 @@ export async function listModels(
     };
   } catch {
     return { models: [], error: 'Failed to reach the backend' };
+  }
+}
+
+export interface ReasoningLevelsResponse {
+  levels: string[];
+  /** 'props' = authoritative from the endpoint; null = nothing advertised. */
+  source: 'props' | null;
+  error?: string;
+}
+
+/**
+ * Probe the reasoning-effort levels an OpenAI-compatible endpoint accepts
+ * for ONE model (same server-side-proxy rationale as listModels: CORS + key
+ * handling). Probing a router may boot the model, so only the SELECTED model
+ * is ever probed — never the whole list.
+ */
+export async function probeReasoningLevels(
+  provider: string,
+  apiUrl: string,
+  apiKey: string,
+  model: string,
+): Promise<ReasoningLevelsResponse> {
+  try {
+    const res = await fetch('/ai/reasoning-levels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiProvider: provider, apiUrl, apiKey, model }),
+    });
+    if (!res.ok) {
+      return { levels: [], source: null, error: `Failed to probe reasoning levels (HTTP ${res.status})` };
+    }
+    const data = (await res.json()) as ReasoningLevelsResponse;
+    return {
+      levels: Array.isArray(data.levels) ? data.levels : [],
+      source: data.source === 'props' ? 'props' : null,
+      error: data.error,
+    };
+  } catch {
+    return { levels: [], source: null, error: 'Failed to reach the backend' };
   }
 }
 
