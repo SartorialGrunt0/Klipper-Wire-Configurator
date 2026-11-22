@@ -407,15 +407,28 @@ def test_absolute_labels_when_ordinal_and_current_turn_present():
 
 
 def test_ledger_bytes_identical_across_consecutive_turns():
-    # The cache contract: same rows + same verdicts => byte-identical
-    # render at every later send (only the window check consumes
-    # current_turn). This is what turns the warm cached share from ~0.3
-    # back to ~1.0.
+    # The cache contract (C1 law + #13 anchor ruling): same rows + same
+    # verdicts => byte-identical ROW SECTION at every later send. Only
+    # the header's current-turn anchor moves with the turn — on the
+    # default tail_system wire shape this block rides AFTER the
+    # transcript, so the anchor churns only the volatile tail; the rows
+    # stay append-only. (Before #13 the whole block, header included,
+    # was frozen; the anchor was the sanctioned exception.)
     row = {'turnOrdinal': 3, 'file': 'printer.cfg', 'section': 'led',
            'verdict': 'kept'}
     a = ai_routes._render_work_ledger([dict(row)], current_turn=4)
     b = ai_routes._render_work_ledger([dict(row)], current_turn=9)
-    assert a == b
+    assert a.split("\n", 1)[1] == b.split("\n", 1)[1]
+    assert 'conversation turn 4.' in a
+    assert 'conversation turn 9.' in b
+
+
+def test_legacy_payload_without_current_turn_has_no_anchor():
+    # The anchor sentence exists only in absolute mode (currentTurn
+    # present); legacy renders keep their pre-#13 bytes untouched.
+    text = ai_routes._render_work_ledger(
+        [{'turnOffset': 1, 'file': 'p.cfg', 'section': 'led', 'verdict': 'kept'}])
+    assert 'conversation turn' not in text
 
 
 def test_ordinal_preferred_when_offset_inconsistent():

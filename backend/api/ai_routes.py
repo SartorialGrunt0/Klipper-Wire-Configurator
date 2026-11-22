@@ -2353,6 +2353,17 @@ def _render_work_ledger(rows: list | None,
         "undone, or still-pending from it; 'read' = section re-read in a "
         "later turn."
     )
+    if ct is not None:
+        # #13 ruling (2026-11-22): the absolute '- turn N' group headers
+        # replaced the old '- previous turn:' labels, which carried the
+        # recency anchor implicitly — the model could no longer order N
+        # against 'now'. State the anchor once in the header. Cache
+        # position: the DEFAULT wire shape (tail_system) delivers this
+        # block AFTER the transcript, so a per-turn header rewrite
+        # churns only the volatile tail; on the rare `merged` downgrade
+        # rung it churns the head — correctness (recency) over cache
+        # there, ladder downgrade is already the degraded path.
+        header += f" This request is being sent at conversation turn {ct}."
     lines: list[str] = []
     current_key = None
     for offset, row_ordinal, file, section, verdict, detail in valid:
@@ -4523,6 +4534,49 @@ def _looks_like_reasoning_effort_rejection(status: int, body_text: str) -> bool:
     return "reasoning_effort" in lowered or "reasoning effort" in lowered
 
 
+# (props-url, model) -> the levels the endpoint DECLARED via /props
+# (probe source=='props'; an empty set is an authoritative "no
+# configurable effort"). #6 ruling (2026-11-22): reasoning_effort ships
+# ONLY for a declared level — an assumed-ladder pick on an endpoint that
+# never advertised levels is never sent, so a server that rejects
+# unknown fields with an opaque body can never break a chat that worked
+# before. Populated by the probe route; the 4xx drop-retry below stays
+# as the fallback for a server that declares a level but lies about it.
+_declared_effort_levels: dict[tuple[str, str], frozenset[str]] = {}
+_DECLARED_EFFORT_LEVELS_MAX = 256
+
+
+def _effort_declare_key(api_url: str, model: str) -> tuple[str, str]:
+    """Identity shared by the probe (req.apiUrl) and the send (chat url).
+
+    The props URL normalizes away both the /v1 prefix and the chat path,
+    so 'http://h:8080/v1' and 'http://h:8080/v1/chat/completions' key
+    identically.
+    """
+    return (_props_url_from_chat_url(api_url), str(model or ""))
+
+
+def _gate_reasoning_effort(payload: dict, url: str) -> dict:
+    """Drop reasoning_effort unless the endpoint declared that level.
+
+    The builder attaches the field for any non-default openai-compatible
+    level (unit-level law); this is the SEND gate: an endpoint never
+    probed, or one whose declared set lacks the level, gets a plain
+    request. Known-rejected pairs keep their proactive omit from before.
+    """
+    if "reasoning_effort" not in payload:
+        return payload
+    key = _effort_declare_key(url, str(payload.get("model", "") or ""))
+    if key in _effort_rejected_endpoints:
+        # Already proven incompatible — omit without paying for the 400
+        # again.
+        return {k: v for k, v in payload.items() if k != "reasoning_effort"}
+    declared = _declared_effort_levels.get(key)
+    if declared is None or str(payload["reasoning_effort"]) not in declared:
+        return {k: v for k, v in payload.items() if k != "reasoning_effort"}
+    return payload
+
+
 async def _query_provider(
     client: httpx.AsyncClient,
     url: str,
@@ -4576,11 +4630,9 @@ async def _query_provider(
             return await query_task
         return await client.post(url, headers=headers, json=body)
 
-    effort_remember_key = (url, str(payload.get("model", "") or ""))
-    if "reasoning_effort" in payload and effort_remember_key in _effort_rejected_endpoints:
-        # Already proven incompatible for this endpoint+model — omit without
-        # paying for the 400 again.
-        payload = {k: v for k, v in payload.items() if k != "reasoning_effort"}
+    effort_remember_key = _effort_declare_key(
+        url, str(payload.get("model", "") or ""))
+    payload = _gate_reasoning_effort(payload, url)
 
     # ── C2 shape ladder: a template rejection downgrades the wire shape and
     # retries inside THIS request (never surfaced as a user-visible failure);
@@ -4941,6 +4993,7 @@ async def reasoning_levels(req: ReasoningLevelsRequest):
         return {"levels": [], "source": None}
     if caps.get("supports_reasoning_effort") is not True:
         # Answered from props, and props says: no configurable effort here.
+        _remember_declared_effort(req.apiUrl, req.model, [])
         return {"levels": [], "source": "props"}
     raw_levels = caps.get("reasoning_effort_levels")
     if not isinstance(raw_levels, (list, tuple)):
@@ -4960,7 +5013,22 @@ async def reasoning_levels(req: ReasoningLevelsRequest):
         if isinstance(lv, str) and lv.strip() and lv not in rejected
     ]
     logger.info("Reasoning levels | url=%s model=%s levels=%s", props_url, req.model, levels)
+    _remember_declared_effort(req.apiUrl, req.model, levels)
     return {"levels": levels, "source": "props"}
+
+
+def _remember_declared_effort(api_url: str, model: str,
+                              levels: list[str]) -> None:
+    """Cache a props-answered declaration for the send gate (#6 ruling).
+
+    Only source=='props' answers reach here: [] is authoritative 'no
+    configurable effort' (never ship the field), a level list is exactly
+    what the server accepts. Unanswered probes deliberately do NOT
+    write — absence of an entry means 'never declared', also unsent.
+    """
+    if len(_declared_effort_levels) >= _DECLARED_EFFORT_LEVELS_MAX:
+        _declared_effort_levels.pop(next(iter(_declared_effort_levels)))
+    _declared_effort_levels[_effort_declare_key(api_url, model)] = frozenset(levels)
 
 
 def _positive_int(value: object) -> int | None:

@@ -151,8 +151,14 @@ def test_rejected_field_retried_once_and_remembered():
         return DummyResponse(OK_BODY)
 
     saved = set(ai_routes._effort_rejected_endpoints)
+    saved_decl = dict(ai_routes._declared_effort_levels)
     try:
         ai_routes._effort_rejected_endpoints.clear()
+        # #6 send gate: the field may only reach the wire for a DECLARED
+        # level — the settings probe would have populated this cache
+        # before the user could pick a level.
+        ai_routes._declared_effort_levels[
+            ai_routes._effort_declare_key(url, 'm')] = frozenset({'high'})
         payload = ai_routes._build_provider_payload(
             'openai-compatible', MSGS, 'm', reasoning_effort='high')
         content, _ = _run(ai_routes._query_provider(
@@ -160,7 +166,8 @@ def test_rejected_field_retried_once_and_remembered():
         assert content == 'ok'
         # first attempt WITH the field, retry WITHOUT it.
         assert 'reasoning_effort' in posts[0] and 'reasoning_effort' not in posts[1]
-        assert (url, 'm') in ai_routes._effort_rejected_endpoints
+        assert ai_routes._effort_declare_key(url, 'm') in \
+            ai_routes._effort_rejected_endpoints
         # second request: proactive omission, exactly one post.
         posts.clear()
         payload2 = ai_routes._build_provider_payload(
@@ -172,6 +179,8 @@ def test_rejected_field_retried_once_and_remembered():
     finally:
         ai_routes._effort_rejected_endpoints.clear()
         ai_routes._effort_rejected_endpoints.update(saved)
+        ai_routes._declared_effort_levels.clear()
+        ai_routes._declared_effort_levels.update(saved_decl)
 
 
 def test_echo_4xx_retries_once_but_never_poisons_memory():
@@ -190,7 +199,10 @@ def test_echo_4xx_retries_once_but_never_poisons_memory():
                              text=f'max_tokens too large; body keys={keys}')
 
     saved = set(ai_routes._effort_rejected_endpoints)
+    saved_decl = dict(ai_routes._declared_effort_levels)
     try:
+        ai_routes._declared_effort_levels[
+            ai_routes._effort_declare_key(url, 'm')] = frozenset({'high'})
         ai_routes._effort_rejected_endpoints.discard((url, 'm'))
         payload = ai_routes._build_provider_payload(
             'openai-compatible', MSGS, 'm', reasoning_effort='high')
@@ -205,6 +217,8 @@ def test_echo_4xx_retries_once_but_never_poisons_memory():
         assert (url, 'm') not in ai_routes._effort_rejected_endpoints  # NOT remembered
     finally:
         ai_routes._effort_rejected_endpoints.discard((url, 'm'))
+        ai_routes._declared_effort_levels.clear()
+        ai_routes._declared_effort_levels.update(saved_decl)
 
 
 def test_unrelated_400_never_retries():
@@ -374,3 +388,133 @@ def test_probe_other_providers_answer_empty_without_network(monkeypatch):
 def test_chat_request_reasoning_effort_defaults_to_default():
     req = ai_routes.ChatRequest(messages=MSGS, apiKey='')
     assert req.reasoningEffort == 'default'
+
+
+# ── #6 send gate: declared levels only (ruling 2026-11-22) ────────────────
+
+def _with_declared_cache():
+    """Snapshot/restore helper for the process-wide declaration cache."""
+    saved = dict(ai_routes._declared_effort_levels)
+    return saved
+
+
+def _restore_declared_cache(saved):
+    ai_routes._declared_effort_levels.clear()
+    ai_routes._declared_effort_levels.update(saved)
+
+
+def test_gate_never_sends_a_level_the_endpoint_never_declared():
+    # A chat must never regress because of the setting: an endpoint that
+    # never advertised levels (unprobed, vLLM card, unreachable /props)
+    # gets a PLAIN request regardless of what the user picked.
+    url = 'http://undeclared.test/v1/chat/completions'
+    posts = []
+
+    def post(u, headers, body):
+        posts.append(dict(body))
+        return DummyResponse(OK_BODY)
+
+    saved = _with_declared_cache()
+    try:
+        ai_routes._declared_effort_levels.pop(
+            ai_routes._effort_declare_key(url, 'm'), None)
+        payload = ai_routes._build_provider_payload(
+            'openai-compatible', MSGS, 'm', reasoning_effort='high')
+        content, _ = _run(ai_routes._query_provider(
+            FakeAsyncClient(post_handler=post), url, {}, payload, 'openai-compatible'))
+        assert content == 'ok'
+        assert len(posts) == 1 and 'reasoning_effort' not in posts[0]
+    finally:
+        _restore_declared_cache(saved)
+
+
+def test_gate_authoritative_empty_declaration_never_sends():
+    # props answered 'no configurable effort' — that is authoritative,
+    # not a hole the assumed ladder can slip through.
+    url = 'http://empty.test/v1/chat/completions'
+    saved = _with_declared_cache()
+    try:
+        ai_routes._declared_effort_levels[
+            ai_routes._effort_declare_key(url, 'm')] = frozenset()
+        out = ai_routes._gate_reasoning_effort(
+            {'model': 'm', 'reasoning_effort': 'high'}, url)
+        assert 'reasoning_effort' not in out
+    finally:
+        _restore_declared_cache(saved)
+
+
+def test_gate_key_normalizes_probe_and_send_url_shapes():
+    # The probe caches under req.apiUrl, the send keys on the chat URL;
+    # both normalize to the props URL or a probed endpoint never sends.
+    saved = _with_declared_cache()
+    try:
+        ai_routes._remember_declared_effort('http://h:8080/v1', 'm', ['high'])
+        for send_url in ('http://h:8080/v1/chat/completions', 'http://h:8080/v1'):
+            out = ai_routes._gate_reasoning_effort(
+                {'model': 'm', 'reasoning_effort': 'high'}, send_url)
+            assert out.get('reasoning_effort') == 'high', send_url
+        # A level OUTSIDE the declared set on a declared endpoint drops.
+        assert 'reasoning_effort' not in ai_routes._gate_reasoning_effort(
+            {'model': 'm', 'reasoning_effort': 'xhigh'},
+            'http://h:8080/v1/chat/completions')
+    finally:
+        _restore_declared_cache(saved)
+
+
+def test_probe_props_answer_populates_declaration_cache(monkeypatch):
+    # The probe route is the ONLY writer: a props answer (including the
+    # authoritative empty) must land in the cache the send gate reads.
+    def get(url, headers, params):
+        return DummyResponse({'chat_template_caps': {
+            'supports_reasoning_effort': True,
+            'reasoning_effort_levels': ['low', 'medium', 'high'],
+        }})
+    saved = _with_declared_cache()
+    try:
+        ai_routes._declared_effort_levels.pop(
+            ai_routes._effort_declare_key(
+                'http://srv.test:8080/v1/chat/completions', 'm1'), None)
+        body = _probe(monkeypatch, get)
+        assert body['source'] == 'props'
+        assert ai_routes._declared_effort_levels[
+            ai_routes._effort_declare_key(
+                'http://srv.test:8080/v1/chat/completions', 'm1')] \
+            == frozenset({'low', 'medium', 'high'})
+    finally:
+        _restore_declared_cache(saved)
+
+
+def test_probe_supports_false_populates_empty_declaration(monkeypatch):
+    def get(url, headers, params):
+        return DummyResponse({'chat_template_caps': {
+            'supports_reasoning_effort': False,
+        }})
+    saved = _with_declared_cache()
+    try:
+        body = _probe(monkeypatch, get)
+        assert body == {'levels': [], 'source': 'props'}
+        assert ai_routes._declared_effort_levels.get(
+            ai_routes._effort_declare_key(
+                'http://srv.test:8080/v1/chat/completions', 'm1')) \
+            == frozenset()
+    finally:
+        _restore_declared_cache(saved)
+
+
+def test_probe_unanswered_leaves_declaration_cache_untouched(monkeypatch):
+    # No /props answer is NOT a declaration — the entry must not appear
+    # (absence = never declared = never sent).
+    def get(url, headers, params):
+        return DummyResponse({'total_slots': 1})
+    saved = _with_declared_cache()
+    try:
+        ai_routes._declared_effort_levels.pop(
+            ai_routes._effort_declare_key(
+                'http://srv.test:8080/v1/chat/completions', 'm1'), None)
+        body = _probe(monkeypatch, get)
+        assert body['source'] is None
+        assert ai_routes._effort_declare_key(
+            'http://srv.test:8080/v1/chat/completions', 'm1') \
+            not in ai_routes._declared_effort_levels
+    finally:
+        _restore_declared_cache(saved)

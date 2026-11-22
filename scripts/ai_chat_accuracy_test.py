@@ -1497,8 +1497,8 @@ def build_simtool_questions() -> list[TestQuestion]:
                 # clean evidence.
                 ("tool_output_regex", "simulate_macro::L2: GLOW"),
                 ("tool_output_regex", "simulate_macro::SET_LED"),
-                ("regex", r"(?i)(get|gets|be) ?set[\s\S]*(0\.4|40%)|"
-                          r"(0\.4|40%)[\s\S]*(get|gets|be) ?set"),
+                ("regex", r"(?i)(get|gets|getting|be) ?set[\s\S]*(0\.4|40%)|"
+                          r"(0\.4|40%)[\s\S]*(get|gets|getting|be) ?set"),
             ),
         ),
     ]
