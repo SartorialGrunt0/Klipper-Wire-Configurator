@@ -215,8 +215,8 @@ def test_builder_signpost_identical_across_arms():
                   macro_skill_active=False, native_mode=True)
     cat = ai_routes._build_mcp_tool_context(tools_catalog=True, **kwargs)
     trim = ai_routes._build_mcp_tool_context(tools_catalog=False, **kwargs)
-    block = ai_routes._SKILL_INDEX_BLOCK.strip()
-    assert block in cat and block in trim
+    block = ai_routes._SKILL_INDEX_BLOCK  # RAW: a per-arm strip/whitespace
+    assert block in cat and block in trim  # translation would break this
 
 
 def test_builder_catalog_with_macro_gate_still_locksteps():
