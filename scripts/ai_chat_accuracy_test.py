@@ -228,6 +228,11 @@ class TestQuestion:
     # None follows the run's --tool-protocol. The ACK-* family pins both
     # protocols so guard parity is graded in one run (plan §6.5.5).
     tool_protocol: str | None = None
+    # Per-request ChatRequest.nativeCatalog override — A/B the head-trim
+    # channels (2026-11-22): None follows the run's --native-catalog;
+    # False forces the trimmed native head, True forces the head catalog,
+    # regardless of the endpoint's recorded tools-blind verdict.
+    native_catalog: bool | None = None
 
 
 # Shared config snippets used by several questions.
@@ -5139,6 +5144,10 @@ def chat_request(base_url: str, question: TestQuestion, settings: dict,
         "maxTokens": settings["max_tokens"],
         "temperature": settings["temperature"],
         "toolProtocol": question.tool_protocol or settings.get("tool_protocol", "auto"),
+        # None = backend auto (head catalog only on text/blind channels).
+        "nativeCatalog": (question.native_catalog
+                          if question.native_catalog is not None
+                          else settings.get("native_catalog")),
         "mergeSystemMessages": settings.get("merge_system_messages", False),
         # 'default' = the backend sends nothing (model default). Any other
         # level rides as top-level reasoning_effort; the backend forwards
@@ -5466,6 +5475,7 @@ def resolve_settings(args: argparse.Namespace) -> dict:
         "max_tokens": int(max_tokens),
         "temperature": float(temperature),
         "tool_protocol": args.tool_protocol or "auto",
+        "native_catalog": native_catalog_setting(args),
         "merge_system_messages": args.merge_system_messages,
         "reasoning_effort": (args.reasoning_effort or "default").strip() or "default",
         "edit_tools": edit_tools_setting(args),
@@ -5481,6 +5491,15 @@ def edit_tools_setting(args: argparse.Namespace) -> bool | None:
     arm for a whole run (write tools never advertised)."""
     value = getattr(args, "edit_tools", "auto")
     return {"on": True, "off": False}.get(value, None)
+
+
+def native_catalog_setting(args: argparse.Namespace) -> bool | None:
+    """--native-catalog auto/off/always -> None/False/True (the
+    ChatRequest.nativeCatalog wire shape). None = backend auto: the head
+    catalog rides only where it is the model's only channel (text turns,
+    tools-blind endpoints). 'always' = the pre-trim control arm."""
+    value = getattr(args, "native_catalog", "auto")
+    return {"off": False, "always": True}.get(value, None)
 
 
 # ── Question selection ─────────────────────────────────────────────────
@@ -5618,6 +5637,16 @@ def main() -> int:
                              "calling), 'native' (force OpenAI native "
                              "tool_calls for local llama.cpp servers too), "
                              "'text' (force the text protocol everywhere)")
+    # 2026-11-22 head-trim A/B: 'auto' ships the product behavior (head
+    # catalog only on text turns / tools-blind endpoints), 'off' forces the
+    # trimmed native head, 'always' restores the pre-trim duplication tax.
+    parser.add_argument("--native-catalog", default="auto",
+                        choices=["auto", "off", "always"],
+                        help="Head tool-catalog channel for native turns: "
+                             "'auto' (product default: catalog only where "
+                             "it is the only channel), 'off' (always "
+                             "trimmed), 'always' (pre-trim shape — the "
+                             "A/B control arm)")
     # C2 (improve/ai-chat-cache-hit-miss): the backend DEFAULT flipped to
     # mergeSystemMessages=false — volatile seam blocks ride the tail (wire-shape
     # ladder). The harness default MUST track the product default or a bank leg

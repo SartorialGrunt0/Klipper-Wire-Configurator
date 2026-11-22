@@ -373,6 +373,14 @@ class ChatRequest(BaseModel):
     # them on/off for this request only (False = read-only arm). Mirrors
     # the toolProtocol precedent so A/B runs don't need backend restarts.
     editTools: bool | None = None
+    # Native-turn head catalog override (harness A/B runs ONLY; the
+    # frontend never sends it). None (default) = AUTO: the per-tool
+    # snippet catalog rides the head ONLY on text turns or endpoints
+    # detected tools-blind (native turns ship tools once, via the array).
+    # False/True force the catalog off/on for this request regardless of
+    # the recorded verdict (scripts/ai_chat_accuracy_test.py
+    # --native-catalog).
+    nativeCatalog: bool | None = None
     # Skill-gate override (harness A/B runs ONLY; the frontend never
     # sends it). The model-triggered skill gate is product behavior:
     # write tools stay hidden until the model calls load_skill itself.
@@ -1126,7 +1134,8 @@ def _prepare_messages(messages: list[dict],
                       inject_edit_skill_body: bool = False,
                       loaded_skills: list | None = None,
                       work_ledger: list | None = None,
-                      work_ledger_current_turn: int | None = None) -> list[dict]:
+                      work_ledger_current_turn: int | None = None,
+                      tools_catalog: bool = True) -> list[dict]:
     """Build a clean system prompt with MCP tool descriptions, printer memory,
     and user messages.
     """
@@ -1149,14 +1158,18 @@ def _prepare_messages(messages: list[dict],
     elif minimal:
         # Experiment gate: tools only — no SYSTEM_PROMPT, no printer memory,
         # no auto-fill, no task anchor.
-        system_parts = [_build_mcp_tool_context()]
+        system_parts = [_build_mcp_tool_context(tools_catalog=tools_catalog)]
     else:
-        # All tools are advertised unconditionally (native/text parity);
-        # detect_board and other niche helpers live under "Specialized tools".
+        # The catalog's channel depends on the arm: TEXT turns advertise
+        # every tool here (their only channel); NATIVE turns ship schemas
+        # once in the `tools` array and the head keeps only the behavioral
+        # laws — unless the endpoint was detected tools-blind (or the arm
+        # was forced), where the catalog substitutes back in.
         tool_context = _build_mcp_tool_context(edit_capable=edit_capable,
                                                skill_active=skill_active,
                                                macro_skill_active=macro_skill_active,
-                                               native_mode=native_mode)
+                                               native_mode=native_mode,
+                                               tools_catalog=tools_catalog)
         system_parts = [system_prompt, tool_context, memory_context]
         # The edit law travels inside the load_skill tool result (skill
         # body), persisting in conversation history exactly once — it is
@@ -2407,19 +2420,23 @@ def _render_work_ledger(rows: list | None,
 def _build_mcp_tool_context(edit_capable: bool = False, *,
                             skill_active: bool = False,
                             native_mode: bool = False,
-                            macro_skill_active: bool = False) -> str:
+                            macro_skill_active: bool = False,
+                            tools_catalog: bool = True) -> str:
     """Build the 'Available Tools' section for the system prompt.
 
-    Every registered tool is advertised so text-protocol and native providers
-    see the SAME tool surface (parity). The everyday tools get a one-line
-    snippet each; niche helpers (board detection, rotation_distance math) are
-    grouped under a "Specialized tools" heading so they stay visible without
-    distracting from the tools that matter for the current task.
+    The TEXT arm advertises every registered tool here (one-line snippets;
+    niche helpers under a "Specialized tools" heading) — for a
+    text-protocol turn this catalog is the ONLY channel, so param coverage
+    is enforced by test_api_routes
+    test_tool_context_snippets_cover_schema_params.
 
-    Param-coverage note: every inputSchema param of an advertised tool must
-    appear in its snippet (enforced by test_api_routes
-    test_tool_context_snippets_cover_schema_params) so text-protocol models
-    can discover the same affordances as native function calling.
+    NATIVE turns ship it once in the `tools` array instead (2026-11-22
+    industry posture: schemas travel in the array; the head carries
+    behavioral laws, not a catalog — see tests/test_native_catalog_trim.py
+    + the skill dossier). `tools_catalog=True` on a native turn means the
+    endpoint was DETECTED tools-blind (the array is being ignored) or the
+    arm was forced (harness A/B): insurance as a substitute, never a
+    duplication on a healthy wire.
     """
 
     parts = [
@@ -2460,9 +2477,21 @@ def _build_mcp_tool_context(edit_capable: bool = False, *,
             "",
             "The tool runs and the result is returned as a follow-up message — use it to answer.",
         ]),
-        "",
-        "Tools:",
     ]
+
+    if not tools_catalog:
+        # Native-trimmed arm: LAWS above, ONE closing law below — the
+        # catalog (snippet lists, edit tools, skill index, load_skill
+        # snippet) rides the `tools` array on this arm.
+        parts.append("")
+        parts.append(
+            "Klipper G-code commands and macro names (e.g. G28, M104, BED_MESH_CALIBRATE, "
+            "SET_FAN_SPEED, PRINT_START) are NOT tools — never wrap them in tool blocks."
+        )
+        return "\n".join(parts)
+
+    parts.append("")
+    parts.append("Tools:")
     for name, snippet in _MCP_TOOL_SNIPPETS.items():
         # Lazy gate (registry `gates_tools`): the macro schemas are the
         # biggest fixed cost in the head; they advertise ONLY while their
@@ -4005,6 +4034,109 @@ def _resolve_native_tools(provider: str, api_url: str, tool_protocol: str,
                                macro_skill_active=macro_skill_active)
 
 
+# ── Tools-blindness detection (native-turn head trim) ───────────────────────
+# (url, model) -> True/False: does this endpoint SILENTLY IGNORE the `tools`
+# array? Same process-global shared-cache precedent as the reasoning-levels
+# DECLARATIONS cache: an UNKNOWN entry reads healthy (trimmed native head),
+# never blind. Rationale (2026-11-22): the bank fleet proved 9/9 slots
+# (down to gemma-4-e2b) receive the array through the chat template; the
+# reachable ignore-cases are a llama.cpp template that never reads the
+# `tools` var, legacy --no-jinja builds, and tool-less GGUFs — all of which
+# answer 200 with a prompt_token count IDENTICAL to the no-tools request
+# (llama.cpp#27129). The delta probe is vendor-neutral proof of exactly
+# that. Cloud providers are statically healthy (documented always-deliver:
+# OpenAI/Anthropic), so no probe traffic ever leaves the LAN.
+_NATIVE_TOOLS_BLIND: dict[tuple, bool] = {}
+_NATIVE_TOOLS_PROBE_PENDING: set = set()
+
+
+def _url_model_key(api_url: str, model: str) -> tuple:
+    return (api_url, model)
+
+
+def _record_native_tools_blind(key: tuple, blind: bool, *, reason: str) -> None:
+    """The cache's ONLY writer (tests seed through here — an unseeded
+    gate reads healthy, same discipline as the declaration cache)."""
+    _NATIVE_TOOLS_BLIND[key] = blind
+    logger.info("Native tools probe | %s blind=%s (%s)",
+                key[1], blind, reason)
+
+
+def _native_tools_blind(api_url: str, model: str) -> bool | None:
+    return _NATIVE_TOOLS_BLIND.get(_url_model_key(api_url, model))
+
+
+async def _probe_native_tools_support(key: tuple, api_url: str, model: str,
+                                      api_key: str) -> None:
+    """Prompt-token delta: identical request ±tools at max_tokens=1.
+
+    Equal prompt_tokens proves the template never read the schemas (HTTP
+    200 is NOT evidence the tools arrived). A LARGER with-tools count
+    proves they did. A probe that cannot run records NOT-blind + a warning
+    — never blind on a guess (fail-healthy: the trim is the healthy
+    posture, re-adding the catalog on a flaky probe would silently restore
+    the duplication tax on a fine endpoint)."""
+    probe_messages = [{"role": "user", "content": "Hi."}]
+    probe_tools = [{
+        "type": "function",
+        "function": {
+            "name": "list_user_configs",
+            "description": "List the user's Klipper config files.",
+            "parameters": {"type": "object", "properties": {},
+                           "required": []},
+        },
+    }]
+    try:
+        counts = []
+        async with httpx.AsyncClient(
+                timeout=httpx.Timeout(20, connect=5)) as http:
+            for with_tools in (True, False):
+                body = {"model": model, "messages": probe_messages,
+                        "max_tokens": 1, "temperature": 0}
+                if with_tools:
+                    body["tools"] = probe_tools
+                r = await http.post(api_url,
+                                    headers=_provider_auth_headers(
+                                        "openai-compatible", api_url, api_key),
+                                    json=body)
+                r.raise_for_status()
+                counts.append(int(
+                    (r.json().get("usage") or {})["prompt_tokens"]))
+    except Exception:
+        _record_native_tools_blind(
+            key, False, reason="probe failed; assuming tools honored")
+        logger.warning("Native tools probe failed for %s | assuming the "
+                       "tools array is honored", model, exc_info=True)
+        return
+    with_t, without_t = counts
+    if with_t > without_t:
+        _record_native_tools_blind(
+            key, False, reason=f"delta +{with_t - without_t} tokens")
+    else:
+        _record_native_tools_blind(
+            key, True, reason=f"prompt_tokens identical ({with_t} vs "
+            f"{without_t}) — endpoint ignores the tools array")
+
+
+def _spawn_native_tools_probe(key: tuple, api_url: str, model: str,
+                              api_key: str) -> None:
+    """Fire-and-forget, deduped per (url, model) for the process lifetime.
+    The model is already loaded (this is first real use), so the two
+    max_tokens=1 calls are cheap prefill — the per-model probe-only law
+    against boot-thrash is honoured by construction."""
+    if key in _NATIVE_TOOLS_PROBE_PENDING:
+        return
+    _NATIVE_TOOLS_PROBE_PENDING.add(key)
+
+    async def _run() -> None:
+        try:
+            await _probe_native_tools_support(key, api_url, model, api_key)
+        finally:
+            _NATIVE_TOOLS_PROBE_PENDING.discard(key)
+
+    asyncio.get_running_loop().create_task(_run())
+
+
 def _extract_native_tool_calls(provider: str, data: dict) -> list[dict] | None:
     """Extract structured tool calls from a provider response.
 
@@ -5337,6 +5469,29 @@ async def chat_proxy(req: ChatRequest, request: Request):
         load_skill (only meaningful when a session exists)."""
         return not _skill_state['active']
 
+    _native_tools = _resolve_native_tools(
+        req.apiProvider, req.apiUrl, req.toolProtocol,
+        edit_capable=edit_capable,
+        skill_active=_skill_state['active'],
+        macro_skill_active=_macro_skill_state['active'])
+    # Native-turn head trim (2026-11-22): the catalog rides the head only
+    # where it is the model's ONLY channel — a text turn, an endpoint
+    # detected tools-blind, or a forced A/B arm. AUTO (nativeCatalog None)
+    # reads the verdict cache; a still-unknown local endpoint gets its
+    # delta probe fired in the background (never blind without proof).
+    _native_mode = _native_tools is not None
+    _blind = (_native_tools_blind(req.apiUrl, req.model)
+              if _native_mode else None)
+    if req.nativeCatalog is not None:
+        _tools_catalog = req.nativeCatalog
+    else:
+        _tools_catalog = not _native_mode or _blind is True
+    if (_native_mode and req.nativeCatalog is None
+            and req.toolProtocol == "auto" and _blind is None
+            and req.apiProvider == AiProvider.openai_compatible):
+        _spawn_native_tools_probe(_url_model_key(req.apiUrl, req.model),
+                                  req.apiUrl, req.model, req.apiKey)
+
     messages = _prepare_messages(req.messages,
                                  edit_capable=edit_capable,
                                  skill_active=_skill_state['active'],
@@ -5356,11 +5511,8 @@ async def chat_proxy(req: ChatRequest, request: Request):
                                  # verbatim (never interpreted here).
                                  work_ledger=req.workLedger,
                                  work_ledger_current_turn=req.workLedgerCurrentTurn,
-                                 native_mode=_resolve_native_tools(
-                                     req.apiProvider, req.apiUrl, req.toolProtocol,
-                                     edit_capable=edit_capable,
-                                     skill_active=_skill_state['active'],
-                                     macro_skill_active=_macro_skill_state['active']) is not None)
+                                 native_mode=_native_mode,
+                                 tools_catalog=_tools_catalog)
 
     # ── Log request summary ──
     msg_count = len(messages)

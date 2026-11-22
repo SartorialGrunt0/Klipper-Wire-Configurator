@@ -1186,28 +1186,39 @@ def test_mirror_failure_still_arms_from_drafts(monkeypatch):
 
 
 def test_edit_system_prompt_carries_tool_surface(edit_flag, monkeypatch):
-    # Unlocked arm (editSkill=True): the text-protocol surface advertises
-    # the write tools. The edit law itself only ever rides the load_skill
-    # body.
+    # Unlocked arm (editSkill=True): the write tools ride the request —
+    # the native array on this arm (head carries them only on the
+    # text/blind channels, tests/test_native_catalog_trim.py). The edit
+    # LAW itself only ever rides the load_skill body.
     scripted = _install(monkeypatch, [_final_reply('ok')])
     client.post('/ai/chat', json=_chat_payload(
         [{'role': 'user', 'content': 'tweak my config'}]))
-    system_msg = scripted.payloads[0]['messages'][0]['content']
-    assert '- config_edit:' in system_msg
+    names = {t['function']['name']
+             for t in scripted.payloads[0].get('tools') or []}
+    assert 'config_edit' in names
 
 
 def test_readonly_system_prompt_lean(edit_flag, monkeypatch):
-    # Read-only arm parity check: no WRITE tools, ever. The skill INDEX
-    # now rides EVERY arm (2026-11-21 macro gate): load_skill is a
-    # chat-layer tool everywhere and is how a read-only turn unlocks the
-    # gated validate_macro/simulate_macro surface — hiding the index here
-    # would strand those tools behind an unpointed lock.
+    # Read-only arm: no WRITE tools, EVER (head or array). The skill INDEX
+    # + load_skill pointer ride the arm's tool channel (2026-11-21 macro
+    # gate law: load_skill is how a read-only turn unlocks the gated
+    # validate/simulate surface — on the trimmed native arm that pointer
+    # lives in the load_skill schema description, on the text head in the
+    # index block).
     scripted = _install(monkeypatch, [_final_reply('ok')])
     client.post('/ai/chat', json=_chat_payload(
         [{'role': 'user', 'content': 'tweak my config'}], editTools=False))
-    system_msg = scripted.payloads[0]['messages'][0]['content']
-    assert '- config_edit:' not in system_msg
-    assert '<available_skills>' in system_msg
+    payload = scripted.payloads[0]
+    system_msg = payload['messages'][0]['content']
+    names = {t['function']['name'] for t in payload.get('tools') or []}
+    assert 'config_edit' not in system_msg and 'config_edit' not in names
+    assert 'load_skill' in names
+    # Text channel of the same arm keeps the index block.
+    scripted = _install(monkeypatch, [_final_reply('ok')])
+    client.post('/ai/chat', json=_chat_payload(
+        [{'role': 'user', 'content': 'tweak my config'}],
+        editTools=False, toolProtocol='text'))
+    assert '<available_skills>' in scripted.payloads[0]['messages'][0]['content']
 
 
 def test_locked_gate_kicks_back_before_load(edit_flag, monkeypatch):
@@ -1265,7 +1276,9 @@ def test_history_load_unlocks_without_fresh_call(edit_flag, monkeypatch):
         editSkill=False))
     assert response.status_code == 200
     body = response.json()
-    assert '- config_edit:' in scripted.payloads[0]['messages'][0]['content']
+    names = {t['function']['name']
+             for t in scripted.payloads[0].get('tools') or []}
+    assert 'config_edit' in names
     assert body['editAttempts'] == 1
     assert body['pendingEdits'][0]['summary'].startswith('set [printer] max_accel')
 
