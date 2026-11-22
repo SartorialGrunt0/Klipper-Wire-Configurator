@@ -4235,6 +4235,30 @@ _PRESENT_REFUSAL_RE = re.compile(
     r"(?:refused|rejected|exceed\w*|abort\w*|out[ -]of[ -]range)")
 
 
+# macrogate-r1 2026-11-21 (fourth member of the c08acff/F10/L-5 lineage):
+# a CORRECT answer may name the refusal it rules out inside a DISTINGUISHING
+# frame — "is a different thing from the command being rejected for an
+# out-of-range S=" — the SIMTOOL-07 doctrine (command level vs the per-heater
+# mechanism) spoken verbatim. Negator lists miss it (no negator) and irrealis
+# misses it (no modal). Structural arm, local like _irrealis_frame: the
+# discriminator must sit in the claim's OWN window, and a present-tense
+# refusal in that same window bars the scope — "PREHEAT is rejected, which is
+# a different thing from a warning" asserts the refusal and stays red
+# (laundering control pinned in simtool07_verdicts.json).
+_DISCRIMINATOR_BEFORE, _DISCRIMINATOR_AFTER = 75, 25
+_DISCRIMINATOR_RE = re.compile(
+    r"(?i)\bdifferent\b[^.;:]{0,15}?\b(?:from|than)\b|\bas opposed to\b|"
+    r"\bdistinct from\b|\bseparate\b[^.;:]{0,10}?\bfrom\b")
+
+
+def _distinguishing_frame(clause: str, start: int) -> bool:
+    """Does a mechanism-distinguishing frame reference the claim at `start`?"""
+    window = clause[max(0, start - _DISCRIMINATOR_BEFORE):start + _DISCRIMINATOR_AFTER]
+    if not _DISCRIMINATOR_RE.search(window):
+        return False
+    return _PRESENT_REFUSAL_RE.search(window) is None
+
+
 def _irrealis_frame(clause: str, start: int) -> bool:
     """Does a modal frame the tense-free claim at `start` as a hypothesis?
 
@@ -4736,6 +4760,8 @@ def criterion_ok(kind: str, value: str, content: str,
                 if _REFUSAL_NEGATOR_RE.search(prefix):
                     continue
                 if _REFUSAL_SCOPE_RE.search(clause):
+                    continue
+                if _distinguishing_frame(clause, m.start()):
                     continue
                 return False
         return True
