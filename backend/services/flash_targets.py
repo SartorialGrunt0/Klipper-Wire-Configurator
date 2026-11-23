@@ -158,16 +158,15 @@ def _target_default_paths(target: str) -> list[str]:
     return [path.format(user=user) for path in _TARGET_DEFAULT_PATHS[_require_supported_target(target)]]
 
 
-def _candidate_checkout_paths(target: str, requested_path: str | None = None,
-                              mutation: bool = False) -> list[Path]:
-    # requested_path is NEVER a candidate (PR #48 round-4). The
-    # FirmwareDialog's custom-checkout field flows through the state
-    # reload (a GET that persists a VALID resolved checkout into
-    # settings), so every later mutation resolves the same tree from
-    # settings — the feature survives; a request-supplied path never
-    # reaches resolution on ANY leg, which is what killed the
-    # POST /apply plant -> exec_module/make chain (both the drive-by
-    # GET leg and the same-origin mutation leg).
+def _candidate_checkout_paths(target: str) -> list[Path]:
+    # A request-supplied checkout path is NEVER a candidate (PR #48
+    # round-4; round-5 review removed the dead parameters that made
+    # this look bypassable). Custom checkouts are REGISTERED, not
+    # passed: the FirmwareDialog flow goes through the sanctioned
+    # PUT /flash/{target}/checkout-path registrar, which validates
+    # identity before storing. Everything downstream resolves from
+    # settings/env/defaults — which is what killed the POST /apply
+    # plant -> exec_module/make chain on every leg.
     normalized_target = _require_supported_target(target)
     settings = load_settings()
     values = [
@@ -287,6 +286,9 @@ def set_flash_target_checkout_path(target: str, checkout_path: str | None) -> di
 
 def resolve_flash_target_checkout(target: str, requested_path: str | None = None,
                                   persist: bool = True) -> tuple[Path | None, str | None]:
+    # requested_path/persist are kept for call-site compatibility and
+    # the persist=False settings-write guard ONLY: the path takes no
+    # part in resolution (see _candidate_checkout_paths).
     normalized_target = _require_supported_target(target)
     candidates = _candidate_checkout_paths(normalized_target)
     for candidate in candidates:
