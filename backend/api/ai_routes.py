@@ -5039,7 +5039,13 @@ def _resolve_api_key(request_key: str | None, request_url: str | None = None) ->
         return ""
     saved_url = settings.get("apiUrl")
     saved_url = saved_url.strip() if isinstance(saved_url, str) else ""
-    if saved_url and request_url is not None and request_url.strip() != saved_url:
+    if not saved_url:
+        # Key and URL are one pair in BOTH directions now (round-2): a
+        # stored key with no URL could be steered anywhere, so it
+        # resolves to nothing — the settings panel pairs them on save,
+        # an unpaired store is a hand-edited artifact.
+        return ""
+    if request_url is not None and request_url.strip() != saved_url:
         return ""
     return stored
 
@@ -6961,6 +6967,16 @@ def _restore_sentinel_api_key(payload: dict) -> dict:
     if isinstance(settings, dict) and \
             settings.get("apiKey") == API_KEY_STORED_SENTINEL:
         settings["apiKey"] = _stored_api_key()
+        # Key and URL are ONE credential pair (PR #48 round-2): a save
+        # that keeps the masked placeholder may NOT move the pair's URL.
+        # Without this, GET /ai/state -> POST /ai/state {sentinel,
+        # attacker-url} -> empty-key request handed the stored key to
+        # the attacker endpoint (drive-by path: CORS is wildcard and
+        # GET+POST need no Host-guard preflight). A URL change must
+        # arrive with a real new key in the same save.
+        stored_url = _stored_provider_settings().get("apiUrl")
+        if isinstance(stored_url, str) and stored_url.strip():
+            settings["apiUrl"] = stored_url
     return payload
 
 
