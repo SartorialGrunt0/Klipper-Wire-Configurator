@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import getpass
 import glob
+import logging
 import os
 import json
 import re
@@ -431,8 +432,26 @@ def load_settings() -> dict:
 
 
 def save_settings(data: dict) -> None:
-    """Save native settings."""
-    _settings_file().write_text(json.dumps(data, indent=2), encoding="utf-8")
+    """Save native settings.
+
+    settings.json can carry the Moonraker token, so it gets the same
+    owner-only mode api_keys.json promises (PR #48 B-08: write_text's
+    default 0644 left the token world-readable while the docs claimed
+    the 0600 posture). Best-effort, loud on failure — the same
+    treatment as the key store."""
+    path = _settings_file()
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        # Non-POSIX filesystems have no mode to set; on POSIX a failure
+        # means a stored Moonraker token stays readable by other local
+        # users — loud, never silent. (No os.name predicate: the
+        # no-inline-platform-checks law allows OSError tolerance only.)
+        logging.getLogger(__name__).warning(
+            "settings.json chmod to 0600 failed — a stored Moonraker "
+            "token in it may be readable by other local users.",
+            exc_info=True)
 
 
 # ── Flash profile persistence ─────────────────────────────────
@@ -835,11 +854,13 @@ def _query_moonraker_print_status(timeout: float = 2.0) -> dict[str, Any]:
     - 401 (locked-down Moonraker, [authorization] with trusted_clients
       not covering us) → print_state 'unknown' + moonraker_auth_required;
       attaching the configured X-Api-Key avoids this on healthy setups.
-    - EMPTY status dict (Moonraker docs: klippy errored or lacks
-      print_stats, which requires [virtual_sdcard]) → 'unknown', never a
-      fake not-printing.
-    - Unreachable (no Moonraker at all — standalone installs) → today's
-      not-printing fallback stays; it is the honest answer there.
+    - EMPTY status dict, an empty print_stats, a non-401 HTTP error
+      (403/5xx from a fronting proxy), or a non-JSON body → 'unknown':
+      Moonraker ANSWERED and the state is unreadable, which is never a
+      fake not-printing (PR #48).
+    - Unreachable BY NETWORK (no Moonraker at all — standalone installs)
+      → today's not-printing fallback stays; it is the honest answer
+      there. (SECURITY.md keeps the same distinction — PR #48 C-04.)
     """
     fallback = {
         "is_printing": False,
@@ -860,7 +881,16 @@ def _query_moonraker_print_status(timeout: float = 2.0) -> dict[str, Any]:
                     headers=headers,
                 )
                 response.raise_for_status()
-            payload = response.json()
+            try:
+                payload = response.json()
+            except ValueError:
+                # Answered with a non-JSON body (WAF/proxy HTML): an
+                # ANSWERED call whose shape we can't read must never land
+                # in the not-printing fallback (PR #48: only 401 got the
+                # honesty fix; 403/5xx/malformed still lied 'not
+                # printing'). Unreachable-by-network stays the fallback.
+                misconfigured = True
+                continue
             result = payload.get("result", {}) if isinstance(payload, dict) else {}
             status = result.get("status", {}) if isinstance(result, dict) else {}
             if not status:
@@ -883,6 +913,11 @@ def _query_moonraker_print_status(timeout: float = 2.0) -> dict[str, Any]:
         except httpx.HTTPStatusError as exc:
             if exc.response is not None and exc.response.status_code == 401:
                 auth_required = True
+            else:
+                # 403/5xx: Moonraker (or something in front of it)
+                # answered — an unreadable print state is 'unknown', not
+                # a fake 'not printing' (PR #48 L-01).
+                misconfigured = True
             continue
         except (httpx.HTTPError, ValueError, TypeError):
             continue
