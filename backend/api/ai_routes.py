@@ -5012,19 +5012,36 @@ def _stored_api_key() -> str:
     return key.strip() if isinstance(key, str) else ""
 
 
-def _resolve_api_key(request_key: str | None) -> str:
+def _stored_provider_settings() -> dict:
+    settings = _load_ai_json(AI_STATE_FILE).get("settings")
+    return settings if isinstance(settings, dict) else {}
+
+
+def _resolve_api_key(request_key: str | None, request_url: str | None = None) -> str:
     """The provider key a request should actually use.
 
     An explicitly typed key (non-empty, not the GET /ai/state placeholder)
-    wins; anything else — including the sentinel the masked GET response
-    hands the browser and the plain '' a reloaded page sends — falls back
-    to the server-stored key. This is what lets /ai/state withhold the
-    key value without breaking a single provider call.
+    wins; the sentinel/'' fallback returns the server-stored key ONLY when
+    the request targets the URL the key was SAVED FOR. Key and URL are one
+    credential pair: an empty-key request naming some other apiUrl must
+    never pull the stored secret to it (that turns the proxy into an
+    exfil relay — review PR #48 C-01). No saved apiUrl = no binding.
+    This is what lets /ai/state withhold the key value without breaking a
+    single provider call.
     """
     key = (request_key or "").strip()
     if key and key != API_KEY_STORED_SENTINEL:
         return key
-    return _stored_api_key()
+    settings = _stored_provider_settings()
+    stored = settings.get("apiKey")
+    stored = stored.strip() if isinstance(stored, str) else ""
+    if not stored:
+        return ""
+    saved_url = settings.get("apiUrl")
+    saved_url = saved_url.strip() if isinstance(saved_url, str) else ""
+    if saved_url and request_url is not None and request_url.strip() != saved_url:
+        return ""
+    return stored
 
 
 def _provider_auth_headers(provider: str, api_url: str, api_key: str) -> dict:
@@ -5066,7 +5083,7 @@ async def list_models(req: ModelsRequest):
         return {"models": []}
 
     headers = _provider_auth_headers(provider, req.apiUrl,
-                                     _resolve_api_key(req.apiKey))
+                                     _resolve_api_key(req.apiKey, req.apiUrl))
     timeout = httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=30.0)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -5122,7 +5139,7 @@ async def reasoning_levels(req: ReasoningLevelsRequest):
         return {"levels": [], "source": None}
 
     headers = _provider_auth_headers(provider, req.apiUrl,
-                                     _resolve_api_key(req.apiKey))
+                                     _resolve_api_key(req.apiKey, req.apiUrl))
     timeout = httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=30.0)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -5296,7 +5313,7 @@ async def context_window(req: ContextWindowRequest):
         return {"contextWindow": None, "source": None}
 
     headers = _provider_auth_headers(provider, req.apiUrl,
-                                     _resolve_api_key(req.apiKey))
+                                     _resolve_api_key(req.apiKey, req.apiUrl))
     timeout = httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=30.0)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -5533,7 +5550,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
             and req.apiProvider == AiProvider.openai_compatible):
         _spawn_native_tools_probe(_url_model_key(req.apiUrl, req.model),
                                   req.apiUrl, req.model,
-                                  _resolve_api_key(req.apiKey))
+                                  _resolve_api_key(req.apiKey, req.apiUrl))
 
     messages = _prepare_messages(req.messages,
                                  edit_capable=edit_capable,
@@ -5576,7 +5593,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
     # RESOLVED key: a masked browser session legitimately sends '' while a
     # key sits on disk.
     if not _is_local_provider(req.apiProvider, req.apiUrl) and \
-            not _resolve_api_key(req.apiKey):
+            not _resolve_api_key(req.apiKey, req.apiUrl):
         return {"error": "AI settings not configured. Please configure your API key in settings."}
 
     # ── W8 pre-flight overflow refusal ──
@@ -5612,7 +5629,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
     headers = _provider_auth_headers(
         req.apiProvider.value if hasattr(req.apiProvider, "value") else req.apiProvider,
         req.apiUrl,
-        _resolve_api_key(req.apiKey),
+        _resolve_api_key(req.apiKey, req.apiUrl),
     )
 
     # native_tools was resolved before the pre-flight above (F9) and is
@@ -6932,17 +6949,18 @@ def _mask_settings_api_key(payload: dict) -> dict:
 
 def _restore_sentinel_api_key(payload: dict) -> dict:
     """A save whose apiKey is the masked GET value round-trips the real
-    stored key instead of clobbering it. An explicit '' stays a clear."""
-    def _restore(settings):
-        if isinstance(settings, dict) and \
-                settings.get("apiKey") == API_KEY_STORED_SENTINEL:
-            settings["apiKey"] = _stored_api_key()
-    _restore(payload.get("settings"))
-    conversations = payload.get("conversations")
-    if isinstance(conversations, list):
-        for entry in conversations:
-            if isinstance(entry, dict):
-                _restore(entry.get("settings"))
+    stored key instead of clobbering it. An explicit '' stays a clear.
+
+    Scoped to the top-level settings ONLY (PR #48 review): rewriting the
+    sentinel inside historical conversation snapshots copied the live key
+    into every saved conversation and rewrote history to claim a key that
+    conversation may never have used. Snapshots keep carrying the
+    sentinel; it is resolved at call time like everything else.
+    """
+    settings = payload.get("settings")
+    if isinstance(settings, dict) and \
+            settings.get("apiKey") == API_KEY_STORED_SENTINEL:
+        settings["apiKey"] = _stored_api_key()
     return payload
 
 
