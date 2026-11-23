@@ -5,7 +5,7 @@ from pathlib import Path
 import socket
 import time
 import ipaddress
-from fastapi import FastAPI, Header, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -292,32 +292,43 @@ async def health():
 if FRONTEND_DIST.is_dir():
     app.mount("/assets", StaticFiles(directory=FRONTEND_DIST / "assets"), name="assets")
 
-    @app.get("/{full_path:path}")
-    async def serve_spa(full_path: str):
-        """Serve the SPA index.html for all non-API routes.
 
-        The naive join (`FRONTEND_DIST / full_path`) is an arbitrary file
-        read: percent-encoded %2e%2e segments survive routing and decode
-        here into '..' (PR #48 review A-01, live-probed serving
-        /etc/passwd and the API-key store). Contain to the dist dir;
-        anything else falls back to index.html exactly like a normal
-        SPA route.
-        """
-        if full_path:
-            try:
-                # JOIN FIRST: resolve_within_roots() would otherwise
-                # interpret a relative request path against the process
-                # CWD, breaking every non-mounted static file
-                # (favicon.svg, reference/ — round-2 regression).
-                # Absolute-looking segments are neutralized by Path's
-                # join rule, and containment runs after resolution.
-                candidate = path_containment.resolve_within_roots(
-                    str(FRONTEND_DIST / full_path), [FRONTEND_DIST])
-            except ValueError:
-                return FileResponse(FRONTEND_DIST / "index.html")
-            if candidate.is_file():
-                return FileResponse(candidate)
-        return FileResponse(FRONTEND_DIST / "index.html")
+@app.get("/{full_path:path}")
+async def serve_spa(full_path: str):
+    """Serve the SPA index.html for all non-API routes.
+
+    Registered UNCONDITIONALLY (CI parity): the route's EXISTENCE is
+    part of the reviewed surface (method-partial-match 405s and SPA
+    fallback are pinned), so a checkout that hasn't built the
+    frontend must not delete it — dist presence is decided per
+    request, against the current module attribute.
+
+    The naive join (`FRONTEND_DIST / full_path`) is an arbitrary file
+    read: percent-encoded %2e%2e segments survive routing and decode
+    here into '..' (PR #48 review A-01, live-probed serving
+    /etc/passwd and the API-key store). Contain to the dist dir;
+    anything else falls back to index.html exactly like a normal
+    SPA route.
+    """
+    index = FRONTEND_DIST / "index.html"
+    if not index.is_file():
+        # Nothing built to serve: the honest answer is 404, not shell.
+        raise HTTPException(status_code=404, detail="Not Found")
+    if full_path:
+        try:
+            # JOIN FIRST: resolve_within_roots() would otherwise
+            # interpret a relative request path against the process
+            # CWD, breaking every non-mounted static file
+            # (favicon.svg, reference/ — round-2 regression).
+            # Absolute-looking segments are neutralized by Path's
+            # join rule, and containment runs after resolution.
+            candidate = path_containment.resolve_within_roots(
+                str(FRONTEND_DIST / full_path), [FRONTEND_DIST])
+        except ValueError:
+            return FileResponse(index)
+        if candidate.is_file():
+            return FileResponse(candidate)
+    return FileResponse(index)
 
 
 if __name__ == "__main__":

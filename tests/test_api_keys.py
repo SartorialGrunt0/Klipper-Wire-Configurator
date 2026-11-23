@@ -101,7 +101,7 @@ def test_list_key_metadata_never_leaks_values(key_store):
 
 # ── routes ────────────────────────────────────────────────────────────
 
-def test_route_create_list_replace_delete(key_store):
+def test_route_create_list_replace_delete(key_store, tmp_path, monkeypatch):
     # PR #48 D-2: the reveal route is GONE — no endpoint serves an
     # existing value. Replace rotates in place and shows the fresh
     # value once. This pin asserts the dead route STAYS dead.
@@ -122,6 +122,13 @@ def test_route_create_list_replace_delete(key_store):
     # Starlette answers 405, not 404. Both answers are value-free: 405
     # is a bare JSON error, and the GET fallthrough serves index.html,
     # never a key. What is pinned is that NO verb ever yields the value.
+    # The shell is a temp dist, not the repo's: CI checkouts ship no
+    # built frontend, and the pin must mean the same thing everywhere.
+    import main as main_mod
+    dist = tmp_path / 'dist'
+    dist.mkdir()
+    (dist / 'index.html').write_text('<html>SPA</html>')
+    monkeypatch.setattr(main_mod, 'FRONTEND_DIST', dist)
     dead = client.post(f'/api/native/api-keys/{key_id}/reveal')
     assert dead.status_code == 405 and key not in dead.text
     sham = client.get(f'/api/native/api-keys/{key_id}/reveal')
