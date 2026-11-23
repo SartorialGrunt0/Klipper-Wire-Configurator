@@ -2,7 +2,9 @@
 (security-work 3.2-3.4).
 
 Gate law (D1): no keys defined -> /api/mcp behaves exactly as today;
->=1 active key -> POST /api/mcp over HTTP must carry a valid X-Api-Key.
+>=1 active key -> POST /api/mcp over HTTP must authenticate with
+`Authorization: Bearer <key>` (the MCP authorization-spec header;
+deliberately bearer-ONLY — one header, zero-config for spec clients).
 The SPA is unaffected (chat calls MCP in-process).
 
 Host law: trusted_clients-style loopback trust does NOT survive DNS
@@ -51,12 +53,30 @@ def test_mcp_requires_key_once_any_exists(key_store):
     entry = api_keys.create_key(name='gate')
     assert client.post('/api/mcp', json=_INIT).status_code == 401
     ok = client.post('/api/mcp', json=_INIT,
-                     headers={'X-Api-Key': entry['key']})
+                     headers={'Authorization': f"Bearer {entry['key']}"})
     assert ok.status_code == 200
     assert 'result' in ok.json()
     assert client.post('/api/mcp', json=_INIT,
-                       headers={'X-Api-Key': 'kwc_deadbeef' + '0' * 20}
+                       headers={'Authorization': 'Bearer kwc_deadbeef' + '0' * 20}
                        ).status_code == 401
+
+
+def test_mcp_is_bearer_only(key_store):
+    # Deliberate design (2026-11-23): X-Api-Key is NOT a second accepted
+    # path — MCP-spec clients send Bearer, so one header, no dual support.
+    entry = api_keys.create_key(name='gate')
+    assert client.post('/api/mcp', json=_INIT,
+                       headers={'X-Api-Key': entry['key']}
+                       ).status_code == 401
+    assert client.post('/api/mcp', json=_INIT,
+                       headers={'Authorization': f"bearer {entry['key']}"}
+                       ).status_code == 200          # scheme case-insensitive
+    assert client.post('/api/mcp', json=_INIT,
+                       headers={'Authorization': 'Basic dXNlcjpwdw=='}
+                       ).status_code == 401          # other schemes ignored
+    assert client.post('/api/mcp', json=_INIT,
+                       headers={'Authorization': 'Bearer'}
+                       ).status_code == 401          # no value
 
 
 def test_expired_key_gated_out(key_store):
@@ -64,7 +84,7 @@ def test_expired_key_gated_out(key_store):
         name='gone',
         expires_at=(datetime.now() - timedelta(days=1)).date().isoformat())
     assert client.post('/api/mcp', json=_INIT,
-                       headers={'X-Api-Key': entry['key']}
+                       headers={'Authorization': f"Bearer {entry['key']}"}
                        ).status_code == 401
 
 

@@ -36,8 +36,9 @@ agents (Claude Desktop, scripts, editors) rather than the browser UI:
 
 - **Zero keys defined → open.** The endpoint behaves exactly as it
   always has. The keys feature is opt-in.
-- **One or more keys → `X-Api-Key` required** for that one route.
-  The 401 names the fix (gear menu → Security → Manage Keys).
+- **One or more keys → `Authorization: Bearer <key>` required** for that one route
+  (the MCP authorization-spec header, so spec-following clients need no custom
+  header config). The 401 names the fix (gear menu → Security → Manage Keys).
 
 The KWC web app never authenticates: its AI chat calls the same MCP
 server **in-process**, not over HTTP, so creating a key can never lock

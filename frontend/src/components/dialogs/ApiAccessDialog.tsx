@@ -14,7 +14,9 @@ interface ApiAccessDialogProps {
  *
  * The MCP API Keys section gates ONLY the /api/mcp HTTP surface
  * (decision D1): with no keys the endpoint behaves as it always has;
- * with one or more keys, external MCP clients must send X-Api-Key.
+ * with one or more keys, external MCP clients must authenticate with
+ * `Authorization: Bearer <key>` (the MCP-spec header — spec clients
+ * work with zero custom configuration).
  * The KWC app itself never authenticates — the chat's tool loop calls
  * MCP in-process. Keys are plaintext at rest precisely so they stay
  * re-copyable into client configs; reveal re-shows any key on demand.
@@ -145,7 +147,7 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
           <p className="text-[10px] text-[var(--color-text-secondary)] mb-2">
             {apiKeys.length === 0
               ? 'No keys yet — the MCP endpoint stays open to this network, exactly as before.'
-              : `${apiKeys.length} key${apiKeys.length > 1 ? 's' : ''} active — external MCP clients must send the X-Api-Key header. The KWC app is unaffected.`}
+              : `${apiKeys.length} key${apiKeys.length > 1 ? 's' : ''} active — external MCP clients must send "Authorization: Bearer <key>". The KWC app is unaffected.`}
           </p>
           {apiKeys.map((k) => (
             <div key={k.id} className="flex items-center gap-2 py-1.5 border-b border-[var(--color-bg-tertiary)] last:border-0">
@@ -239,9 +241,9 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
             <summary className="text-[10px] cursor-pointer text-[var(--color-text-secondary)]">
               Client configuration hint
             </summary>
-            <pre className="mt-1 p-2 rounded bg-[var(--color-bg-primary)] text-[10px] font-mono text-[var(--color-text-secondary)] overflow-x-auto">{`// any HTTP MCP client that supports custom headers
+            <pre className="mt-1 p-2 rounded bg-[var(--color-bg-primary)] text-[10px] font-mono text-[var(--color-text-secondary)] overflow-x-auto">{`// any MCP client with a bearer-token field (or custom headers)
 "url": "http://<printer-ip>:8099/api/mcp",
-"headers": { "X-Api-Key": "<key from here>" }`}</pre>
+"headers": { "Authorization": "Bearer <key from here>" }`}</pre>
           </details>
         </div>
 

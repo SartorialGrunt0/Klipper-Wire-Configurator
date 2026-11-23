@@ -149,7 +149,7 @@ mcp_server = McpServer()
 
 
 @app.post("/api/mcp")
-async def mcp_endpoint(request: dict, x_api_key: str = Header(default=None)):
+async def mcp_endpoint(request: dict, authorization: str = Header(default=None)):
     """MCP JSON-RPC endpoint for the /ai/chat proxy and external HTTP clients.
 
     Allows the AI chat proxy to call MCP tools without spawning a subprocess.
@@ -160,14 +160,21 @@ async def mcp_endpoint(request: dict, x_api_key: str = Header(default=None)):
         python -m backend.mcp_server
 
     Gate (security-work D1): with ZERO keys defined this behaves exactly
-    as before; with >=1 key, HTTP callers must send a valid X-Api-Key.
+    as before; with >=1 key, HTTP callers must authenticate with
+    `Authorization: Bearer <key>` — the header the MCP authorization spec
+    prescribes, so spec-following clients work with zero configuration.
     The AI chat never passes through here (in-process shared instance).
     """
-    if api_keys.has_any() and api_keys.validate(x_api_key) is None:
+    bearer_token = None
+    if authorization:
+        scheme, _, value = authorization.partition(" ")
+        if scheme.lower() == "bearer" and value.strip():
+            bearer_token = value.strip()
+    if api_keys.has_any() and api_keys.validate(bearer_token) is None:
         return JSONResponse(status_code=401, content={"error": {
             "code": -32001,
-            "message": "MCP access requires a valid X-Api-Key header. "
-                       "Create one in KWC (gear menu > Security > "
+            "message": "MCP access requires an 'Authorization: Bearer <key>' "
+                       "header. Create a key in KWC (gear menu > Security > "
                        "Manage Keys).",
         }})
     result = mcp_server.handle_jsonrpc(request)

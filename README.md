@@ -159,7 +159,7 @@ KWC follows Moonraker's trusted-LAN posture: no login, no accounts, no TLS
 by design. The one key-gated surface is the MCP endpoint
 (`POST /api/mcp`): with no keys defined it behaves as it always has; after
 you create a key in the gear menu (Security → Manage Keys), external MCP
-clients must send it as `X-Api-Key`. Keys are plaintext on disk (owner-only,
+clients must authenticate with `Authorization: Bearer <key>`. Keys are plaintext on disk (owner-only,
 `0600`) and re-copyable from the dialog by design. The web app itself never
 authenticates, so a key can never lock you out. Environment knobs:
 `KWC_MOONRAKER_API_KEY`, `KWC_EXTRA_CONFIG_DIRS`, `KWC_ALLOWED_HOSTS`.
