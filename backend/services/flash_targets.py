@@ -158,11 +158,19 @@ def _target_default_paths(target: str) -> list[str]:
     return [path.format(user=user) for path in _TARGET_DEFAULT_PATHS[_require_supported_target(target)]]
 
 
-def _candidate_checkout_paths(target: str, requested_path: str | None = None) -> list[Path]:
+def _candidate_checkout_paths(target: str, requested_path: str | None = None,
+                              mutation: bool = False) -> list[Path]:
+    # requested_path is NEVER a candidate (PR #48 round-4). The
+    # FirmwareDialog's custom-checkout field flows through the state
+    # reload (a GET that persists a VALID resolved checkout into
+    # settings), so every later mutation resolves the same tree from
+    # settings — the feature survives; a request-supplied path never
+    # reaches resolution on ANY leg, which is what killed the
+    # POST /apply plant -> exec_module/make chain (both the drive-by
+    # GET leg and the same-origin mutation leg).
     normalized_target = _require_supported_target(target)
     settings = load_settings()
     values = [
-        requested_path,
         settings.get(_target_settings_key(normalized_target)),
         os.environ.get(_target_env_var(normalized_target)),
         *_target_default_paths(normalized_target),
@@ -197,8 +205,15 @@ def _makefile_is_kconfig_project(makefile: Path) -> bool:
         text = makefile.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    return bool(re.search(r"^KCONFIG_CONFIG\s*:?=\s*\S", text, re.M)
-                and re.search(r"^out/", text, re.M))
+    # Shapes from BOTH trees: KCONFIG_CONFIG assignment (with the
+    # optional `export` prefix and any spacing upstream uses) and a
+    # build rule writing into out/ — `$(OUT)`/`$(KCONFIG_OUTPUT)`/
+    # literal `out/` at line start (round-3 regression: stock Klipper
+    # and katapult Makefiles say `export KCONFIG_CONFIG := ...` and
+    # rule lines starting `$(OUT)` — the column-0-only patterns
+    # rejected them and disabled the flash UI on real installs).
+    return bool(re.search(r"^(?:export\s+)?KCONFIG_CONFIG\s*:\s*=\s*\S", text, re.M)
+                and re.search(r"^(?:\$\((?:OUT|KCONFIG_OUTPUT)\)|out/)", text, re.M))
 
 
 def _is_flash_target_checkout(target: str, path: Path) -> bool:
@@ -216,6 +231,15 @@ def _is_flash_target_checkout(target: str, path: Path) -> bool:
     for parts in _target_required_files(target):
         if not path.joinpath(*parts).is_file():
             return False
+    try:
+        # Both real trees' src/Kconfig declares a mainmenu; a lazy
+        # plant stub usually forgets it. Heuristic only — NOT a
+        # security boundary (see set_flash_target_checkout_path).
+        if 'mainmenu' not in (path / 'src' / 'Kconfig').read_text(
+                encoding='utf-8', errors='replace'):
+            return False
+    except OSError:
+        return False
     return _makefile_is_kconfig_project(path / "Makefile")
 
 
@@ -229,10 +253,42 @@ def _persist_checkout_path(target: str, path: Path) -> None:
     save_settings(settings)
 
 
+def set_flash_target_checkout_path(target: str, checkout_path: str | None) -> dict[str, Any]:
+    """Persist a custom checkout location for a flash target.
+
+    This is the ONE sanctioned writer of a request-supplied checkout
+    path (PR #48 round-4, Host-guarded mutation): the path is run
+    through the full identity check BEFORE anything is stored, so a
+    POST /apply-planted tree can never become the resolved checkout.
+    An empty/None path clears the override back to auto-detection.
+    """
+    normalized_target = _require_supported_target(target)
+    settings_key = _target_settings_key(normalized_target)
+    settings = load_settings()
+    normalized = (checkout_path or '').strip()
+    if not normalized:
+        settings.pop(settings_key, None)
+        save_settings(settings)
+        return {"ok": True, "checkout_path": None, "cleared": True}
+    candidate = Path(os.path.expanduser(normalized))
+    if not _is_flash_target_checkout(normalized_target, candidate):
+        return {
+            "ok": False,
+            "error": (
+                f"{_target_display_name(normalized_target)} checkout not found at "
+                f"{candidate}. Expected Makefile, src/Kconfig, and "
+                "lib/kconfiglib/kconfiglib.py."
+            ),
+        }
+    settings[settings_key] = str(candidate)
+    save_settings(settings)
+    return {"ok": True, "checkout_path": str(candidate)}
+
+
 def resolve_flash_target_checkout(target: str, requested_path: str | None = None,
                                   persist: bool = True) -> tuple[Path | None, str | None]:
     normalized_target = _require_supported_target(target)
-    candidates = _candidate_checkout_paths(normalized_target, requested_path)
+    candidates = _candidate_checkout_paths(normalized_target)
     for candidate in candidates:
         if _is_flash_target_checkout(normalized_target, candidate):
             # READ paths must not write settings: two GET routes mutated
@@ -244,13 +300,8 @@ def resolve_flash_target_checkout(target: str, requested_path: str | None = None
             return candidate, None
 
     display_name = _target_display_name(normalized_target)
-    if requested_path:
-        logger.warning("requested %s checkout not found at %s", normalized_target, requested_path)
-        return None, (
-            f"{display_name} checkout not found at {requested_path}. "
-            "Expected Makefile, src/Kconfig, and lib/kconfiglib/kconfiglib.py."
-        )
-
+    # No requested_path branch: the path took no part in resolution,
+    # so error text lists what WAS checked (settings/env/defaults).
     attempted = ", ".join(str(path) for path in candidates) or "no candidate paths"
     logger.warning("%s checkout not found; attempted: %s", normalized_target, attempted)
     return None, (

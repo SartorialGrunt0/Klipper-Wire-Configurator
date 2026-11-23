@@ -690,6 +690,19 @@ export async function getNativeFlashState(
   return request(`/native/flash/${encodeURIComponent(target)}${q}`);
 }
 
+export async function setNativeFlashCheckoutPath(
+  target: FlashTargetKey,
+  checkoutPath: string | null,
+): Promise<{ ok: boolean; checkout_path: string | null; error?: string }> {
+  // The ONLY sanctioned way to point KWC at a custom checkout: the
+  // server validates the tree's identity before storing it. Other
+  // routes' checkout_path params are inert (PR #48 round-4).
+  return request(`/native/flash/${encodeURIComponent(target)}/checkout-path`, {
+    method: 'PUT',
+    body: JSON.stringify({ checkout_path: checkoutPath }),
+  });
+}
+
 export async function getNativeFlashFieldHelp(
   target: FlashTargetKey,
   fieldId: string,

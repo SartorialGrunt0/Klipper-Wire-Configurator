@@ -55,6 +55,7 @@ from services.flash_targets import (
     preview_flash_target_config,
     save_flash_target_config,
     scan_flash_target_devices,
+    set_flash_target_checkout_path,
 )
 
 flash_job_runner = FlashJobRunner()
@@ -482,6 +483,20 @@ def _validated_target(target: str) -> str:
     if normalized not in {"klipper", "katapult"}:
         raise HTTPException(status_code=404, detail=f"Unsupported flash target: {target}")
     return normalized
+
+
+class FlashCheckoutPathUpdate(BaseModel):
+    checkout_path: str | None = None
+
+
+@router.put("/flash/{target}/checkout-path")
+def set_flash_checkout_path(target: str, data: FlashCheckoutPathUpdate):
+    """Register a custom checkout directory (validated by identity
+    before it is stored; empty clears back to auto-detection).
+    Request-supplied checkout_path fields on OTHER routes are inert —
+    this is the only sanctioned writer (PR #48 round-4)."""
+    return set_flash_target_checkout_path(
+        _validated_target(target), data.checkout_path)
 
 
 @router.get("/flash/{target}")
