@@ -181,13 +181,29 @@ def _candidate_checkout_paths(target: str, requested_path: str | None = None) ->
     return result
 
 
+def _makefile_is_kconfig_project(makefile: Path) -> bool:
+    """A genuine Klipper/katapult-family Makefile wires KCONFIG_CONFIG and
+    builds into out/. Existence of Makefile + src/Kconfig + a vendored
+    kconfiglib was the ONLY checkout gate — an unauthenticated caller
+    could plant those three files (apply writes any file type) and the
+    first state read would exec_module() the planted kconfiglib.py and
+    `make` the planted tree (PR #48 B-01). The signatures live in the
+    real project's own Makefile, so a planted stub fails the identity
+    test before anything in the tree is executed."""
+    try:
+        text = makefile.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return "KCONFIG_CONFIG" in text and "out/" in text
+
+
 def _is_flash_target_checkout(target: str, path: Path) -> bool:
     if not path.is_dir():
         return False
     for parts in _target_required_files(target):
         if not path.joinpath(*parts).is_file():
             return False
-    return True
+    return _makefile_is_kconfig_project(path / "Makefile")
 
 
 def _persist_checkout_path(target: str, path: Path) -> None:
@@ -200,12 +216,17 @@ def _persist_checkout_path(target: str, path: Path) -> None:
     save_settings(settings)
 
 
-def resolve_flash_target_checkout(target: str, requested_path: str | None = None) -> tuple[Path | None, str | None]:
+def resolve_flash_target_checkout(target: str, requested_path: str | None = None,
+                                  persist: bool = True) -> tuple[Path | None, str | None]:
     normalized_target = _require_supported_target(target)
     candidates = _candidate_checkout_paths(normalized_target, requested_path)
     for candidate in candidates:
         if _is_flash_target_checkout(normalized_target, candidate):
-            _persist_checkout_path(normalized_target, candidate)
+            # READ paths must not write settings: two GET routes mutated
+            # settings.json through here while the Host guard exempts GET
+            # (PR #48 L-03).
+            if persist:
+                _persist_checkout_path(normalized_target, candidate)
             logger.info("resolved %s checkout: %s", normalized_target, candidate)
             return candidate, None
 
@@ -1109,7 +1130,8 @@ def get_flash_target_state(
 ) -> dict[str, Any]:
     normalized_target = _require_supported_target(target)
     _start = time.monotonic()
-    resolved_path, error = resolve_flash_target_checkout(normalized_target, checkout_path)
+    resolved_path, error = resolve_flash_target_checkout(
+        normalized_target, checkout_path, persist=False)
     if resolved_path is None:
         return _empty_flash_target_state(normalized_target, checkout_path, error)
 
@@ -1231,7 +1253,8 @@ def get_flash_field_help(target: str, field_id: str, checkout_path: str | None =
     frontend to lazy-load help that was truncated by ``help_limit``.
     """
     normalized_target = _require_supported_target(target)
-    resolved_path, error = resolve_flash_target_checkout(normalized_target, checkout_path)
+    resolved_path, error = resolve_flash_target_checkout(
+        normalized_target, checkout_path, persist=False)
     if resolved_path is None:
         return {"field_id": field_id, "help": ""}
     _kconfiglib, kconf, _config_path = _load_target_kconfig_state(normalized_target, resolved_path)
@@ -1251,9 +1274,12 @@ def scan_flash_target_devices(
     Results are cached in-process for ``_DEVICE_SCAN_CACHE_TTL`` seconds so
     repeated calls while the dialog is open are instant.  Pass
     ``force_refresh=True`` to bypass the cache (e.g. from the Refresh button).
+
+    Read path: the checkout resolve must not persist settings from a GET.
     """
     normalized_target = _require_supported_target(target)
-    resolved_path, error = resolve_flash_target_checkout(normalized_target, checkout_path)
+    resolved_path, error = resolve_flash_target_checkout(
+        normalized_target, checkout_path, persist=False)
     if resolved_path is None:
         return {"target": normalized_target, "candidates": [], "error": error, "cached": False}
 
@@ -1977,7 +2003,8 @@ def get_flash_target_artifact_path(target: str, filename: str, checkout_path: st
     if not filename or Path(filename).name != filename:
         raise ValueError("Invalid artifact filename")
 
-    resolved_path, error = resolve_flash_target_checkout(normalized_target, checkout_path)
+    resolved_path, error = resolve_flash_target_checkout(
+        normalized_target, checkout_path, persist=False)
     if resolved_path is None:
         raise FileNotFoundError(error or f"{_target_display_name(normalized_target)} checkout not found")
 
