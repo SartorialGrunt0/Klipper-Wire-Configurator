@@ -2215,9 +2215,13 @@ def _hermetic_ai_files(monkeypatch, tmp_path):
 
 
 def _fill_state_with_key(monkeypatch, tmp_path, key):
+    # apiUrl rides along: key+URL are ONE credential pair (PR #48
+    # round-2) — the settings panel always stores them together, so
+    # every fixture that wants a usable stored key must too.
     (tmp_path / 'state.json').write_text(json.dumps({
         'settings': {'apiKey': key, 'model': 'gpt-4o',
-                     'apiProvider': 'chatgpt'},
+                     'apiProvider': 'chatgpt',
+                     'apiUrl': 'https://api.openai.com/v1/chat/completions'},
         'messages': [],
     }), encoding='utf-8')
 
@@ -2287,10 +2291,15 @@ def test_resolve_api_key_precedence(monkeypatch, tmp_path):
     _fill_state_with_key(monkeypatch, tmp_path, STORED_KEY)
     # Explicit typed key wins.
     assert ai_routes._resolve_api_key('sk-typed') == 'sk-typed'
-    # Sentinel and empty fall through to the server-stored key.
-    assert ai_routes._resolve_api_key(ai_routes.API_KEY_STORED_SENTINEL) == STORED_KEY
-    assert ai_routes._resolve_api_key('') == STORED_KEY
-    assert ai_routes._resolve_api_key(None) == STORED_KEY
+    # Sentinel/empty fall through to the server-stored key WHEN the
+    # call names the saved URL (key+URL are one pair, round-2).
+    SAVED_URL = 'https://api.openai.com/v1/chat/completions'
+    assert ai_routes._resolve_api_key(
+        ai_routes.API_KEY_STORED_SENTINEL, SAVED_URL) == STORED_KEY
+    assert ai_routes._resolve_api_key('', SAVED_URL) == STORED_KEY
+    assert ai_routes._resolve_api_key(None, SAVED_URL) == STORED_KEY
+    # Off-target URL: the stored key never rides along.
+    assert ai_routes._resolve_api_key('', 'https://evil.example/v1') == ''
     # Nothing stored -> empty string (the configured-check arms still fire).
     _fill_state_with_key(monkeypatch, tmp_path, '')
     assert ai_routes._resolve_api_key('') == ''
@@ -2314,7 +2323,9 @@ def test_chat_route_uses_server_stored_key(monkeypatch, tmp_path):
         'messages': [{'role': 'user', 'content': 'Hi'}],
         'apiKey': '',  # browser holds only the masked view
         'model': 'deepseek-chat',
-        'apiUrl': 'https://api.deepseek.com/v1/chat/completions',
+        # Must EQUAL the URL the stored key was saved for — key+URL are
+        # one credential pair now (round-2), off-target means no key.
+        'apiUrl': 'https://api.openai.com/v1/chat/completions',
         'apiProvider': 'openai-compatible',
         'editTools': False,
     })

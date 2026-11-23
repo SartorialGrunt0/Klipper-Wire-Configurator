@@ -73,11 +73,32 @@ def test_provider_key_bound_to_saved_url(tmp_path, monkeypatch):
         '', 'https://api.example.com/v1') == FIX_KEY
     assert ai_routes._resolve_api_key(
         ai_routes.API_KEY_STORED_SENTINEL, 'https://api.example.com/v1') == FIX_KEY
-    # No saved URL at all = no binding (standalone installs unaffected).
+    # No saved URL = the pair is incomplete: resolves to NOTHING
+    # (round-2 amended law — an unbound key is steerable, so it rides
+    # nowhere; the settings panel always saves the pair together).
     state.write_text(json.dumps({'settings': {'apiKey': FIX_KEY}}))
-    assert ai_routes._resolve_api_key('', 'http://anywhere.test/v1') == FIX_KEY
+    assert ai_routes._resolve_api_key('', 'http://anywhere.test/v1') == ''
     # An explicitly typed key always wins over the binding logic.
     assert ai_routes._resolve_api_key('typed-key', 'http://anywhere.test') == 'typed-key'
+
+
+def test_masked_save_cannot_rebind_the_key_url(tmp_path, monkeypatch):
+    """ROUND-2 CRITICAL: GET /ai/state -> POST /ai/state {sentinel,
+    attacker-url} -> empty-key request must not exist as a chain. A
+    save that keeps the masked placeholder cannot move the pair's URL;
+    a URL change must arrive with a real new key in the same save."""
+    state = tmp_path / 'state.json'
+    state.write_text(json.dumps({'settings': {
+        'apiKey': FIX_KEY, 'apiUrl': 'https://api.example.com/v1'}}))
+    monkeypatch.setattr(ai_routes, 'AI_STATE_FILE', state)
+    payload = {'settings': {'apiKey': ai_routes.API_KEY_STORED_SENTINEL,
+                            'apiUrl': 'http://203.0.113.66:9999/v1'}}
+    out = ai_routes._restore_sentinel_api_key(payload)
+    assert out['settings']['apiUrl'] == 'https://api.example.com/v1'
+    assert out['settings']['apiKey'] == FIX_KEY
+    # Legit rotation (fresh key + new URL in one save) still works:
+    payload = {'settings': {'apiKey': 'sk-fresh', 'apiUrl': 'https://new.test/v1'}}
+    assert ai_routes._restore_sentinel_api_key(payload)['settings']['apiUrl'] == 'https://new.test/v1'
 
 
 def test_history_save_does_not_spread_key_into_snapshots(tmp_path, monkeypatch):
@@ -115,6 +136,17 @@ def test_spa_catchall_cannot_read_outside_dist(tmp_path, monkeypatch):
     assert 'root:' not in r.text
     # Legit SPA routes still get the shell:
     assert '<html>SPA</html>' in client.get('/some/spa/route').text
+    # ...and REAL files inside dist are STILL SERVED (round-2:
+    # resolving the raw request path against the process CWD turned
+    # favicon.svg and the whole reference/ tree into index.html).
+    (dist / 'favicon.svg').write_text('<svg>ICON</svg>')
+    (dist / 'reference').mkdir()
+    (dist / 'reference' / 'examples.json').write_text('{"eg": true}')
+    r = client.get('/favicon.svg')
+    assert '<svg>ICON</svg>' in r.text
+    assert 'must-never-be-served' not in r.text
+    r = client.get('/reference/examples.json')
+    assert '{"eg": true}' in r.text
 
 
 # ── A-02: corrupt key store fails the gate CLOSED ────────────────────────
@@ -281,6 +313,57 @@ def test_planted_checkout_not_executed(tmp_path):
     assert flash_targets._is_flash_target_checkout('klipper', evil) is False
 
 
+def test_spoofed_makefile_signature_rejected(tmp_path):
+    """ROUND-2 CRITICAL: the round-1 signature ('KCONFIG_CONFIG' and
+    'out/' appearing ANYWHERE) was spoofed by a 3-line Makefile. The
+    patterns now match the real Makefile's shape (an assignment at the
+    start of a line, an out/ build rule) and the checkout path must be
+    symlink-free."""
+    evil = tmp_path / 'evil'
+    (evil / 'src').mkdir(parents=True)
+    (evil / 'lib' / 'kconfiglib').mkdir(parents=True)
+    # The exact round-2 bypass Makefile:
+    (evil / 'Makefile').write_text('# KCONFIG_CONFIG = .config\nall:\n\tmkdir -p out/\n')
+    (evil / 'src' / 'Kconfig').write_text('mainmenu "planted"\n')
+    (evil / 'lib' / 'kconfiglib' / 'kconfiglib.py').write_text(
+        'raise RuntimeError("must never load")\n')
+    assert flash_targets._is_flash_target_checkout('klipper', evil) is False
+    # A symlink swapped in for a signature-valid tree is still not it:
+    real = tmp_path / 'real'
+    link = tmp_path / 'link'
+    real.mkdir()
+    link.symlink_to(real)
+    assert flash_targets._is_flash_target_checkout('klipper', link) is False
+
+
+def test_read_paths_ignore_user_checkout_path(monkeypatch, tmp_path):
+    """ROUND-2 CRITICAL: the planted tree was reached via a GET query
+    parameter checkout_path= — reads must resolve from settings/env/
+    defaults ONLY (mutations keep the explicit path, Host-guarded)."""
+    box = {}
+    monkeypatch.setattr(flash_targets, 'load_settings', lambda: dict(box))
+    monkeypatch.setattr(flash_targets, 'save_settings',
+                        lambda s: box.clear() or box.update(s))
+    monkeypatch.setattr(flash_targets, 'get_flash_target_state',
+                        lambda *a, **k: {})   # state body irrelevant here
+    evil = tmp_path / 'evil'
+    evil.mkdir()
+    requested = []
+
+    def spy(target, checkout_path=None, persist=True):
+        requested.append(checkout_path)
+        return None, 'not found'
+    monkeypatch.setattr(flash_targets, 'resolve_flash_target_checkout', spy)
+    flash_targets.get_flash_target_state('klipper', str(evil))
+    flash_targets.get_flash_field_help('klipper', 'CONFIG_X', str(evil))
+    flash_targets.scan_flash_target_devices('klipper', str(evil))
+    try:
+        flash_targets.get_flash_target_artifact_path('klipper', 'klipper.bin', str(evil))
+    except FileNotFoundError:
+        pass   # the honest outcome of an unresolved checkout
+    assert requested and all(p is None for p in requested)
+
+
 # ── B-03: Host guard decides by IP parse, not string prefix ──────────────
 
 def test_host_guard_rejects_loopback_prefix_names():
@@ -350,6 +433,7 @@ def test_moonraker_answered_but_unreadable_is_unknown(monkeypatch):
         ('malformed-body', _FakeResp(200, None)),
         ('empty-status', _FakeResp(200, {'result': {'status': {}}})),
         ('print_stats-not-dict', _FakeResp(200, {'result': {'status': {'print_stats': 'garbage'}}})),
+        ('print_stats-empty', _FakeResp(200, {'result': {'status': {'print_stats': {}}}})),
     ]
     for label, resp in shapes:
         st = _moonraker_shape(monkeypatch, resp=resp)
@@ -380,3 +464,45 @@ def test_token_put_preserves_stored_config_path(monkeypatch, tmp_path):
     assert box['config_path'] == str(cfg)                  # preserved
     assert r.json()['moonraker_key_set'] is True
     assert 'moonraker_api_key' not in r.json()             # never served
+
+
+def test_apply_validates_deletes_before_writing(monkeypatch, tmp_path):
+    """ROUND-2: a mixed request wrote its files and THEN 400'd on an
+    escaping delete — partial application on a 'rejected' request.
+    Containment is now validated for deletes up front: 400 means
+    nothing was touched."""
+    cfg = tmp_path / 'cfg'
+    cfg.mkdir()
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    victim = outside / 'victim.cfg'
+    victim.write_text('important')
+    (cfg / 'evildir').symlink_to(outside)
+    _settings_store(monkeypatch, tmp_path, {'config_path': str(cfg)})
+    r = client.post('/api/native/apply', json={
+        'files': {'ok.cfg': 'WRITTEN'}, 'deleted': ['evildir/victim.cfg']})
+    assert r.status_code == 400
+    assert not (cfg / 'ok.cfg').exists()          # write never happened
+    assert victim.read_text() == 'important'
+
+
+def test_settings_save_is_atomic_and_owner_only(tmp_path, monkeypatch):
+    """ROUND-2 MINOR: save_settings wrote 0644-then-chmod — the exact
+    create window A-05 retired for api_keys.json. Same temp+replace,
+    same 0600."""
+    box = tmp_path / 'cfgdir'
+    box.mkdir()
+    monkeypatch.setattr(native_services, '_settings_file',
+                        lambda: box / 'settings.json')
+    native_services.save_settings({'config_path': '/x'})
+    f = box / 'settings.json'
+    assert stat.S_IMODE(f.stat().st_mode) == 0o600
+    real_replace = os.replace
+    monkeypatch.setattr(native_services.os, 'replace',
+                        lambda *a, **k: (_ for _ in ()).throw(OSError('ENOSPC')))
+    with pytest.raises(OSError):
+        native_services.save_settings({'config_path': '/y'})
+    monkeypatch.setattr(native_services.os, 'replace', real_replace)
+    import json as _json
+    assert _json.loads(f.read_text())['config_path'] == '/x'  # prior state intact
+    assert list(box.glob('settings.json.tmp.*')) == []        # no temp litter
