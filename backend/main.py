@@ -305,8 +305,14 @@ if FRONTEND_DIST.is_dir():
         """
         if full_path:
             try:
+                # JOIN FIRST: resolve_within_roots() would otherwise
+                # interpret a relative request path against the process
+                # CWD, breaking every non-mounted static file
+                # (favicon.svg, reference/ — round-2 regression).
+                # Absolute-looking segments are neutralized by Path's
+                # join rule, and containment runs after resolution.
                 candidate = path_containment.resolve_within_roots(
-                    full_path, [FRONTEND_DIST])
+                    str(FRONTEND_DIST / full_path), [FRONTEND_DIST])
             except ValueError:
                 return FileResponse(FRONTEND_DIST / "index.html")
             if candidate.is_file():
