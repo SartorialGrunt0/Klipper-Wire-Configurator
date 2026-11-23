@@ -431,8 +431,11 @@ export async function createApiKey(
   });
 }
 
-export async function revealApiKey(id: string): Promise<{ key: string; name: string }> {
-  return request(`/native/api-keys/${id}/reveal`, { method: 'POST' });
+export async function replaceApiKey(id: string): Promise<{ id: string; name: string; key: string; expires_at: string | null }> {
+  // Rotate in place: the route that replaced reveal (PR #48 D-2). The
+  // backend serves NO existing value anymore — this returns the FRESH
+  // one-time value of the rotated row.
+  return request(`/native/api-keys/${id}/replace`, { method: 'POST' });
 }
 
 export async function deleteApiKey(id: string): Promise<{ status: string }> {
@@ -440,12 +443,15 @@ export async function deleteApiKey(id: string): Promise<{ status: string }> {
 }
 
 export async function updateNativeSettings(
-  configPath: string,
+  configPath?: string,
   moonrakerApiKey?: string,
 ): Promise<{ config_path: string; moonraker_key_set: boolean }> {
-  // moonrakerApiKey omitted = keep the stored token (the backend never
-  // serves the value back; '' clears it explicitly).
-  const body: Record<string, string> = { config_path: configPath };
+  // configPath omitted = keep the stored path — a token-only save must
+  // never ship the store's startup default over the real config root
+  // (PR #48 L-01). moonrakerApiKey omitted = keep the stored token (the
+  // backend never serves the value back; '' clears it explicitly).
+  const body: Record<string, string> = {};
+  if (configPath !== undefined) body.config_path = configPath;
   if (moonrakerApiKey !== undefined) body.moonraker_api_key = moonrakerApiKey;
   return request('/native/settings', { method: 'PUT', body: JSON.stringify(body) });
 }

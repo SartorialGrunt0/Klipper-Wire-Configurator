@@ -30,8 +30,9 @@ interface NativeStore {
   refreshKeys: () => Promise<void>;
   /** Create a key; resolves to its full value (shown once, copy now). */
   createKey: (name: string, expiresAt: string | null) => Promise<string | null>;
-  /** Ask the backend for a stored key's value again (Manage Keys reveal). */
-  revealKey: (id: string) => Promise<string | null>;
+  /** Rotate a key in place; resolves to the FRESH value (shown once).
+   *  Replaces reveal: the backend serves no existing value anymore. */
+  replaceKey: (id: string) => Promise<string | null>;
   /** Delete a key; false when the backend rejected it. */
   removeKey: (id: string) => Promise<boolean>;
   /** Refresh the device list */
@@ -76,10 +77,15 @@ export const useNativeStore = create<NativeStore>((set, get) => ({
   },
 
   setMoonrakerApiKey: async (token: string) => {
-    // config_path rides along because the PUT replaces the settings
-    // object; the token field is explicit ('' clears).
-    const updated = await api.updateNativeSettings(get().configPath, token);
+    // config_path is deliberately NOT sent: the store's copy is only
+    // ever as fresh as the startup read, and shipping a stale default
+    // would silently repoint the server's config root (PR #48 L-01).
+    // Omitting the field preserves it. Token field is explicit ('' clears).
+    const updated = await api.updateNativeSettings(undefined, token);
     set({ moonrakerKeySet: Boolean(updated.moonraker_key_set) });
+    if (typeof updated.config_path === 'string' && updated.config_path) {
+      set({ configPath: updated.config_path });
+    }
   },
 
   refreshKeys: async () => {
@@ -100,9 +106,11 @@ export const useNativeStore = create<NativeStore>((set, get) => ({
     }
   },
 
-  revealKey: async (id) => {
+  replaceKey: async (id) => {
     try {
-      return (await api.revealApiKey(id)).key;
+      const rotated = await api.replaceApiKey(id);
+      await get().refreshKeys();
+      return rotated.key;
     } catch {
       return null;
     }

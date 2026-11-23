@@ -19,8 +19,10 @@ interface ApiAccessDialogProps {
  * `Authorization: Bearer <key>` (the MCP-spec header — spec clients
  * work with zero custom configuration).
  * The KWC app itself never authenticates — the chat's tool loop calls
- * MCP in-process. Keys are plaintext at rest precisely so they stay
- * re-copyable into client configs; reveal re-shows any key on demand.
+ * MCP in-process. A key's value is shown EXACTLY ONCE, at creation or
+ * rotation: no route serves an existing value anymore (PR #48 D-2 —
+ * reveal was removed for exactly that reason). Lost a key? Rotate it
+ * with Replace and copy the fresh value.
  */
 export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
   const moonrakerKeySet = useNativeStore((s) => s.moonrakerKeySet);
@@ -34,12 +36,11 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
   const apiKeys = useNativeStore((s) => s.apiKeys);
   const refreshKeys = useNativeStore((s) => s.refreshKeys);
   const createKey = useNativeStore((s) => s.createKey);
-  const revealKey = useNativeStore((s) => s.revealKey);
+  const replaceKey = useNativeStore((s) => s.replaceKey);
   const removeKey = useNativeStore((s) => s.removeKey);
   const [keyName, setKeyName] = useState('');
   const [keyExpiry, setKeyExpiry] = useState('');
-  const [createdKey, setCreatedKey] = useState<string | null>(null);
-  const [revealed, setRevealed] = useState<Record<string, string>>({});
+  const [freshKey, setFreshKey] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -50,13 +51,22 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
   const addKey = useCallback(async () => {
     const value = await createKey(keyName.trim(), keyExpiry || null);
     if (value) {
-      setCreatedKey(value);
+      setFreshKey(value);
       setKeyName('');
       setKeyExpiry('');
     } else {
       setError('Could not create the key — see the backend log.');
     }
   }, [createKey, keyName, keyExpiry]);
+
+  const rotate = useCallback(async (id: string) => {
+    const value = await replaceKey(id);
+    if (value) {
+      setFreshKey(value);
+    } else {
+      setError('Could not rotate the key — see the backend log.');
+    }
+  }, [replaceKey]);
 
   const copy = useCallback((text: string, id: string) => {
     // copyText() has the non-secure-context fallback; navigator.clipboard
@@ -65,7 +75,7 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
     // promise resolves true — no lying feedback.
     void copyText(text).then((ok) => {
       if (!ok) {
-        setError('Copy failed — reveal the key and select it manually.');
+        setError('Copy failed — select the key text below and copy it manually.');
         return;
       }
       setCopiedId(id);
@@ -167,7 +177,7 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
                   {k.expired && <span className="ml-2 text-[10px] text-[var(--color-error)]">expired</span>}
                 </div>
                 <div className="text-[10px] font-mono text-[var(--color-text-secondary)] truncate">
-                  {revealed[k.id] ?? k.key_prefix}
+                  {k.key_prefix}
                   {k.expires_at && !k.expired && (
                     <span className="font-sans"> · until {k.expires_at.slice(0, 10)}</span>
                   )}
@@ -178,26 +188,13 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
               </div>
               <button
                 type="button"
-                onClick={() => (revealed[k.id]
-                  ? setRevealed((cur) => {
-                      const next = { ...cur };
-                      delete next[k.id];
-                      return next;
-                    })
-                  : void revealKey(k.id).then((v) => v && setRevealed((cur) => ({ ...cur, [k.id]: v }))))}
+                aria-label={`Replace key ${k.name || k.id}`}
+                title="Rotate the value in place (the new value is shown once)"
+                onClick={() => void rotate(k.id)}
                 className="px-2 py-1 rounded text-[10px] font-medium border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-primary)] transition-colors"
               >
-                {revealed[k.id] ? 'Hide' : 'Reveal'}
+                Replace
               </button>
-              {revealed[k.id] && (
-                <button
-                  type="button"
-                  onClick={() => copy(revealed[k.id], k.id)}
-                  className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-accent)] text-[var(--color-bg-primary)] hover:opacity-90 transition-opacity"
-                >
-                  {copiedId === k.id ? 'Copied' : 'Copy'}
-                </button>
-              )}
               <button
                 type="button"
                 aria-label={`Delete key ${k.name || k.id}`}
@@ -208,16 +205,17 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
               </button>
             </div>
           ))}
-          {createdKey && (
+          {freshKey && (
             <div className="mt-2 p-2 rounded-lg border border-[var(--color-accent)] bg-[var(--color-bg-primary)]">
               <div className="text-[10px] text-[var(--color-text-secondary)] mb-1">
-                New key — paste it into your MCP client's headers. You can re-copy it here anytime.
+                Copy it now — this value is shown once and cannot be re-displayed.
+                Paste it into your MCP client's headers. Lost it? Replace rotates it in place.
               </div>
               <div className="flex items-center gap-2">
-                <code className="flex-1 text-xs font-mono text-[var(--color-text-primary)] break-all">{createdKey}</code>
+                <code className="flex-1 text-xs font-mono text-[var(--color-text-primary)] break-all">{freshKey}</code>
                 <button
                   type="button"
-                  onClick={() => copy(createdKey, 'new')}
+                  onClick={() => copy(freshKey, 'new')}
                   className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-accent)] text-[var(--color-bg-primary)] hover:opacity-90 whitespace-nowrap transition-opacity"
                 >
                   {copiedId === 'new' ? 'Copied' : 'Copy'}
