@@ -52,6 +52,7 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
     const value = await createKey(keyName.trim(), keyExpiry || null);
     if (value) {
       setFreshKey(value);
+      setCopiedId(null);
       setKeyName('');
       setKeyExpiry('');
     } else {
@@ -63,6 +64,7 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
     const value = await replaceKey(id);
     if (value) {
       setFreshKey(value);
+      setCopiedId(null);
     } else {
       setError('Could not rotate the key — see the backend log.');
     }
@@ -198,7 +200,13 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
               <button
                 type="button"
                 aria-label={`Delete key ${k.name || k.id}`}
-                onClick={() => void removeKey(k.id)}
+                onClick={() => {
+                  // A deleted value is dead — the copy-once banner must
+                  // not outlive the row it belongs to (round-2).
+                  setFreshKey(null);
+                  setCopiedId(null);
+                  void removeKey(k.id);
+                }}
                 className="px-2 py-1 rounded text-[10px] font-medium border border-[var(--color-bg-tertiary)] text-[var(--color-error)] hover:bg-[var(--color-bg-primary)] transition-colors"
               >
                 Delete
