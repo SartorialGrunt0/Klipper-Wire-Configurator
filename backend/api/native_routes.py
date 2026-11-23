@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from parser.config_parser import parse_config
 from parser.config_writer import smart_export
 from parser.validator import validate_project_configs
-from services import path_containment
+from services import api_keys, path_containment
 from services.board_detector import detect_board_from_config
 from services.native_services import (
     delete_flash_profile,
@@ -126,6 +126,48 @@ async def update_settings(data: ConfigPathUpdate):
         settings["moonraker_api_key"] = data.moonraker_api_key
     save_settings(settings)
     return _masked_settings(settings)
+
+
+# ── MCP API keys (Manage Keys) ─────────────────────────────────
+# These keys gate the MCP HTTP endpoint ONLY (decision D1) — never the
+# app. Values appear only in create/reveal responses; the list is
+# metadata. Recovery story: create a new one here, any time.
+
+
+class ApiKeyCreate(BaseModel):
+    name: str = ""
+    # None = never expires (the default on purpose: expiry is opt-in so a
+    # forgotten date can't lock out a fleet agent by surprise).
+    expires_at: str | None = None
+
+
+@router.get("/api-keys")
+async def list_api_keys():
+    return {"keys": api_keys.list_key_metadata()}
+
+
+@router.post("/api-keys")
+async def create_api_key(data: ApiKeyCreate):
+    try:
+        return api_keys.create_key(name=data.name, expires_at=data.expires_at)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api-keys/{key_id}/reveal")
+async def reveal_api_key(key_id: str):
+    entry = api_keys.get_key(key_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="No such key")
+    return {"key": entry["key"], "name": entry.get("name", ""),
+            "expires_at": entry.get("expires_at")}
+
+
+@router.delete("/api-keys/{key_id}")
+async def delete_api_key(key_id: str):
+    if not api_keys.delete_key(key_id):
+        raise HTTPException(status_code=404, detail="No such key")
+    return {"status": "deleted"}
 
 
 # ── Config files from the host ──────────────────────────────────

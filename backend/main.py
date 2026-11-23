@@ -2,7 +2,10 @@
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from fastapi import FastAPI
+import socket
+import time
+import ipaddress
+from fastapi import FastAPI, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -13,6 +16,7 @@ from api.ai_routes import router as ai_router
 from api.printer_memory_routes import router as printer_memory_router
 from api.macro_log_routes import router as macro_log_router
 from mcp_server import McpServer, get_index
+from services import api_keys
 from services.mainsail_sidebar import self_heal_sidebar
 from services.native_services import is_native_platform, OFF_HOST_WARNING
 from fastapi.responses import JSONResponse
@@ -55,20 +59,97 @@ async def _app_lifespan(app: FastAPI):
 
 app = FastAPI(title="Klipper Wire Configurator", version="1.0.0", lifespan=_app_lifespan)
 
+# allow_credentials=False: KWC has no cookie auth, and wildcard+credentials
+# is both invalid CORS and an invitation for foreign pages to ride the
+# user's session (security-work 3.4).
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# ── DNS-rebinding Host guard (security-work 3.3) ────────────────────
+# Loopback trust survives a shared LAN but NOT DNS rebinding: a rebound
+# drive-by request ARRIVES as loopback with an attacker Host header. So
+# state-changing requests must additionally name THIS machine. ON
+# regardless of any key.
+
+_MUTATING_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
+_LOCAL_HOSTS_TTL_S = 60.0
+_local_hosts_cache: tuple[float, set] = (0.0, set())
+
+
+def _extra_allowed() -> set:
+    return {h.strip().lower()
+            for h in os.environ.get("KWC_ALLOWED_HOSTS", "").split(",")
+            if h.strip()}
+
+
+def _local_host_values() -> set:
+    global _local_hosts_cache
+    now = time.monotonic()
+    if now - _local_hosts_cache[0] < _LOCAL_HOSTS_TTL_S and _local_hosts_cache[1]:
+        return _local_hosts_cache[1]
+    values = {"localhost", "::1", "127.0.0.1"}
+    try:
+        name = socket.gethostname().lower()
+        values.add(name)
+        values.add(name + ".local")  # mDNS alias of THIS name only
+        infos = socket.gethostbyname_ex(name)
+        values.update(v.lower() for v in (infos[0], *infos[1], *infos[2])
+                      if isinstance(v, str))
+    except OSError:
+        pass
+    _local_hosts_cache = (now, values)
+    return values
+
+
+def _host_is_local(host_header: str, local_values: set) -> bool:
+    h = (host_header or "").strip().lower()
+    if h.startswith("["):
+        end = h.find("]")
+        h = h[:end] if end != -1 else h
+    elif ":" in h and h.rsplit(":", 1)[1].isdigit():
+        h = h.rsplit(":", 1)[0]
+    h = h.strip("[]")
+    return h in local_values or h.startswith("127.")
+
+
+def _host_guard_blocks(method: str, client_host, host_header: str,
+                       local_values: set) -> bool:
+    if method.upper() not in _MUTATING_METHODS:
+        return False
+    if client_host is None:
+        return False
+    try:
+        ipaddress.ip_address(str(client_host))
+    except ValueError:
+        # Not a real socket address (in-process harness) — not a threat.
+        return False
+    host = (host_header or "").split(",")[0]
+    return not _host_is_local(host, local_values | _extra_allowed())
+
+
+@app.middleware("http")
+async def host_guard_middleware(request: Request, call_next):
+    client_host = request.client.host if request.client else None
+    if _host_guard_blocks(request.method, client_host,
+                          request.headers.get("host", ""),
+                          _local_host_values()):
+        return JSONResponse(status_code=403, content={"detail":
+            "Host header does not name this machine (DNS-rebinding "
+            "guard). Reaching KWC through a name or proxy? Add it to "
+            "KWC_ALLOWED_HOSTS."})
+    return await call_next(request)
 
 # ── Shared MCP server instance (embedded, zero extra RAM) ──
 mcp_server = McpServer()
 
 
 @app.post("/api/mcp")
-async def mcp_endpoint(request: dict):
+async def mcp_endpoint(request: dict, x_api_key: str = Header(default=None)):
     """MCP JSON-RPC endpoint for the /ai/chat proxy and external HTTP clients.
 
     Allows the AI chat proxy to call MCP tools without spawning a subprocess.
@@ -77,7 +158,18 @@ async def mcp_endpoint(request: dict):
 
     For stdio-based MCP clients (Claude Desktop, etc.):
         python -m backend.mcp_server
+
+    Gate (security-work D1): with ZERO keys defined this behaves exactly
+    as before; with >=1 key, HTTP callers must send a valid X-Api-Key.
+    The AI chat never passes through here (in-process shared instance).
     """
+    if api_keys.has_any() and api_keys.validate(x_api_key) is None:
+        return JSONResponse(status_code=401, content={"error": {
+            "code": -32001,
+            "message": "MCP access requires a valid X-Api-Key header. "
+                       "Create one in KWC (gear menu > Security > "
+                       "Manage Keys).",
+        }})
     result = mcp_server.handle_jsonrpc(request)
     if result is None:
         return JSONResponse(content={}, status_code=202)

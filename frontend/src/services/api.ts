@@ -408,6 +408,37 @@ export async function getNativeSettings(): Promise<{ config_path: string; moonra
   return request('/native/settings');
 }
 
+export interface ApiKeyMeta {
+  id: string;
+  name: string;
+  key_prefix: string;
+  created_at: string | null;
+  expires_at: string | null;
+  expired: boolean;
+  last_used_at: string | null;
+}
+
+export async function getApiKeys(): Promise<{ keys: ApiKeyMeta[] }> {
+  return request('/api/native/api-keys');
+}
+
+export async function createApiKey(
+  name: string, expiresAt: string | null):
+  Promise<{ id: string; name: string; key: string; expires_at: string | null }> {
+  return request('/api/native/api-keys', {
+    method: 'POST',
+    body: JSON.stringify({ name, expires_at: expiresAt })
+  });
+}
+
+export async function revealApiKey(id: string): Promise<{ key: string; name: string }> {
+  return request(`/api/native/api-keys/${id}/reveal`, { method: 'POST' });
+}
+
+export async function deleteApiKey(id: string): Promise<{ status: string }> {
+  return request(`/api/native/api-keys/${id}`, { method: 'DELETE' });
+}
+
 export async function updateNativeSettings(
   configPath: string,
   moonrakerApiKey?: string,

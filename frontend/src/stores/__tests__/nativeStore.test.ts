@@ -4,7 +4,16 @@ const api = vi.hoisted(() => ({
   getNativeStatus: vi.fn(),
   getNativeSettings: vi.fn(),
   updateNativeSettings: vi.fn(),
+  getApiKeys: vi.fn(),
+  createApiKey: vi.fn(),
+  revealApiKey: vi.fn(),
+  deleteApiKey: vi.fn(),
 }));
+
+const meta = (id: string, expired = false) => ({
+  id, name: id, key_prefix: `kwc_${id}…`, created_at: 'now',
+  expires_at: null, expired, last_used_at: null,
+});
 
 vi.mock('../../services/api', () => api);
 
@@ -51,5 +60,55 @@ describe('nativeStore moonraker key state (security-work 2.2)', () => {
     expect(api.updateNativeSettings).toHaveBeenCalledWith(
       '/printer_data/config', '');
     expect(useNativeStore.getState().moonrakerKeySet).toBe(false);
+  });
+});
+
+describe('nativeStore MCP key actions (security-work 3.4)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useNativeStore.setState({ apiKeys: [] });
+  });
+
+  it('refreshKeys loads masked rows only', async () => {
+    api.getApiKeys.mockResolvedValue({ keys: [meta('a1')] });
+    await useNativeStore.getState().refreshKeys();
+    expect(useNativeStore.getState().apiKeys).toEqual([meta('a1')]);
+  });
+
+  it('createKey returns the full value once, then refreshes the list', async () => {
+    api.createApiKey.mockResolvedValue({ id: 'b2', name: 'n', key: 'kwc_full', expires_at: null });
+    api.getApiKeys.mockResolvedValue({ keys: [meta('b2')] });
+    const value = await useNativeStore.getState().createKey('n', null);
+    expect(value).toBe('kwc_full');
+    expect(api.createApiKey).toHaveBeenCalledWith('n', null);
+    expect(useNativeStore.getState().apiKeys[0].id).toBe('b2');
+    // The full value never enters the stored rows:
+    expect(JSON.stringify(useNativeStore.getState().apiKeys)).not.toContain('kwc_full');
+  });
+
+  it('createKey failure resolves to null without touching the list', async () => {
+    api.createApiKey.mockRejectedValue(new Error('400 bad expiry'));
+    expect(await useNativeStore.getState().createKey('n', 'bad')).toBeNull();
+    expect(api.getApiKeys).not.toHaveBeenCalled();
+  });
+
+  it('revealKey returns the value or null', async () => {
+    api.revealApiKey.mockResolvedValue({ key: 'kwc_full', name: 'a1' });
+    expect(await useNativeStore.getState().revealKey('a1')).toBe('kwc_full');
+    api.revealApiKey.mockRejectedValue(new Error('404'));
+    expect(await useNativeStore.getState().revealKey('zz')).toBeNull();
+  });
+
+  it('removeKey deletes then refreshes; failure keeps the rows and says false', async () => {
+    useNativeStore.setState({ apiKeys: [meta('a1'), meta('b2')] });
+    api.deleteApiKey.mockResolvedValue({ status: 'deleted' });
+    api.getApiKeys.mockResolvedValue({ keys: [meta('a1')] });
+    expect(await useNativeStore.getState().removeKey('b2')).toBe(true);
+    expect(useNativeStore.getState().apiKeys).toEqual([meta('a1')]);
+
+    api.deleteApiKey.mockRejectedValue(new Error('500'));
+    expect(await useNativeStore.getState().removeKey('a1')).toBe(false);
+    expect(api.getApiKeys).toHaveBeenCalledTimes(1);  // no refresh after failure
+    expect(useNativeStore.getState().apiKeys).toEqual([meta('a1')]);
   });
 });

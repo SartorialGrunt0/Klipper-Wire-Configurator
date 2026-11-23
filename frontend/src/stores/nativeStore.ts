@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import * as api from '../services/api';
-import type { DeviceList, CanbusQueryResult } from '../services/api';
+import type { DeviceList, CanbusQueryResult, ApiKeyMeta } from '../services/api';
 
 interface NativeStore {
   /** Config directory path on the printer host */
@@ -17,12 +17,23 @@ interface NativeStore {
   /** Whether a Moonraker API token is stored on the server (value never sent) */
   moonrakerKeySet: boolean;
 
+  /** MCP API keys (metadata only; values never live in the store) */
+  apiKeys: ApiKeyMeta[];
+
   /** Load the active config path from the backend on startup */
   loadConfigPath: () => Promise<void>;
   /** Re-read the masked native settings (token presence flag). */
   refreshKeyState: () => Promise<void>;
   /** Store (string) or clear ('') the Moonraker token. */
   setMoonrakerApiKey: (token: string) => Promise<void>;
+  /** Reload the MCP key list (masked rows only). */
+  refreshKeys: () => Promise<void>;
+  /** Create a key; resolves to its full value (shown once, copy now). */
+  createKey: (name: string, expiresAt: string | null) => Promise<string | null>;
+  /** Ask the backend for a stored key's value again (Manage Keys reveal). */
+  revealKey: (id: string) => Promise<string | null>;
+  /** Delete a key; false when the backend rejected it. */
+  removeKey: (id: string) => Promise<boolean>;
   /** Refresh the device list */
   refreshDevices: () => Promise<void>;
   /** Update the config path */
@@ -44,6 +55,7 @@ export const useNativeStore = create<NativeStore>((set, get) => ({
   canbusQuery: null,
   canbusQueryLoading: false,
   moonrakerKeySet: false,
+  apiKeys: [],
 
   loadConfigPath: async () => {
     try {
@@ -68,6 +80,42 @@ export const useNativeStore = create<NativeStore>((set, get) => ({
     // object; the token field is explicit ('' clears).
     const updated = await api.updateNativeSettings(get().configPath, token);
     set({ moonrakerKeySet: Boolean(updated.moonraker_key_set) });
+  },
+
+  refreshKeys: async () => {
+    try {
+      set({ apiKeys: (await api.getApiKeys()).keys });
+    } catch {
+      // Off-host or backend down: the dialog shows an empty list.
+    }
+  },
+
+  createKey: async (name, expiresAt) => {
+    try {
+      const created = await api.createApiKey(name, expiresAt);
+      await get().refreshKeys();
+      return created.key;
+    } catch {
+      return null;
+    }
+  },
+
+  revealKey: async (id) => {
+    try {
+      return (await api.revealApiKey(id)).key;
+    } catch {
+      return null;
+    }
+  },
+
+  removeKey: async (id) => {
+    try {
+      await api.deleteApiKey(id);
+    } catch {
+      return false;
+    }
+    await get().refreshKeys();
+    return true;
   },
 
   refreshDevices: async () => {

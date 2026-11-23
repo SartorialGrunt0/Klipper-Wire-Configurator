@@ -652,7 +652,7 @@ export default function Toolbar({
               }}
               className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-medium border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-primary)] hover:text-[var(--color-text-primary)] transition-colors"
             >
-              API Access…
+              Manage Keys…
             </button>
           </div>
 
