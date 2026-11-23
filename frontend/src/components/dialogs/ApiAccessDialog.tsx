@@ -37,7 +37,7 @@ function InfoDot({ children, label }: { children: React.ReactNode; label: string
         i
       </button>
       <span
-        className={`absolute left-5 top-0 z-10 w-64 p-2 rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-xl text-[10px] font-normal normal-case tracking-normal text-[var(--color-text-secondary)] ${
+        className={`absolute left-5 top-0 z-10 w-[340px] p-2.5 rounded-lg border border-[var(--color-bg-tertiary)] bg-[var(--color-bg-secondary)] shadow-xl text-[10px] font-normal normal-case tracking-normal text-[var(--color-text-secondary)] ${
           open ? 'block' : 'hidden group-hover:block'
         }`}
       >
@@ -241,7 +241,7 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
                   <code className="font-mono">/api/mcp</code>. With none, the endpoint stays open
                   to this network. The KWC app itself is unaffected.
                 </div>
-                <pre className="p-1.5 rounded bg-[var(--color-bg-primary)] font-mono overflow-x-auto">{`"url": "http://<printer-ip>:8099/api/mcp",
+                <pre className="p-2 rounded bg-[var(--color-bg-primary)] font-mono whitespace-pre-wrap break-all">{`"url": "http://<printer-ip>:8099/api/mcp",
 "headers": { "Authorization": "Bearer <key>" }`}</pre>
               </InfoDot>
             </label>
