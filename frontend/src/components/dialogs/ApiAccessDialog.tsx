@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import Modal from '../Modal';
 import { useNativeStore } from '../../stores/nativeStore';
+import { copyText } from '../../utils/clipboard';
 
 interface ApiAccessDialogProps {
   onClose: () => void;
@@ -58,9 +59,18 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
   }, [createKey, keyName, keyExpiry]);
 
   const copy = useCallback((text: string, id: string) => {
-    void navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    window.setTimeout(() => setCopiedId((c) => (c === id ? null : c)), 1500);
+    // copyText() has the non-secure-context fallback; navigator.clipboard
+    // does NOT exist on the plain-HTTP LAN origin (the printer-host case)
+    // and calling it directly dies silently there. 'Copied' only after the
+    // promise resolves true — no lying feedback.
+    void copyText(text).then((ok) => {
+      if (!ok) {
+        setError('Copy failed — reveal the key and select it manually.');
+        return;
+      }
+      setCopiedId(id);
+      window.setTimeout(() => setCopiedId((c) => (c === id ? null : c)), 1500);
+    });
   }, []);
 
   const save = useCallback(async () => {
