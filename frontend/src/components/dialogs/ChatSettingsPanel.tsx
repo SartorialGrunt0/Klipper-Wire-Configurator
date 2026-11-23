@@ -9,6 +9,7 @@
  */
 import React, { useState, useEffect, useRef, type Dispatch, type SetStateAction } from 'react';
 import { useAiStore, AiProvider, providerRequiresApiKey } from '../../stores/aiStore';
+import { isServerStoredKey } from '../../utils/apiKeyMask';
 import * as api from '../../services/api';
 import {
   PROVIDER_OPTIONS,
@@ -295,7 +296,9 @@ const ChatSettingsPanel: React.FC<ChatSettingsPanelProps> = ({
       />
       <p className="text-[10px] text-[var(--color-text-secondary)] mt-1">
         {providerRequiresApiKey(editApiProvider)
-          ? 'Your API key is stored only in your browser'
+          ? isServerStoredKey(settings.apiKey)
+            ? 'Stored on the server — leave empty to keep it, paste a new key to replace it'
+            : 'Stored on the server — once saved, the value is never re-sent to the browser'
           : isLocalProvider(editApiProvider)
             ? 'Optional for local servers — required for cloud APIs (DeepSeek, OpenRouter, ...)'
             : 'Optional — only needed if your local server requires authentication'}

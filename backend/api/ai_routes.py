@@ -5005,6 +5005,28 @@ def _props_url_from_chat_url(api_url: str) -> str:
     return urlunparse((parsed.scheme, parsed.netloc, "/props", "", "", ""))
 
 
+def _stored_api_key() -> str:
+    """The provider key persisted in state.json, or '' when none is set."""
+    settings = _load_ai_json(AI_STATE_FILE).get("settings")
+    key = settings.get("apiKey") if isinstance(settings, dict) else None
+    return key.strip() if isinstance(key, str) else ""
+
+
+def _resolve_api_key(request_key: str | None) -> str:
+    """The provider key a request should actually use.
+
+    An explicitly typed key (non-empty, not the GET /ai/state placeholder)
+    wins; anything else — including the sentinel the masked GET response
+    hands the browser and the plain '' a reloaded page sends — falls back
+    to the server-stored key. This is what lets /ai/state withhold the
+    key value without breaking a single provider call.
+    """
+    key = (request_key or "").strip()
+    if key and key != API_KEY_STORED_SENTINEL:
+        return key
+    return _stored_api_key()
+
+
 def _provider_auth_headers(provider: str, api_url: str, api_key: str) -> dict:
     """Build auth headers for the configured provider.
 
@@ -5043,7 +5065,8 @@ async def list_models(req: ModelsRequest):
     if not models_url:
         return {"models": []}
 
-    headers = _provider_auth_headers(provider, req.apiUrl, req.apiKey)
+    headers = _provider_auth_headers(provider, req.apiUrl,
+                                     _resolve_api_key(req.apiKey))
     timeout = httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=30.0)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -5098,7 +5121,8 @@ async def reasoning_levels(req: ReasoningLevelsRequest):
     if not props_url:
         return {"levels": [], "source": None}
 
-    headers = _provider_auth_headers(provider, req.apiUrl, req.apiKey)
+    headers = _provider_auth_headers(provider, req.apiUrl,
+                                     _resolve_api_key(req.apiKey))
     timeout = httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=30.0)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -5271,7 +5295,8 @@ async def context_window(req: ContextWindowRequest):
     if not models_url:
         return {"contextWindow": None, "source": None}
 
-    headers = _provider_auth_headers(provider, req.apiUrl, req.apiKey)
+    headers = _provider_auth_headers(provider, req.apiUrl,
+                                     _resolve_api_key(req.apiKey))
     timeout = httpx.Timeout(connect=15.0, read=30.0, write=30.0, pool=30.0)
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -5507,7 +5532,8 @@ async def chat_proxy(req: ChatRequest, request: Request):
             and req.toolProtocol == "auto" and _blind is None
             and req.apiProvider == AiProvider.openai_compatible):
         _spawn_native_tools_probe(_url_model_key(req.apiUrl, req.model),
-                                  req.apiUrl, req.model, req.apiKey)
+                                  req.apiUrl, req.model,
+                                  _resolve_api_key(req.apiKey))
 
     messages = _prepare_messages(req.messages,
                                  edit_capable=edit_capable,
@@ -5546,8 +5572,11 @@ async def chat_proxy(req: ChatRequest, request: Request):
         req.requestId or "none",
     )
 
-    # Local providers don't require an API key
-    if not _is_local_provider(req.apiProvider, req.apiUrl) and not req.apiKey:
+    # Local providers don't require an API key. The check runs against the
+    # RESOLVED key: a masked browser session legitimately sends '' while a
+    # key sits on disk.
+    if not _is_local_provider(req.apiProvider, req.apiUrl) and \
+            not _resolve_api_key(req.apiKey):
         return {"error": "AI settings not configured. Please configure your API key in settings."}
 
     # ── W8 pre-flight overflow refusal ──
@@ -5583,7 +5612,7 @@ async def chat_proxy(req: ChatRequest, request: Request):
     headers = _provider_auth_headers(
         req.apiProvider.value if hasattr(req.apiProvider, "value") else req.apiProvider,
         req.apiUrl,
-        req.apiKey,
+        _resolve_api_key(req.apiKey),
     )
 
     # native_tools was resolved before the pre-flight above (F9) and is
@@ -6873,27 +6902,78 @@ def _save_ai_json(file_path: Path, payload: dict) -> None:
     )
 
 
+# ── Server-stored provider key ─────────────────────────────────────────
+# The provider key lives ONLY on disk. GET responses replace it with this
+# sentinel (plus a hasApiKey flag); every provider call resolves the real
+# value server-side via _resolve_api_key. A browser that has seen the
+# sentinel can never leak the key value it never received.
+
+API_KEY_STORED_SENTINEL = "server-stored"
+
+
+def _mask_settings_api_key(payload: dict) -> dict:
+    """Mask apiKey inside payload.settings and settings snapshots nested
+    in conversation entries (history entries carry a full settings copy)."""
+    def _mask(settings):
+        if isinstance(settings, dict):
+            key = settings.get("apiKey")
+            has_key = isinstance(key, str) and bool(key.strip())
+            settings["hasApiKey"] = has_key
+            if has_key:
+                settings["apiKey"] = API_KEY_STORED_SENTINEL
+    _mask(payload.get("settings"))
+    conversations = payload.get("conversations")
+    if isinstance(conversations, list):
+        for entry in conversations:
+            if isinstance(entry, dict):
+                _mask(entry.get("settings"))
+    return payload
+
+
+def _restore_sentinel_api_key(payload: dict) -> dict:
+    """A save whose apiKey is the masked GET value round-trips the real
+    stored key instead of clobbering it. An explicit '' stays a clear."""
+    def _restore(settings):
+        if isinstance(settings, dict) and \
+                settings.get("apiKey") == API_KEY_STORED_SENTINEL:
+            settings["apiKey"] = _stored_api_key()
+    _restore(payload.get("settings"))
+    conversations = payload.get("conversations")
+    if isinstance(conversations, list):
+        for entry in conversations:
+            if isinstance(entry, dict):
+                _restore(entry.get("settings"))
+    return payload
+
+
 @router.get("/ai/state")
 async def get_ai_state() -> dict:
-    """Load the saved AI settings and in-progress conversation."""
-    return _load_ai_json(AI_STATE_FILE)
+    """Load the saved AI settings and in-progress conversation.
+
+    The stored provider key is never served — see API_KEY_STORED_SENTINEL.
+    """
+    return _mask_settings_api_key(_load_ai_json(AI_STATE_FILE))
 
 
 @router.post("/ai/state")
 async def save_ai_state(payload: dict) -> dict:
     """Persist AI settings and the in-progress conversation to disk."""
-    _save_ai_json(AI_STATE_FILE, payload)
+    _save_ai_json(AI_STATE_FILE, _restore_sentinel_api_key(payload))
     return {"status": "saved"}
 
 
 @router.get("/ai/history")
 async def get_ai_history() -> dict:
-    """Load the saved chat history (list of conversations)."""
-    return _load_ai_json(AI_HISTORY_FILE)
+    """Load the saved chat history (list of conversations).
+
+    Conversation entries snapshot settings, so the provider key is masked
+    here too — history is otherwise a second cleartext channel.
+    """
+    return _mask_settings_api_key(_load_ai_json(AI_HISTORY_FILE))
 
 
 @router.post("/ai/history")
 async def save_ai_history(payload: dict) -> dict:
     """Persist the saved chat history to disk."""
-    _save_ai_json(AI_HISTORY_FILE, payload)
+    _save_ai_json(AI_HISTORY_FILE, _restore_sentinel_api_key(payload))
     return {"status": "saved"}

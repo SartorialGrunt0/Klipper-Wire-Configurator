@@ -75,6 +75,12 @@ export interface MessageContextUsage {
 
 export interface AiSettings {
   apiKey: string;
+  /**
+   * View-only flag from GET /ai/state: a key is stored on the server and
+   * the apiKey field carries the sentinel instead of the value (the key
+   * value never travels to the browser again). See utils/apiKeyMask.
+   */
+  hasApiKey?: boolean;
   model: string;
   providerModels: ProviderModels;
   apiUrl: string;

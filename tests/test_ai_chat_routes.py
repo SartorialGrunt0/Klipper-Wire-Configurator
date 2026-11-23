@@ -2196,6 +2196,151 @@ def test_build_executed_tool_call_handles_non_json_arguments():
     assert 'raw' in record['arguments']
 
 
+# ── Server-stored provider key (masked /ai/state + /ai/history) ────────
+# GET /ai/state must never hand a stored provider key to a caller (the
+# whole LAN could read it). The response carries a sentinel + hasApiKey;
+# every provider call resolves the real key server-side.
+
+STORED_KEY = 'sk-server-stored-DO-NOT-LEAK'
+
+
+@pytest.fixture(autouse=True)
+def _hermetic_ai_files(monkeypatch, tmp_path):
+    # Isolate every test from the developer's real state/history files:
+    # with the resolver's fallback they are inputs now, so they must be
+    # empty unless a test explicitly fills them.
+    monkeypatch.setattr(ai_routes, 'AI_DATA_DIR', tmp_path)
+    monkeypatch.setattr(ai_routes, 'AI_STATE_FILE', tmp_path / 'state.json')
+    monkeypatch.setattr(ai_routes, 'AI_HISTORY_FILE', tmp_path / 'history.json')
+
+
+def _fill_state_with_key(monkeypatch, tmp_path, key):
+    (tmp_path / 'state.json').write_text(json.dumps({
+        'settings': {'apiKey': key, 'model': 'gpt-4o',
+                     'apiProvider': 'chatgpt'},
+        'messages': [],
+    }), encoding='utf-8')
+
+
+def test_ai_state_get_masks_stored_key(monkeypatch, tmp_path):
+    _fill_state_with_key(monkeypatch, tmp_path, STORED_KEY)
+    resp = client.get('/ai/state')
+    assert resp.status_code == 200
+    assert resp.json()['settings']['apiKey'] == ai_routes.API_KEY_STORED_SENTINEL
+    assert resp.json()['settings']['hasApiKey'] is True
+    assert STORED_KEY not in resp.text
+    # The read must not mutate the file.
+    assert STORED_KEY in (tmp_path / 'state.json').read_text()
+
+
+def test_ai_state_get_without_key_flags_unconfigured(monkeypatch, tmp_path):
+    _fill_state_with_key(monkeypatch, tmp_path, '')
+    resp = client.get('/ai/state')
+    assert resp.json()['settings']['apiKey'] == ''
+    assert resp.json()['settings']['hasApiKey'] is False
+
+
+def test_ai_state_post_sentinel_preserves_stored_key(monkeypatch, tmp_path):
+    _fill_state_with_key(monkeypatch, tmp_path, STORED_KEY)
+    resp = client.post('/ai/state', json={
+        'settings': {'apiKey': ai_routes.API_KEY_STORED_SENTINEL,
+                     'model': 'gpt-4o'},
+        'messages': [],
+    })
+    assert resp.status_code == 200
+    assert STORED_KEY in (tmp_path / 'state.json').read_text()
+
+
+def test_ai_state_post_typed_key_replaces_stored(monkeypatch, tmp_path):
+    _fill_state_with_key(monkeypatch, tmp_path, STORED_KEY)
+    client.post('/ai/state', json={
+        'settings': {'apiKey': 'sk-brand-new'}, 'messages': [],
+    })
+    saved = json.loads((tmp_path / 'state.json').read_text())
+    assert saved['settings']['apiKey'] == 'sk-brand-new'
+
+
+def test_ai_state_post_empty_string_clears_key(monkeypatch, tmp_path):
+    # Explicit clear (the user wiped the field) must NOT be swallowed by
+    # the sentinel-preservation rule.
+    _fill_state_with_key(monkeypatch, tmp_path, STORED_KEY)
+    client.post('/ai/state', json={'settings': {'apiKey': ''}, 'messages': []})
+    saved = json.loads((tmp_path / 'state.json').read_text())
+    assert saved['settings']['apiKey'] == ''
+
+
+def test_ai_history_get_masks_stored_key(monkeypatch, tmp_path):
+    # Conversation entries snapshot settings — history is a second
+    # cleartext channel unless it is masked too.
+    client.post('/ai/history', json={'conversations': [
+        {'id': 'c1', 'settings': {'apiKey': STORED_KEY}, 'messages': []},
+    ]})
+    resp = client.get('/ai/history')
+    entry = resp.json()['conversations'][0]
+    assert entry['settings']['apiKey'] == ai_routes.API_KEY_STORED_SENTINEL
+    assert STORED_KEY not in resp.text
+
+
+def test_resolve_api_key_precedence(monkeypatch, tmp_path):
+    # The sentinel is a cross-language contract constant — pin the value.
+    assert ai_routes.API_KEY_STORED_SENTINEL == 'server' + '-' + 'stored'
+    _fill_state_with_key(monkeypatch, tmp_path, STORED_KEY)
+    # Explicit typed key wins.
+    assert ai_routes._resolve_api_key('sk-typed') == 'sk-typed'
+    # Sentinel and empty fall through to the server-stored key.
+    assert ai_routes._resolve_api_key(ai_routes.API_KEY_STORED_SENTINEL) == STORED_KEY
+    assert ai_routes._resolve_api_key('') == STORED_KEY
+    assert ai_routes._resolve_api_key(None) == STORED_KEY
+    # Nothing stored -> empty string (the configured-check arms still fire).
+    _fill_state_with_key(monkeypatch, tmp_path, '')
+    assert ai_routes._resolve_api_key('') == ''
+
+
+def test_chat_route_uses_server_stored_key(monkeypatch, tmp_path):
+    _fill_state_with_key(monkeypatch, tmp_path, STORED_KEY)
+    monkeypatch.setattr(ai_routes, 'load_printer_memory', lambda: PrinterMemory())
+    captured = {}
+
+    def fake_post(url, headers, payload):
+        captured['headers'] = headers
+        return DummyResponse(
+            {'choices': [{'message': {'content': 'Stored key answer.'}}]},
+            url=url,
+        )
+
+    monkeypatch.setattr(httpx, 'AsyncClient',
+                        lambda *a, **k: FakeAsyncClient(post_handler=fake_post))
+    resp = client.post('/ai/chat', json={
+        'messages': [{'role': 'user', 'content': 'Hi'}],
+        'apiKey': '',  # browser holds only the masked view
+        'model': 'deepseek-chat',
+        'apiUrl': 'https://api.deepseek.com/v1/chat/completions',
+        'apiProvider': 'openai-compatible',
+        'editTools': False,
+    })
+    assert resp.status_code == 200
+    assert resp.json()['content'] == 'Stored key answer.'
+    assert captured['headers'].get('Authorization') == f'Bearer {STORED_KEY}'
+
+
+def test_models_route_uses_server_stored_key(monkeypatch, tmp_path):
+    _fill_state_with_key(monkeypatch, tmp_path, STORED_KEY)
+
+    def fake_get(url, headers):
+        assert headers.get('Authorization') == f'Bearer {STORED_KEY}'
+        return DummyResponse({'data': [{'id': 'gpt-4o'}]}, method='GET', url=url)
+
+    monkeypatch.setattr(httpx, 'AsyncClient',
+                        lambda *a, **k: FakeAsyncClient(get_handler=fake_get))
+    resp = client.post('/ai/models', json={
+        'apiKey': '',
+        'apiUrl': 'https://api.openai.com/v1/chat/completions',
+        'apiProvider': 'chatgpt',
+    })
+    assert resp.status_code == 200
+    assert resp.json() == {'models': ['gpt-4o']}
+
+
 # ── AI state + history file storage ───────────────────────────────────
 
 def test_ai_state_roundtrip(monkeypatch, tmp_path):
@@ -2210,7 +2355,8 @@ def test_ai_state_roundtrip(monkeypatch, tmp_path):
     assert saved.status_code == 200
     assert saved.json() == {'status': 'saved'}
     assert client.get('/ai/state').json() == {
-        'settings': {'model': 'gpt-4o', 'apiProvider': 'chatgpt'},
+        'settings': {'model': 'gpt-4o', 'apiProvider': 'chatgpt',
+                     'hasApiKey': False},
         'messages': [{'role': 'user', 'content': 'hello'}],
     }
 
