@@ -103,7 +103,7 @@ def test_get_flash_target_state_keeps_dynamic_serial_candidates_in_scan_results(
 
     monkeypatch.setattr(
         'services.flash_targets.resolve_flash_target_checkout',
-        lambda target, checkout_path=None: (tmp_path, None),
+        lambda target, checkout_path=None, **kw: (tmp_path, None),
     )
     monkeypatch.setattr(
         'services.flash_targets._load_target_kconfig_state',
@@ -155,7 +155,7 @@ def test_get_flash_target_state_keeps_dynamic_serial_candidates_in_scan_results(
 def test_get_flash_target_state_keeps_dynamic_dfu_candidates_in_scan_results(monkeypatch, tmp_path):
     monkeypatch.setattr(
         'services.flash_targets.resolve_flash_target_checkout',
-        lambda target, checkout_path=None: (tmp_path, None),
+        lambda target, checkout_path=None, **kw: (tmp_path, None),
     )
     monkeypatch.setattr(
         'services.flash_targets._load_target_kconfig_state',
@@ -198,7 +198,7 @@ def test_get_flash_target_state_keeps_dynamic_dfu_candidates_in_scan_results(mon
 def test_get_flash_target_state_surfaces_rp2040_candidates_for_katapult(monkeypatch, tmp_path):
     monkeypatch.setattr(
         'services.flash_targets.resolve_flash_target_checkout',
-        lambda target, checkout_path=None: (tmp_path, None),
+        lambda target, checkout_path=None, **kw: (tmp_path, None),
     )
     monkeypatch.setattr(
         'services.flash_targets._load_target_kconfig_state',
@@ -230,7 +230,7 @@ def test_get_flash_target_state_keeps_dynamic_can_candidates_in_scan_results(mon
 
     monkeypatch.setattr(
         'services.flash_targets.resolve_flash_target_checkout',
-        lambda target, checkout_path=None: (tmp_path, None),
+        lambda target, checkout_path=None, **kw: (tmp_path, None),
     )
     monkeypatch.setattr(
         'services.flash_targets._load_target_kconfig_state',
@@ -289,7 +289,7 @@ def test_flash_target_uses_flashtool_for_can_uuid(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         'services.flash_targets.resolve_flash_target_checkout',
-        lambda target, checkout_path=None: (tmp_path, None),
+        lambda target, checkout_path=None, **kw: (tmp_path, None),
     )
     monkeypatch.setattr(
         'services.flash_targets.get_flash_target_state',
@@ -360,7 +360,7 @@ def test_flash_target_auto_selects_method_from_serial_device(monkeypatch, tmp_pa
 
     monkeypatch.setattr(
         'services.flash_targets.resolve_flash_target_checkout',
-        lambda target, checkout_path=None: (tmp_path, None),
+        lambda target, checkout_path=None, **kw: (tmp_path, None),
     )
     monkeypatch.setattr(
         'services.flash_targets.get_flash_target_state',
@@ -436,7 +436,7 @@ def test_delete_flash_target_artifact_removes_file(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         'services.flash_targets.resolve_flash_target_checkout',
-        lambda target, checkout_path=None: (tmp_path, None),
+        lambda target, checkout_path=None, **kw: (tmp_path, None),
     )
 
     result = delete_flash_target_artifact('klipper', 'klipper.bin', str(tmp_path))
@@ -461,7 +461,8 @@ def _fake_checkout(tmp_path, config_text: str | None = None) -> Path:
 def _monkeypatch_state_deps(monkeypatch, checkout: Path, config_text: str | None):
     monkeypatch.setattr(
         'services.flash_targets.resolve_flash_target_checkout',
-        lambda target, checkout_path=None: (checkout, None),
+        # **kw: read paths pass persist=False (PR #48 B-01 read-path fix).
+        lambda target, checkout_path=None, **kw: (checkout, None),
     )
     monkeypatch.setattr('services.flash_targets._serialize_kconfig_fields', lambda kconfiglib, kconf, help_limit=0: [])
     monkeypatch.setattr('services.flash_targets.list_usb_serial_devices', lambda: [])
@@ -516,7 +517,7 @@ def test_get_flash_target_state_passes_help_limit_to_serializer(monkeypatch, tmp
     config_path.write_text('CONFIG_MACH_AVR=y\n', encoding='utf-8')
     monkeypatch.setattr(
         'services.flash_targets.resolve_flash_target_checkout',
-        lambda target, checkout_path=None: (tmp_path, None),
+        lambda target, checkout_path=None, **kw: (tmp_path, None),
     )
     monkeypatch.setattr(
         'services.flash_targets._load_target_kconfig_state',
@@ -555,7 +556,7 @@ def test_get_flash_field_help_returns_full_text_for_symbol(monkeypatch, tmp_path
 
     monkeypatch.setattr(
         'services.flash_targets.resolve_flash_target_checkout',
-        lambda target, checkout_path=None: (tmp_path, None),
+        lambda target, checkout_path=None, **kw: (tmp_path, None),
     )
     monkeypatch.setattr(
         'services.flash_targets._load_target_kconfig_state',
@@ -575,7 +576,7 @@ def test_get_flash_field_help_resolves_choice_ids(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         'services.flash_targets.resolve_flash_target_checkout',
-        lambda target, checkout_path=None: (tmp_path, None),
+        lambda target, checkout_path=None, **kw: (tmp_path, None),
     )
     monkeypatch.setattr(
         'services.flash_targets._load_target_kconfig_state',
@@ -592,7 +593,7 @@ def test_get_flash_field_help_returns_empty_for_unknown(monkeypatch, tmp_path):
 
     monkeypatch.setattr(
         'services.flash_targets.resolve_flash_target_checkout',
-        lambda target, checkout_path=None: (tmp_path, None),
+        lambda target, checkout_path=None, **kw: (tmp_path, None),
     )
     monkeypatch.setattr(
         'services.flash_targets._load_target_kconfig_state',
@@ -759,7 +760,7 @@ def test_plan_flash_flash_job_wraps_commands_with_klipper_service(monkeypatch, t
     checkout.mkdir()
     (checkout / '.config').write_text('CONFIG_MACH_STM32=y\n', encoding='utf-8')
 
-    monkeypatch.setattr(flash_targets, 'resolve_flash_target_checkout', lambda target, path: (checkout, None))
+    monkeypatch.setattr(flash_targets, 'resolve_flash_target_checkout', lambda target, path=None, **kw: (checkout, None))
     monkeypatch.setattr(flash_targets, 'get_flash_target_state', lambda target, path: {
         'flash_supported': True,
         'flash_reason': None,
@@ -789,7 +790,7 @@ def test_plan_flash_flash_job_skips_klipper_stop_for_dfu_util(monkeypatch, tmp_p
     checkout.mkdir()
     (checkout / '.config').write_text('CONFIG_MACH_STM32=y\n', encoding='utf-8')
 
-    monkeypatch.setattr(flash_targets, 'resolve_flash_target_checkout', lambda target, path: (checkout, None))
+    monkeypatch.setattr(flash_targets, 'resolve_flash_target_checkout', lambda target, path=None, **kw: (checkout, None))
     monkeypatch.setattr(flash_targets, 'get_flash_target_state', lambda target, path: {
         'flash_supported': True,
         'flash_reason': None,
@@ -823,7 +824,7 @@ def test_plan_flash_flash_job_skips_klipper_stop_for_usb_id_make_flash(monkeypat
     checkout.mkdir()
     (checkout / '.config').write_text('CONFIG_MACH_RPXXXX=y\n', encoding='utf-8')
 
-    monkeypatch.setattr(flash_targets, 'resolve_flash_target_checkout', lambda target, path: (checkout, None))
+    monkeypatch.setattr(flash_targets, 'resolve_flash_target_checkout', lambda target, path=None, **kw: (checkout, None))
     monkeypatch.setattr(flash_targets, 'get_flash_target_state', lambda target, path: {
         'flash_supported': True,
         'flash_reason': None,
@@ -854,7 +855,7 @@ def test_plan_flash_flash_job_fails_fast_when_klipper_active_but_no_sudo(monkeyp
     checkout.mkdir()
     (checkout / '.config').write_text('CONFIG_MACH_STM32=y\n', encoding='utf-8')
 
-    monkeypatch.setattr(flash_targets, 'resolve_flash_target_checkout', lambda target, path: (checkout, None))
+    monkeypatch.setattr(flash_targets, 'resolve_flash_target_checkout', lambda target, path=None, **kw: (checkout, None))
     monkeypatch.setattr(flash_targets, 'get_flash_target_state', lambda target, path: {
         'flash_supported': True,
         'flash_reason': None,
@@ -884,7 +885,7 @@ def test_plan_flash_flash_job_skips_klipper_service_when_inactive(monkeypatch, t
     checkout.mkdir()
     (checkout / '.config').write_text('CONFIG_MACH_STM32=y\n', encoding='utf-8')
 
-    monkeypatch.setattr(flash_targets, 'resolve_flash_target_checkout', lambda target, path: (checkout, None))
+    monkeypatch.setattr(flash_targets, 'resolve_flash_target_checkout', lambda target, path=None, **kw: (checkout, None))
     monkeypatch.setattr(flash_targets, 'get_flash_target_state', lambda target, path: {
         'flash_supported': True,
         'flash_reason': None,
@@ -933,7 +934,8 @@ def test_flash_flash_target_runs_cleanup_after_main_commands(monkeypatch, tmp_pa
 
     monkeypatch.setattr(
         'services.flash_targets.resolve_flash_target_checkout',
-        lambda target, checkout_path=None: (checkout, None),
+        # **kw: read paths pass persist=False (PR #48 B-01 read-path fix).
+        lambda target, checkout_path=None, **kw: (checkout, None),
     )
     monkeypatch.setattr(
         'services.flash_targets.get_flash_target_state',

@@ -126,36 +126,49 @@ function isChatMessage(value: unknown): value is ChatMessage {
 }
 
 function loadPersistedState(): { settings: Partial<AiSettings>; messages: ChatMessage[] } {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as PersistedAiState | Partial<AiSettings>;
-      if (parsed && typeof parsed === 'object' && ('settings' in parsed || 'messages' in parsed)) {
-        const persisted = parsed as PersistedAiState;
+  // PR #48: these localStorage blobs are migration SOURCES only — the
+  // server holds state now, and a pre-masking copy of these keys held
+  // the provider key IN PLAINTEXT. Nothing writes them any more, so
+  // after this one read they are wiped: no cleartext key residue for
+  // XSS or a shared machine's DevTools to find.
+  const migrate = (): { settings: Partial<AiSettings>; messages: ChatMessage[] } => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as PersistedAiState | Partial<AiSettings>;
+        if (parsed && typeof parsed === 'object' && ('settings' in parsed || 'messages' in parsed)) {
+          const persisted = parsed as PersistedAiState;
+          return {
+            settings: persisted.settings ?? {},
+            messages: Array.isArray(persisted.messages) ? persisted.messages.filter(isChatMessage) : [],
+          };
+        }
         return {
-          settings: persisted.settings ?? {},
-          messages: Array.isArray(persisted.messages) ? persisted.messages.filter(isChatMessage) : [],
+          settings: parsed as Partial<AiSettings>,
+          messages: [],
         };
       }
-      return {
-        settings: parsed as Partial<AiSettings>,
-        messages: [],
-      };
-    }
 
-    const legacyRaw = localStorage.getItem(LEGACY_SETTINGS_KEY);
-    if (legacyRaw) {
-      return {
-        settings: JSON.parse(legacyRaw) as Partial<AiSettings>,
-        messages: [],
-      };
-    }
-  } catch {}
+      const legacyRaw = localStorage.getItem(LEGACY_SETTINGS_KEY);
+      if (legacyRaw) {
+        return {
+          settings: JSON.parse(legacyRaw) as Partial<AiSettings>,
+          messages: [],
+        };
+      }
+    } catch {}
 
-  return {
-    settings: {},
-    messages: [],
+    return {
+      settings: {},
+      messages: [],
+    };
   };
+  const migrated = migrate();
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+    localStorage.removeItem(LEGACY_SETTINGS_KEY);
+  } catch {}
+  return migrated;
 }
 
 function validateToolCallDetail(value: unknown): value is AiToolCallDetail {

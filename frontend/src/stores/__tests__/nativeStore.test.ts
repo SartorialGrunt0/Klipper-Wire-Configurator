@@ -6,7 +6,7 @@ const api = vi.hoisted(() => ({
   updateNativeSettings: vi.fn(),
   getApiKeys: vi.fn(),
   createApiKey: vi.fn(),
-  revealApiKey: vi.fn(),
+  replaceApiKey: vi.fn(),
   deleteApiKey: vi.fn(),
 }));
 
@@ -42,14 +42,18 @@ describe('nativeStore moonraker key state (security-work 2.2)', () => {
     expect(useNativeStore.getState().moonrakerKeySet).toBe(false);
   });
 
-  it('setMoonrakerApiKey PUTs the token alongside the config path', async () => {
+  it('setMoonrakerApiKey PUTs the token WITHOUT the config path (L-01)', async () => {
+    // Shipping the store's configPath copy could repoint the server's
+    // containment root with a stale default; the field is omitted and
+    // the server's stored value is authoritative, echoed back.
     api.updateNativeSettings.mockResolvedValue({
-      config_path: '/printer_data/config', moonraker_key_set: true,
+      config_path: '/real/current', moonraker_key_set: true,
     });
     await useNativeStore.getState().setMoonrakerApiKey('mk-token');
     expect(api.updateNativeSettings).toHaveBeenCalledWith(
-      '/printer_data/config', 'mk-token');
+      undefined, 'mk-token');
     expect(useNativeStore.getState().moonrakerKeySet).toBe(true);
+    expect(useNativeStore.getState().configPath).toBe('/real/current');
   });
 
   it('empty token is the explicit clear and unsets the flag', async () => {
@@ -57,8 +61,7 @@ describe('nativeStore moonraker key state (security-work 2.2)', () => {
       config_path: '/printer_data/config', moonraker_key_set: false,
     });
     await useNativeStore.getState().setMoonrakerApiKey('');
-    expect(api.updateNativeSettings).toHaveBeenCalledWith(
-      '/printer_data/config', '');
+    expect(api.updateNativeSettings).toHaveBeenCalledWith(undefined, '');
     expect(useNativeStore.getState().moonrakerKeySet).toBe(false);
   });
 });
@@ -92,11 +95,15 @@ describe('nativeStore MCP key actions (security-work 3.4)', () => {
     expect(api.getApiKeys).not.toHaveBeenCalled();
   });
 
-  it('revealKey returns the value or null', async () => {
-    api.revealApiKey.mockResolvedValue({ key: 'kwc_full', name: 'a1' });
-    expect(await useNativeStore.getState().revealKey('a1')).toBe('kwc_full');
-    api.revealApiKey.mockRejectedValue(new Error('404'));
-    expect(await useNativeStore.getState().revealKey('zz')).toBeNull();
+  it('replaceKey returns the FRESH value once and refreshes the rows', async () => {
+    // reveal is gone (PR #48 D-2): rotation is the only re-mint path.
+    useNativeStore.setState({ apiKeys: [meta('a1')] });
+    api.replaceApiKey.mockResolvedValue({ id: 'a1', key: 'kwc_fresh' });
+    api.getApiKeys.mockResolvedValue({ keys: [meta('a1')] });
+    expect(await useNativeStore.getState().replaceKey('a1')).toBe('kwc_fresh');
+    expect(api.getApiKeys).toHaveBeenCalled();
+    api.replaceApiKey.mockRejectedValue(new Error('404'));
+    expect(await useNativeStore.getState().replaceKey('zz')).toBeNull();
   });
 
   it('removeKey deletes then refreshes; failure keeps the rows and says false', async () => {
