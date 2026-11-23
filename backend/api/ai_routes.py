@@ -6977,6 +6977,12 @@ def _restore_sentinel_api_key(payload: dict) -> dict:
         stored_url = _stored_provider_settings().get("apiUrl")
         if isinstance(stored_url, str) and stored_url.strip():
             settings["apiUrl"] = stored_url
+        else:
+            # No saved URL: the payload's URL is DROPPED, not adopted.
+            # Adopting it would CREATE the pair beside the restored key
+            # — the exact state _resolve_api_key promises resolves to
+            # nothing was being manufactured by a masked save (round-3).
+            settings.pop("apiUrl", None)
     return payload
 
 
