@@ -87,12 +87,76 @@ def _extra_allowed() -> set:
             if h.strip()}
 
 
+def _interface_addresses() -> set:
+    """IPs currently configured on this machine's interfaces.
+
+    The Host guard's notion of "this machine" must be the LIVE interface
+    table, not the hostname's name resolution: cloud-image and Debian
+    /etc/hosts files routinely map the hostname to 127.0.1.1 only, so
+    gethostbyname_ex() misses every LAN address and legitimate LAN-IP
+    POSTs were rejected (dogfood bug, 2026-11-23).
+    """
+    values = set()
+    # Linux/macOS/BSD: libc getifaddrs via ctypes — every IPv4 on every
+    # interface, correct on 32- and 64-bit (the SIOCGIFADDR ioctl recipe
+    # silently drops secondary interfaces; dogfooded 2026-11-23).
+    try:
+        import array
+        import ctypes
+        import ctypes.util
+
+        class _ifaddrs(ctypes.Structure):
+            pass
+        _ifaddrs._fields_ = [  # noqa: SLF001 (self-referential layout)
+            ('ifa_next', ctypes.POINTER(_ifaddrs)),
+            ('ifa_name', ctypes.c_char_p),
+            ('ifa_flags', ctypes.c_uint),
+            ('ifa_addr', ctypes.POINTER(ctypes.c_ubyte)),
+            ('ifa_netmask', ctypes.POINTER(ctypes.c_ubyte)),
+        ]
+        libc = ctypes.CDLL(ctypes.util.find_library('c') or 'libc.so.6')
+        head = ctypes.POINTER(_ifaddrs)()
+        if libc.getifaddrs(ctypes.byref(head)) == 0:
+            try:
+                ptr = head
+                while ptr:
+                    addr = ptr.contents.ifa_addr
+                    if addr:
+                        family = ctypes.cast(
+                            addr, ctypes.POINTER(ctypes.c_ushort)).contents.value
+                        if family == socket.AF_INET:
+                            # sockaddr_in: [0:2]=family [2:4]=port [4:8]=IPv4
+                            octets = bytes(addr[i] for i in range(4, 8))
+                            ip = socket.inet_ntoa(octets)
+                            if ip != '0.0.0.0':
+                                values.add(ip)
+                    ptr = ptr.contents.ifa_next
+            finally:
+                libc.freeifaddrs(head)
+    except (OSError, ValueError, AttributeError):
+        pass
+    # Any platform: the source address the routing table picks for the
+    # default route (UDP connect sends nothing). Covers the primary NIC
+    # where the ioctl path is unavailable (e.g. Windows dev boxes).
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            probe.connect(('192.0.2.1', 1))  # TEST-NET, no traffic
+            values.add(probe.getsockname()[0])
+        finally:
+            probe.close()
+    except OSError:
+        pass
+    return values
+
+
 def _local_host_values() -> set:
     global _local_hosts_cache
     now = time.monotonic()
     if now - _local_hosts_cache[0] < _LOCAL_HOSTS_TTL_S and _local_hosts_cache[1]:
         return _local_hosts_cache[1]
     values = {"localhost", "::1", "127.0.0.1"}
+    values |= _interface_addresses()
     try:
         name = socket.gethostname().lower()
         values.add(name)

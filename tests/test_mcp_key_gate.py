@@ -125,6 +125,48 @@ def test_allowed_hosts_env_extends(monkeypatch):
     assert main_mod._extra_allowed() == {'kwc-print', 'printer.lan'}
 
 
+def test_interface_addresses_include_default_route_ip():
+    # Real-machine ground truth: the IP this host uses to reach the LAN
+    # must be recognized as local, whatever /etc/hosts says the hostname
+    # is (dogfood bug 2026-11-23: cloud-image hosts map hostname ->
+    # 127.0.1.1, and gethostbyname_ex alone misses every LAN interface).
+    import socket
+    route_ip = None
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(('192.0.2.1', 1))  # TEST-NET: routing lookup, no traffic
+        route_ip = probe.getsockname()[0]
+    except OSError:
+        pass
+    finally:
+        probe.close()
+    if route_ip is None:
+        pytest.skip('no routable interface on this machine')
+    assert route_ip in main_mod._interface_addresses()
+
+
+def test_local_host_values_survive_localhost_only_hosts_file(monkeypatch):
+    # Pin the exact dogfood failure shape: hostname resolves ONLY to
+    # 127.0.1.1. Interface enumeration must still put the LAN IP in.
+    import socket
+    monkeypatch.setattr(main_mod, '_local_hosts_cache', (0.0, set()))
+    monkeypatch.setattr(socket, 'gethostname', lambda: 'hermes')
+    monkeypatch.setattr(socket, 'gethostbyname_ex',
+                        lambda n: ('hermes', ['hermes'], ['127.0.1.1']))
+    route_ip = None
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(('192.0.2.1', 1))
+        route_ip = probe.getsockname()[0]
+    except OSError:
+        pass
+    finally:
+        probe.close()
+    if route_ip is None:
+        pytest.skip('no routable interface on this machine')
+    assert route_ip in main_mod._local_host_values()
+
+
 def test_guard_decision():
     # State-changing + real IP client + foreign Host -> block.
     assert main_mod._host_guard_blocks('POST', '192.168.1.42',
