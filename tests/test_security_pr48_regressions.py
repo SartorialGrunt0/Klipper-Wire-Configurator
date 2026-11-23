@@ -506,3 +506,129 @@ def test_settings_save_is_atomic_and_owner_only(tmp_path, monkeypatch):
     import json as _json
     assert _json.loads(f.read_text())['config_path'] == '/x'  # prior state intact
     assert list(box.glob('settings.json.tmp.*')) == []        # no temp litter
+
+
+def test_upstream_makefile_shape_is_a_checkout():
+    """ROUND-3 REGRESSION: the column-0-only patterns rejected stock
+    Klipper/katapult Makefiles ('export KCONFIG_CONFIG := ...', rules
+    starting '$(OUT)') and disabled the whole flash UI on real
+    installs. The upstream header shape must be a checkout..."""
+    real = tmpdir = None  # noqa - guard against fixture bleed
+    import tempfile
+    from pathlib import Path
+    root = Path(tempfile.mkdtemp())
+    (root / 'src').mkdir()
+    (root / 'lib' / 'kconfiglib').mkdir(parents=True)
+    (root / 'src' / 'Kconfig').write_text('mainmenu "Klipper"\n')
+    (root / 'lib' / 'kconfiglib' / 'kconfiglib.py').write_text('VALUE = 1\n')
+    (root / 'Makefile').write_text(
+        '# Klipper build system\n'
+        'OUT=out/\n'
+        'export KCONFIG_CONFIG     := $(CURDIR)/.config\n'
+        '-include $(KCONFIG_CONFIG)\n'
+        '$(OUT)%.o: %.c $(OUT)autoconf.h\n'
+        '\t$(COMPILE) -c -o $@ $<\n')
+    assert flash_targets._is_flash_target_checkout('klipper', root) is True
+    # ...while a two-line plant mimicking the ASSIGNMENT shape but not
+    # the build-rule shape is still not (a rule line must START the
+    # out/ reference; a recipe command mentioning out/ never matches).
+    fake = Path(tempfile.mkdtemp())
+    (fake / 'src').mkdir()
+    (fake / 'lib' / 'kconfiglib').mkdir(parents=True)
+    (fake / 'src' / 'Kconfig').write_text('mainmenu "x"\n')
+    (fake / 'lib' / 'kconfiglib' / 'kconfiglib.py').write_text('import os\n')
+    (fake / 'Makefile').write_text('export KCONFIG_CONFIG := .config\nall:\n\tmkdir -p out/\n')
+    assert flash_targets._is_flash_target_checkout('klipper', fake) is False
+
+
+def test_mutations_never_resolve_a_user_path(monkeypatch, tmp_path):
+    """ROUND-3 LANDED LEG: PUT flash config / POST build accepted an
+    explicit checkout_path, PERSISTED it, then exec_module'd the
+    planted kconfiglib and ran the planted make. Mutations now resolve
+    from settings/env/defaults like reads — the request path rides
+    along inert."""
+    box = {}
+    monkeypatch.setattr(flash_targets, 'load_settings', lambda: dict(box))
+    monkeypatch.setattr(flash_targets, 'save_settings',
+                        lambda s: box.clear() or box.update(s))
+    # Defaults must not find the developer's real ~/klipper either way.
+    monkeypatch.setattr(flash_targets, '_target_default_paths',
+                        lambda target: [str(tmp_path / 'nonexistent')])
+    evil = tmp_path / 'evil'
+    evil.mkdir()
+    # The guarantee lives INSIDE resolve: the caller path is a
+    # candidate for MUTATIONS only, never for GET-backed reads.
+    ok, err = flash_targets.resolve_flash_target_checkout(
+        'klipper', str(evil), persist=False)
+    assert ok is None and 'evil' not in (err or '')     # READ: path inert
+    ok, err = flash_targets.resolve_flash_target_checkout('klipper', str(evil))
+    assert ok is None and 'evil' not in (err or '')     # MUTATION: path inert too
+    assert box == {}                 # ...and nothing was persisted
+
+
+def test_masked_save_cannot_create_an_unpaired_pair(tmp_path, monkeypatch):
+    """ROUND-3 LANDED LEG: with a stored key but NO saved URL, a
+    masked save ADOPTED the payload's attacker URL — manufacturing the
+    exact pair the resolver promises resolves to nothing, and /ai/models
+    then shipped the key. The payload URL is now dropped, not adopted."""
+    state = tmp_path / 'state.json'
+    state.write_text(json.dumps({'settings': {'apiKey': FIX_KEY}}))
+    monkeypatch.setattr(ai_routes, 'AI_STATE_FILE', state)
+    payload = {'settings': {'apiKey': ai_routes.API_KEY_STORED_SENTINEL,
+                            'apiUrl': 'http://203.0.113.66:9999/v1'}}
+    out = ai_routes._restore_sentinel_api_key(payload)
+    assert 'apiUrl' not in out['settings']
+    assert out['settings']['apiKey'] == FIX_KEY
+    # and the restored state still resolves to nothing anywhere:
+    assert ai_routes._resolve_api_key('', 'http://203.0.113.66:9999/v1') == ''
+
+
+def test_checkout_path_endpoint_validates_before_storing(monkeypatch, tmp_path):
+    """ROUND-4 design: the sanctioned checkout-path writer runs the
+    FULL identity check before persisting — a POST /apply-planted tree
+    can never become the resolved checkout, and stored settings drive
+    every later resolution."""
+    box = {}
+    monkeypatch.setattr(flash_targets, 'load_settings', lambda: dict(box))
+    monkeypatch.setattr(flash_targets, 'save_settings',
+                        lambda s: box.clear() or box.update(s))
+    evil = tmp_path / 'evil'
+    (evil / 'src').mkdir(parents=True)
+    (evil / 'lib' / 'kconfiglib').mkdir(parents=True)
+    (evil / 'src' / 'Kconfig').write_text('mainmenu "planted"\n')
+    (evil / 'lib' / 'kconfiglib' / 'kconfiglib.py').write_text('import os\n')
+    (evil / 'Makefile').write_text(
+        'export KCONFIG_CONFIG := $(CURDIR)/.config\n$(OUT)%.o: %.c\n\t@true\n')
+    # HONEST PIN: a plant that mimics the full tree shape (including
+    # a mainmenu line) IS registrable through this endpoint. That is
+    # accepted posture, not a bug: registering an arbitrary path is a
+    # deliberate, same-origin, Host-guarded action — the trusted-LAN
+    # law already grants a same-origin caller firmware/source authority
+    # (that is what the flash feature IS). What round-4 KILLED is the
+    # transparent laundering: paths on GET/other routes are inert, so
+    # no drive-by or incidental call can reach an attacker tree.
+    res = flash_targets.set_flash_target_checkout_path('klipper', str(evil))
+    assert res['ok'] and box.get('klipper_path') == str(evil)
+    # A lazy plant (shape Makefile, stub Kconfig) never registers:
+    lazy = tmp_path / 'lazy'
+    (lazy / 'src').mkdir(parents=True)
+    (lazy / 'lib' / 'kconfiglib').mkdir(parents=True)
+    (lazy / 'src' / 'Kconfig').write_text('# stub\n')
+    (lazy / 'lib' / 'kconfiglib' / 'kconfiglib.py').write_text('import os\n')
+    (lazy / 'Makefile').write_text(
+        'export KCONFIG_CONFIG := .config\n$(OUT)%.o: %.c\n\t@true\n')
+    res = flash_targets.set_flash_target_checkout_path('klipper', str(lazy))
+    assert res['ok'] is False
+    assert box['klipper_path'] == str(evil)   # failed reg kept prior state
+    # A genuine tree registers, and empty clears:
+    good = tmp_path / 'good'
+    (good / 'src').mkdir(parents=True)
+    (good / 'lib' / 'kconfiglib').mkdir(parents=True)
+    (good / 'src' / 'Kconfig').write_text('mainmenu "Klipper"\n')
+    (good / 'lib' / 'kconfiglib' / 'kconfiglib.py').write_text('VALUE = 1\n')
+    (good / 'Makefile').write_text(
+        'OUT=out/\nexport KCONFIG_CONFIG     := $(CURDIR)/.config\n$(OUT)%.o: %.c\n\t@true\n')
+    res = flash_targets.set_flash_target_checkout_path('klipper', str(good))
+    assert res['ok'] and box.get('klipper_path') == str(good)
+    res = flash_targets.set_flash_target_checkout_path('klipper', '')
+    assert res['ok'] and 'klipper_path' not in box
