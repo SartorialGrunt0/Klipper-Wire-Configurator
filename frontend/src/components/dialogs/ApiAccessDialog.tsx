@@ -2,13 +2,15 @@ import { useCallback, useEffect, useState } from 'react';
 import Modal from '../Modal';
 import { useNativeStore } from '../../stores/nativeStore';
 import { copyText } from '../../utils/clipboard';
+import { EXPIRY_PRESETS, expiryFromPreset, type ExpiryPreset } from '../../utils/keyExpiry';
 
 interface ApiAccessDialogProps {
   onClose: () => void;
 }
 
 /**
- * Server-side API access settings, split into Moonraker / KWC tabs.
+ * Server-side API access settings, split into Moonraker / KWC tabs (the
+ * folder-tab styling matches the Flash dialog's Klipper/Katapult tabs.
  *
  * Moonraker tab: the outbound token KWC sends to Moonraker (decision D2).
  * Stored on the server and NEVER served back — the server reports only
@@ -22,6 +24,11 @@ interface ApiAccessDialogProps {
  * ONCE, at creation or rotation (PR #48 D-2): lost a key? Replace
  * rotates it in place and shows the fresh value once.
  */
+
+/** Shared control heights: bordered inputs/selects and borderless buttons
+ * align exactly (the borderless ones carry a transparent border). */
+const CONTROL = 'h-8 text-xs';
+const BUTTON_BORDER_FIX = 'border border-transparent';
 
 /** Small circled "i": reveals its note on hover, or on click (touch). */
 function InfoDot({ children, label }: { children: React.ReactNode; label: string }) {
@@ -47,6 +54,23 @@ function InfoDot({ children, label }: { children: React.ReactNode; label: string
   );
 }
 
+/** Folder tab — same design as the Flash dialog's Klipper/Katapult tabs. */
+function FolderTab({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-t-xl border px-4 py-2 text-sm font-medium transition-colors ${
+        active
+          ? 'border-[var(--color-bg-tertiary)] border-b-[var(--color-bg-secondary)] bg-[var(--color-bg-secondary)] text-[var(--color-text-primary)]'
+          : 'border-transparent bg-[var(--color-bg-primary)]/60 text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
 export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
   const [tab, setTab] = useState<'moonraker' | 'kwc'>('moonraker');
 
@@ -64,7 +88,7 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
   const replaceKey = useNativeStore((s) => s.replaceKey);
   const removeKey = useNativeStore((s) => s.removeKey);
   const [keyName, setKeyName] = useState('');
-  const [keyExpiry, setKeyExpiry] = useState('');
+  const [keyExpiry, setKeyExpiry] = useState<ExpiryPreset>('never');
   const [freshKey, setFreshKey] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -74,12 +98,12 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
   }, [refreshKeyState, refreshKeys]);
 
   const addKey = useCallback(async () => {
-    const value = await createKey(keyName.trim(), keyExpiry || null);
+    const value = await createKey(keyName.trim(), expiryFromPreset(keyExpiry));
     if (value) {
       setFreshKey(value);
       setCopiedId(null);
       setKeyName('');
-      setKeyExpiry('');
+      setKeyExpiry('never');
     } else {
       setError('Could not create the key — see the backend log.');
     }
@@ -161,28 +185,10 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
         </button>
       </div>
 
-      {/* Tabs — same treatment as the Generate dialog's mode toggle. */}
-      <div className="flex px-4 border-b border-[var(--color-bg-tertiary)] mt-2">
-        <button
-          onClick={() => setTab('moonraker')}
-          className={`px-4 py-2 text-xs font-medium transition-colors ${
-            tab === 'moonraker'
-              ? 'text-[var(--color-accent)] border-b-2 border-[var(--color-accent)]'
-              : 'text-[var(--color-text-secondary)]'
-          }`}
-        >
-          Moonraker
-        </button>
-        <button
-          onClick={() => setTab('kwc')}
-          className={`px-4 py-2 text-xs font-medium transition-colors ${
-            tab === 'kwc'
-              ? 'text-[var(--color-accent)] border-b-2 border-[var(--color-accent)]'
-              : 'text-[var(--color-text-secondary)]'
-          }`}
-        >
-          KWC
-        </button>
+      {/* Folder tabs — same design as the Flash dialog's target tabs. */}
+      <div className="flex gap-2 px-4 mt-3 border-b border-[var(--color-bg-tertiary)]">
+        <FolderTab active={tab === 'moonraker'} onClick={() => setTab('moonraker')}>Moonraker</FolderTab>
+        <FolderTab active={tab === 'kwc'} onClick={() => setTab('kwc')}>KWC</FolderTab>
       </div>
 
       <div className="p-4 space-y-3 overflow-y-auto">
@@ -201,7 +207,7 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
             <div className="flex items-center gap-2">
               <input
                 type="password"
-                className="flex-1 min-w-0 px-3 py-2 rounded-lg text-xs font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
+                className={`flex-1 min-w-0 px-3 rounded-lg font-mono bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors ${CONTROL}`}
                 value={token}
                 onChange={(e) => { setToken(e.target.value); setSaved(false); }}
                 placeholder={moonrakerKeySet ? 'Stored — leave empty to keep' : 'moonraker_api_key'}
@@ -210,7 +216,7 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
                 type="button"
                 onClick={() => void save()}
                 disabled={busy}
-                className="px-3 py-2 rounded-lg text-xs font-medium bg-[var(--color-accent)] text-[var(--color-bg-primary)] hover:opacity-90 disabled:opacity-50 whitespace-nowrap transition-opacity"
+                className={`px-3 rounded-lg font-medium bg-[var(--color-accent)] text-[var(--color-bg-primary)] hover:opacity-90 disabled:opacity-50 whitespace-nowrap transition-opacity ${CONTROL} ${BUTTON_BORDER_FIX}`}
               >
                 {busy ? 'Saving…' : 'Save'}
               </button>
@@ -223,7 +229,7 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
                   disabled={busy}
                   // Standard delete styling: solid red, same as the Flash
                   // dialog's Delete artifact and Chat history's Delete All.
-                  className="px-3 py-1.5 rounded-lg text-xs font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
+                  className={`px-3 rounded-lg text-xs font-medium bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors ${CONTROL} ${BUTTON_BORDER_FIX}`}
                 >
                   Remove stored token
                 </button>
@@ -268,7 +274,7 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
                   aria-label={`Replace key ${k.name || k.id}`}
                   title="Rotate the value in place (the new value is shown once)"
                   onClick={() => void rotate(k.id)}
-                  className="px-2 py-1 rounded text-[10px] font-medium border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-primary)] transition-colors"
+                  className="h-6 px-2 rounded text-[10px] font-medium border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-primary)] transition-colors"
                 >
                   Replace
                 </button>
@@ -282,7 +288,7 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
                     setCopiedId(null);
                     void removeKey(k.id);
                   }}
-                  className="px-2 py-1 rounded text-[10px] font-medium bg-red-600 text-white hover:bg-red-700 transition-colors"
+                  className="h-6 px-2 rounded text-[10px] font-medium border border-transparent bg-red-600 text-white hover:bg-red-700 transition-colors"
                 >
                   Delete
                 </button>
@@ -299,7 +305,7 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
                   <button
                     type="button"
                     onClick={() => copy(freshKey, 'new')}
-                    className="px-2 py-1 rounded text-[10px] font-medium bg-[var(--color-accent)] text-[var(--color-bg-primary)] hover:opacity-90 whitespace-nowrap transition-opacity"
+                    className={`px-3 rounded-lg font-medium bg-[var(--color-accent)] text-[var(--color-bg-primary)] hover:opacity-90 whitespace-nowrap transition-opacity ${CONTROL} ${BUTTON_BORDER_FIX}`}
                   >
                     {copiedId === 'new' ? 'Copied' : 'Copy'}
                   </button>
@@ -307,27 +313,52 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
               </div>
             )}
 
-            <div className="flex items-center gap-2 mt-2">
-              <input
-                className="flex-1 min-w-0 px-2 py-1.5 rounded-lg text-xs bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                placeholder="Name (e.g. Claude Desktop)"
-                value={keyName}
-                onChange={(e) => setKeyName(e.target.value)}
-              />
-              <input
-                type="date"
-                title="Expires (optional — never expires by default)"
-                className="px-2 py-1.5 rounded-lg text-xs bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors"
-                value={keyExpiry}
-                onChange={(e) => setKeyExpiry(e.target.value)}
-              />
-              <button
-                type="button"
-                onClick={() => void addKey()}
-                className="px-3 py-1.5 rounded-lg text-xs font-medium bg-[var(--color-accent)] text-[var(--color-bg-primary)] hover:opacity-90 whitespace-nowrap transition-opacity"
-              >
-                Create key
-              </button>
+            <div className="mt-3">
+              <div className="flex items-end gap-2">
+                <div className="flex-1 min-w-0">
+                  <label
+                    htmlFor="new-key-name"
+                    className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1"
+                  >
+                    Name
+                  </label>
+                  <input
+                    id="new-key-name"
+                    className={`w-full min-w-0 px-2 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors ${CONTROL}`}
+                    placeholder="e.g. Claude Desktop"
+                    value={keyName}
+                    onChange={(e) => setKeyName(e.target.value)}
+                  />
+                </div>
+                <div>
+                  <label
+                    htmlFor="new-key-expiry"
+                    className="block text-[10px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wider mb-1"
+                  >
+                    Expiration
+                  </label>
+                  <select
+                    id="new-key-expiry"
+                    className={`px-2 rounded-lg bg-[var(--color-bg-primary)] border border-[var(--color-bg-tertiary)] text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none transition-colors ${CONTROL}`}
+                    value={keyExpiry}
+                    onChange={(e) => setKeyExpiry(e.target.value as ExpiryPreset)}
+                  >
+                    {EXPIRY_PRESETS.map((p) => (
+                      <option key={p.value} value={p.value}>{p.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <span className="block mb-1" aria-hidden />
+                  <button
+                    type="button"
+                    onClick={() => void addKey()}
+                    className={`px-3 rounded-lg font-medium bg-[var(--color-accent)] text-[var(--color-bg-primary)] hover:opacity-90 whitespace-nowrap transition-opacity ${CONTROL} ${BUTTON_BORDER_FIX}`}
+                  >
+                    Create key
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         )}
@@ -343,7 +374,7 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
           <button
             type="button"
             onClick={onClose}
-            className="px-3 py-1.5 rounded-lg text-xs font-medium border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-primary)] transition-colors"
+            className={`px-3 rounded-lg text-xs font-medium border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-primary)] transition-colors ${CONTROL}`}
           >
             Close
           </button>
