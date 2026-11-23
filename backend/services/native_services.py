@@ -7,6 +7,7 @@ import logging
 import os
 import json
 import re
+import stat
 import platform
 import socket
 import subprocess
@@ -435,23 +436,38 @@ def save_settings(data: dict) -> None:
     """Save native settings.
 
     settings.json can carry the Moonraker token, so it gets the same
-    owner-only mode api_keys.json promises (PR #48 B-08: write_text's
-    default 0644 left the token world-readable while the docs claimed
-    the 0600 posture). Best-effort, loud on failure — the same
-    treatment as the key store."""
+    owner-only mode api_keys.json promises (PR #48 B-08). Written
+    temp+os.replace at 0600 like the key store — write_text-then-chmod
+    left a world-readable create window (round-2), which is the exact
+    pattern A-05 retired for api_keys.json."""
     path = _settings_file()
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                 stat.S_IRUSR | stat.S_IWUSR)
     try:
-        os.chmod(path, 0o600)
-    except OSError:
-        # Non-POSIX filesystems have no mode to set; on POSIX a failure
-        # means a stored Moonraker token stays readable by other local
-        # users — loud, never silent. (No os.name predicate: the
-        # no-inline-platform-checks law allows OSError tolerance only.)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & 0o077:
+        try:
+            os.chmod(path, 0o600)
+            mode = stat.S_IMODE(path.stat().st_mode)
+        except OSError:
+            pass
+    if mode & 0o077:
         logging.getLogger(__name__).warning(
-            "settings.json chmod to 0600 failed — a stored Moonraker "
+            "settings.json is group/world-readable (mode %s) on a "
+            "filesystem that ignores file modes — a stored Moonraker "
             "token in it may be readable by other local users.",
-            exc_info=True)
+            oct(mode))
 
 
 # ── Flash profile persistence ─────────────────────────────────
@@ -898,7 +914,10 @@ def _query_moonraker_print_status(timeout: float = 2.0) -> dict[str, Any]:
                 misconfigured = True
                 continue
             print_stats = status.get("print_stats")
-            if not isinstance(print_stats, dict):
+            if not isinstance(print_stats, dict) or not print_stats:
+                # An EMPTY print_stats object is klippy saying nothing,
+                # not klippy saying "idle" (round-2: the docstring
+                # claimed unknown; the code said not-printing).
                 misconfigured = True
                 continue
 

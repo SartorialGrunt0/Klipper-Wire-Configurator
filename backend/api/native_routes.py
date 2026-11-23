@@ -333,6 +333,17 @@ def apply_config(data: ApplyRequest):
         raise HTTPException(status_code=400, detail=f"Config directory does not exist: {config_path}")
     base_resolved = base.resolve(strict=False)
 
+    # Validate the DELETE list BEFORE the write loop: a mixed request
+    # that wrote files and then 400'd on one escaping delete left the
+    # writes applied (round-2). All-or-nothing on containment.
+    for rel_path in data.deleted:
+        if not path_containment.within(
+                base_resolved, (base / rel_path).resolve(strict=False)):
+            raise HTTPException(
+                status_code=400,
+                detail=f"File '{rel_path}' resolves outside the config "
+                       "directory (symlink escape)")
+
     written = []
     errors = []
     for filename, content in data.files.items():

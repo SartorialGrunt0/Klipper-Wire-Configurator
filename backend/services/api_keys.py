@@ -237,13 +237,6 @@ def list_key_metadata() -> list[dict]:
     return out
 
 
-def get_key(id: str) -> dict | None:
-    for entry in _read():
-        if entry.get("id") == id:
-            return dict(entry)
-    return None
-
-
 def delete_key(id: str) -> bool:
     with _LOCK:
         keys = _read()
