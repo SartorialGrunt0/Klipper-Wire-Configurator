@@ -419,24 +419,24 @@ export interface ApiKeyMeta {
 }
 
 export async function getApiKeys(): Promise<{ keys: ApiKeyMeta[] }> {
-  return request('/api/native/api-keys');
+  return request('/native/api-keys');
 }
 
 export async function createApiKey(
   name: string, expiresAt: string | null):
   Promise<{ id: string; name: string; key: string; expires_at: string | null }> {
-  return request('/api/native/api-keys', {
+  return request('/native/api-keys', {
     method: 'POST',
     body: JSON.stringify({ name, expires_at: expiresAt })
   });
 }
 
 export async function revealApiKey(id: string): Promise<{ key: string; name: string }> {
-  return request(`/api/native/api-keys/${id}/reveal`, { method: 'POST' });
+  return request(`/native/api-keys/${id}/reveal`, { method: 'POST' });
 }
 
 export async function deleteApiKey(id: string): Promise<{ status: string }> {
-  return request(`/api/native/api-keys/${id}`, { method: 'DELETE' });
+  return request(`/native/api-keys/${id}`, { method: 'DELETE' });
 }
 
 export async function updateNativeSettings(

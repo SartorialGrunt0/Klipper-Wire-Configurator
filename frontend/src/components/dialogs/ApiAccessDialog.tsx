@@ -50,6 +50,8 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
       setCreatedKey(value);
       setKeyName('');
       setKeyExpiry('');
+    } else {
+      setError('Could not create the key — see the backend log.');
     }
   }, [createKey, keyName, keyExpiry]);
 
