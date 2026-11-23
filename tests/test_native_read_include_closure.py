@@ -103,6 +103,10 @@ def test_native_read_expands_to_disk_include_closure(monkeypatch, tmp_path):
     """Read returns the include closure even for files hidden from the listing,
     so no missing_include error fires for on-disk include targets."""
     config_dir, visible = _make_fixture(tmp_path)
+    # The frontend sends the config_path it read from settings; containment
+    # (security-work 1.2) checks request paths against it.
+    monkeypatch.setattr(native_routes, 'load_settings',
+                        lambda: {'config_path': str(config_dir)})
 
     response = client.post('/api/native/config-files/read', json={
         'config_path': str(config_dir),
@@ -146,6 +150,8 @@ def test_native_read_still_flags_genuinely_missing_include(monkeypatch, tmp_path
         '[gcode_macro AUX_FAN]\ngcode:\n    G28\n', encoding='utf-8',
     )
 
+    monkeypatch.setattr(native_routes, 'load_settings',
+                        lambda: {'config_path': str(config_dir)})
     response = client.post('/api/native/config-files/read', json={
         'config_path': str(config_dir),
         'filenames': ['printer.cfg', 'aux_fan.cfg'],

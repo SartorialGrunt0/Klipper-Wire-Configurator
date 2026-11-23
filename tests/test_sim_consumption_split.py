@@ -161,7 +161,11 @@ class _AdvisorySimFinding:
                 "extra": self.extra}
 
 
-def test_native_load_path_never_shows_sim_advisories(tmp_path):
+def test_native_load_path_never_shows_sim_advisories(monkeypatch, tmp_path):
+    # security-work 1.2 containment reads the settings config_path.
+    import api.native_routes as native_routes
+    monkeypatch.setattr(native_routes, 'load_settings',
+                        lambda: {'config_path': str(tmp_path)})
     """Review L8: /api/native/config-files/read is the boot-load feed
     for the issues panel — it returned the raw to_dict(), bypassing D1."""
     cfg = tmp_path / "printer.cfg"

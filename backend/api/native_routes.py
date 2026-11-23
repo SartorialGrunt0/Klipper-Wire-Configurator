@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from parser.config_parser import parse_config
 from parser.config_writer import smart_export
 from parser.validator import validate_project_configs
+from services import path_containment
 from services.board_detector import detect_board_from_config
 from services.native_services import (
     delete_flash_profile,
@@ -116,10 +117,29 @@ async def update_settings(data: ConfigPathUpdate):
 # ── Config files from the host ──────────────────────────────────
 
 
+def _contained(raw_path: str) -> str:
+    """Resolve a request-supplied path inside the allowed config roots.
+
+    Roots = settings config_path + KWC_EXTRA_CONFIG_DIRS. A ValueError
+    (symlink or literal escape) arrives as a 400 that names the escape
+    hatch — legitimate symlinked installs learn the fix instead of
+    reading outside the sandbox.
+    """
+    roots = path_containment.config_roots(
+        load_settings().get("config_path", get_default_config_path()))
+    try:
+        return str(path_containment.resolve_within_roots(raw_path, roots))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/config-files")
 async def get_config_files(path: str | None = None):
     """List .cfg files in the config directory."""
-    config_path = path or load_settings().get("config_path", get_default_config_path())
+    if path:
+        config_path = _contained(path)
+    else:
+        config_path = load_settings().get("config_path", get_default_config_path())
     files = list_config_files(config_path)
     return {"config_path": config_path, "files": files}
 
@@ -127,7 +147,11 @@ async def get_config_files(path: str | None = None):
 @router.post("/config-files/read")
 def read_config_files(data: dict):
     """Read and parse one or more config files from the host."""
-    config_path = data.get("config_path") or load_settings().get("config_path", get_default_config_path())
+    raw_path = data.get("config_path")
+    if raw_path:
+        config_path = _contained(raw_path)
+    else:
+        config_path = load_settings().get("config_path", get_default_config_path())
     filenames: list[str] = data.get("filenames", [])
 
     if not filenames:
@@ -212,11 +236,15 @@ class ApplyRequest(BaseModel):
 @router.post("/apply")
 def apply_config(data: ApplyRequest):
     """Write config files back to the host filesystem."""
-    config_path = data.config_path or load_settings().get("config_path", get_default_config_path())
+    if data.config_path:
+        config_path = _contained(data.config_path)
+    else:
+        config_path = load_settings().get("config_path", get_default_config_path())
     base = Path(config_path)
 
     if not base.is_dir():
         raise HTTPException(status_code=400, detail=f"Config directory does not exist: {config_path}")
+    base_resolved = base.resolve(strict=False)
 
     written = []
     errors = []
@@ -224,6 +252,14 @@ def apply_config(data: ApplyRequest):
         # Validate path is safe (no traversal, don't resolve symlinks)
         if '..' in filename or filename.startswith('/'):
             raise HTTPException(status_code=400, detail=f"Invalid filename: {filename}")
+        # A pre-existing symlink inside the config dir must not turn the
+        # write into a primitive against its outside target.
+        if not path_containment.within(
+                base_resolved, (base / filename).resolve(strict=False)):
+            raise HTTPException(
+                status_code=400,
+                detail=f"File '{filename}' resolves outside the config "
+                       "directory (symlink escape)")
         try:
             write_config_file(str(base / filename), content)
             written.append(filename)
