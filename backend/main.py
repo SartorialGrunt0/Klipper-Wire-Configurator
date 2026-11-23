@@ -17,6 +17,7 @@ from api.printer_memory_routes import router as printer_memory_router
 from api.macro_log_routes import router as macro_log_router
 from mcp_server import McpServer, get_index
 from services import api_keys
+from services import path_containment
 from services.mainsail_sidebar import self_heal_sidebar
 from services.native_services import is_native_platform, OFF_HOST_WARNING
 from fastapi.responses import JSONResponse
@@ -178,7 +179,16 @@ def _host_is_local(host_header: str, local_values: set) -> bool:
     elif ":" in h and h.rsplit(":", 1)[1].isdigit():
         h = h.rsplit(":", 1)[0]
     h = h.strip("[]")
-    return h in local_values or h.startswith("127.")
+    try:
+        if ipaddress.ip_address(h).is_loopback:
+            return True
+    except ValueError:
+        pass
+    # A plain STRING-prefix loopback test is the DNS-rebinding bypass this
+    # clause used to be (127.attacker.example A-records to the LAN IP and
+    # 'startswith("127.")' let it through). Loopback is decided by IP
+    # parse; everything else must EXACTLY match a real local value.
+    return h in local_values
 
 
 def _host_guard_blocks(method: str, client_host, host_header: str,
@@ -284,10 +294,23 @@ if FRONTEND_DIST.is_dir():
 
     @app.get("/{full_path:path}")
     async def serve_spa(full_path: str):
-        """Serve the SPA index.html for all non-API routes."""
-        file_path = FRONTEND_DIST / full_path
-        if full_path and file_path.is_file():
-            return FileResponse(file_path)
+        """Serve the SPA index.html for all non-API routes.
+
+        The naive join (`FRONTEND_DIST / full_path`) is an arbitrary file
+        read: percent-encoded %2e%2e segments survive routing and decode
+        here into '..' (PR #48 review A-01, live-probed serving
+        /etc/passwd and the API-key store). Contain to the dist dir;
+        anything else falls back to index.html exactly like a normal
+        SPA route.
+        """
+        if full_path:
+            try:
+                candidate = path_containment.resolve_within_roots(
+                    full_path, [FRONTEND_DIST])
+            except ValueError:
+                return FileResponse(FRONTEND_DIST / "index.html")
+            if candidate.is_file():
+                return FileResponse(candidate)
         return FileResponse(FRONTEND_DIST / "index.html")
 
 
