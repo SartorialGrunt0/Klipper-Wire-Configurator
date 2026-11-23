@@ -75,7 +75,9 @@ def get_klipper_firmware_artifact_path(filename: str, klipper_path: str | None =
     if not filename or Path(filename).name != filename:
         raise ValueError("Invalid artifact filename")
 
-    resolved_path, error = resolve_klipper_checkout(klipper_path)
+    # GET-reachable: no persistence, and the caller-supplied path is
+    # not consulted (round-2 — reads resolve from settings/env/defaults).
+    resolved_path, error = resolve_klipper_checkout(None, persist=False)
     if resolved_path is None:
         raise FileNotFoundError(error or "Klipper checkout not found")
 

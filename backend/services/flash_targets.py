@@ -189,16 +189,29 @@ def _makefile_is_kconfig_project(makefile: Path) -> bool:
     first state read would exec_module() the planted kconfiglib.py and
     `make` the planted tree (PR #48 B-01). The signatures live in the
     real project's own Makefile, so a planted stub fails the identity
-    test before anything in the tree is executed."""
+    test before anything in the tree is executed. Round-2 sharpening:
+    the OLD test ("KCONFIG_CONFIG" anywhere + "out/" anywhere) was
+    spoofed by a 3-line plant; these patterns match the real Makefile's
+    SHAPE — the KCONFIG_CONFIG assignment and the out/ build rule."""
     try:
         text = makefile.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    return "KCONFIG_CONFIG" in text and "out/" in text
+    return bool(re.search(r"^KCONFIG_CONFIG\s*:?=\s*\S", text, re.M)
+                and re.search(r"^out/", text, re.M))
 
 
 def _is_flash_target_checkout(target: str, path: Path) -> bool:
     if not path.is_dir():
+        return False
+    try:
+        # A symlink swapped in for the checkout (or for the tree above
+        # it) defeats every in-tree check: identity is about THIS path.
+        if path.resolve(strict=True) != path.absolute():
+            return False
+    except OSError:
+        return False
+    if not (path / "src").is_dir():
         return False
     for parts in _target_required_files(target):
         if not path.joinpath(*parts).is_file():
@@ -751,7 +764,8 @@ def _katapult_flashtool_path(target: str, checkout_path: Path) -> Path | None:
         candidate = checkout_path / "scripts" / "flashtool.py"
         return candidate if candidate.is_file() else None
 
-    katapult_path, _ = resolve_flash_target_checkout("katapult")
+    # Read path of a GET-reachable chain: never persist (round-2).
+    katapult_path, _ = resolve_flash_target_checkout("katapult", persist=False)
     if katapult_path is None:
         return None
     candidate = katapult_path / "scripts" / "flashtool.py"
@@ -1130,8 +1144,12 @@ def get_flash_target_state(
 ) -> dict[str, Any]:
     normalized_target = _require_supported_target(target)
     _start = time.monotonic()
+    # READ path: a caller-supplied checkout_path is NOT consulted (it
+    # arrives on GETs, which the Host guard exempts — round-2 planted-
+    # checkout chain). Resolution uses settings/env/defaults only; a
+    # custom checkout is persisted first through a Host-guarded save.
     resolved_path, error = resolve_flash_target_checkout(
-        normalized_target, checkout_path, persist=False)
+        normalized_target, None, persist=False)
     if resolved_path is None:
         return _empty_flash_target_state(normalized_target, checkout_path, error)
 
@@ -1253,8 +1271,12 @@ def get_flash_field_help(target: str, field_id: str, checkout_path: str | None =
     frontend to lazy-load help that was truncated by ``help_limit``.
     """
     normalized_target = _require_supported_target(target)
+    # READ path: a caller-supplied checkout_path is NOT consulted (it
+    # arrives on GETs, which the Host guard exempts — round-2 planted-
+    # checkout chain). Resolution uses settings/env/defaults only; a
+    # custom checkout is persisted first through a Host-guarded save.
     resolved_path, error = resolve_flash_target_checkout(
-        normalized_target, checkout_path, persist=False)
+        normalized_target, None, persist=False)
     if resolved_path is None:
         return {"field_id": field_id, "help": ""}
     _kconfiglib, kconf, _config_path = _load_target_kconfig_state(normalized_target, resolved_path)
@@ -1278,8 +1300,12 @@ def scan_flash_target_devices(
     Read path: the checkout resolve must not persist settings from a GET.
     """
     normalized_target = _require_supported_target(target)
+    # READ path: a caller-supplied checkout_path is NOT consulted (it
+    # arrives on GETs, which the Host guard exempts — round-2 planted-
+    # checkout chain). Resolution uses settings/env/defaults only; a
+    # custom checkout is persisted first through a Host-guarded save.
     resolved_path, error = resolve_flash_target_checkout(
-        normalized_target, checkout_path, persist=False)
+        normalized_target, None, persist=False)
     if resolved_path is None:
         return {"target": normalized_target, "candidates": [], "error": error, "cached": False}
 
@@ -2003,8 +2029,12 @@ def get_flash_target_artifact_path(target: str, filename: str, checkout_path: st
     if not filename or Path(filename).name != filename:
         raise ValueError("Invalid artifact filename")
 
+    # READ path: a caller-supplied checkout_path is NOT consulted (it
+    # arrives on GETs, which the Host guard exempts — round-2 planted-
+    # checkout chain). Resolution uses settings/env/defaults only; a
+    # custom checkout is persisted first through a Host-guarded save.
     resolved_path, error = resolve_flash_target_checkout(
-        normalized_target, checkout_path, persist=False)
+        normalized_target, None, persist=False)
     if resolved_path is None:
         raise FileNotFoundError(error or f"{_target_display_name(normalized_target)} checkout not found")
 
