@@ -46,25 +46,30 @@ out the local UI. Stdio MCP (`python -m backend.mcp_server`) runs as
 the same user and is not gated — filesystem permissions are its
 boundary.
 
-Keys are generated in the browser (Manage Keys dialog), stored
-**plaintext** in `api_keys.json` (mode `0600`) beside the settings
-file, and are **re-copyable forever** — that is the whole job of the
-value, so hashing it would defeat the feature. Moonraker's
-`api_key_file` is the same posture. A key row's value is served only
-by an explicit Create or Reveal response; list responses carry name,
-expiry, last-used, and a short prefix. Expiry is opt-in per key
-(default: never); an expired key stops validating and shows as expired.
+Keys are generated **server-side** (Manage Keys dialog triggers it),
+stored **plaintext** in `api_keys.json` (mode `0600`) beside the
+settings file — hashing them would defeat their job (copying into an
+external client's config), and Moonraker's `api_key_file` is the same
+posture. A key's value is served **exactly once**, in its Create or
+Replace response, and is **never re-displayable**: no route serves an
+existing value anymore (PR #48 review retired the reveal route for
+exactly that reason). Lost a key? **Replace** rotates it in place and
+shows the fresh value once. List responses carry name, expiry,
+last-used, and a short prefix only. Expiry is opt-in per key (default:
+never); a date-only expiry means END of that day; an expired key stops
+validating and shows as expired. If the store file is corrupt the gate
+DENIES (fail-closed), never silently opens.
 
 ## Implemented hardening
 
 | Area | Behavior |
 | --- | --- |
-| Provider API keys | Never sent to the browser. `GET /ai/state` and `/ai/history` return `hasApiKey: true` + a `server-stored` sentinel; the value is resolved server-side at call time. |
-| Moonraker token | Stored server-side only (masked in settings responses). Env override: `KWC_MOONRAKER_API_KEY`. |
-| Print state honesty | An unreachable or 401 Moonraker answers `print_state: "unknown"` — never a fake "not printing". |
-| Path containment | Request-supplied paths (`/api/native/config-files`, read, `apply`) are resolved (symlinks followed) and must land inside the configured config dir, plus any `KWC_EXTRA_CONFIG_DIRS`. Writes through an in-dir symlink that escapes are refused. |
-| DNS-rebinding guard | State-changing requests (POST/PUT/PATCH/DELETE) must carry a `Host` naming this machine (its IPs, hostname, `<hostname>.local`, `localhost`, or `KWC_ALLOWED_HOSTS`). Loopback trust does not survive rebinding, so this is ON regardless of keys. |
-| CORS | `allow_credentials=False` with wildcard origins — KWC has no cookie auth to ride. |
+| Provider API keys | Never sent to the browser. `GET /ai/state` and `/ai/history` return `hasApiKey: *** + a `server-stored` sentinel; the value is resolved server-side at call time — and the stored key is attached ONLY to the URL it was saved for, so no request can steer it to another endpoint (PR #48). |
+| Moonraker token | Stored server-side only (masked in settings responses), `settings.json` written owner-only `0600`. Env override: `KWC_MOONRAKER_API_KEY`. |
+| Print state honesty | A Moonraker that ANSWERS but can't be read (401, empty status, 403/5xx, non-JSON body) reports `print_state: "unknown"` — never a fake "not printing". A Moonraker that is network-unreachable keeps the not-printing answer, which is the honest reply on standalone installs. |
+| Path containment | Request-supplied paths (`/api/native/config-files`, read, `apply` — writes AND deletes) are resolved (symlinks followed) and must land inside the configured config dir, plus any `KWC_EXTRA_CONFIG_DIRS`; the root itself is validated absolute on save, so it is not client-steerable. Config-file reads follow the Klipper include-closure, which for parity follows in-dir symlinks Klipper itself would follow. Firmware checkout trees must pass a real-project Makefile signature check before anything in them is loaded or built. The SPA static route resolves inside `frontend/dist` only. |
+| DNS-rebinding guard | State-changing requests (POST/PUT/PATCH/DELETE) must carry a `Host` naming this machine: an exact match of a loopback IP, a real interface address, the hostname, `<hostname>.local`, or `KWC_ALLOWED_HOSTS`. Name-prefix tricks (`127.attacker.example`) are rejected (PR #48). GET routes neither persist nor mutate. ON regardless of keys — this guard also protects the Manage Keys routes. |
+| CORS | `allow_credentials=False` with wildcard origins — KWC has no cookie auth to ride, and the routes that could matter cross-origin are behind the Host guard, which a foreign page cannot satisfy. |
 
 ## Environment variables
 
@@ -78,7 +83,9 @@ expiry, last-used, and a short prefix. Expiry is opt-in per key
 
 Lost or leaked MCP keys are managed from the app itself — open KWC
 locally (or over an SSH tunnel: `ssh -L 8099:localhost:8099 pi@printer`)
-and create a new key, or delete the old one, in Manage Keys. Deleting
-`api_keys.json` reverts the MCP endpoint to its open (keyless) state.
+and **Replace** (rotate) or delete the row in Manage Keys. Deleting
+`api_keys.json` reverts the MCP endpoint to its open (keyless) state —
+note that only DELETING the file does that; a corrupt file closes the
+gate rather than opening it.
 This follows the ecosystem convention that the host filesystem is the
 recovery door, not a backdoor flag.
