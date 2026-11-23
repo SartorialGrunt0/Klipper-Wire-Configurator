@@ -14,8 +14,15 @@ interface NativeStore {
   /** Whether CAN bus UUID query is loading */
   canbusQueryLoading: boolean;
 
+  /** Whether a Moonraker API token is stored on the server (value never sent) */
+  moonrakerKeySet: boolean;
+
   /** Load the active config path from the backend on startup */
   loadConfigPath: () => Promise<void>;
+  /** Re-read the masked native settings (token presence flag). */
+  refreshKeyState: () => Promise<void>;
+  /** Store (string) or clear ('') the Moonraker token. */
+  setMoonrakerApiKey: (token: string) => Promise<void>;
   /** Refresh the device list */
   refreshDevices: () => Promise<void>;
   /** Update the config path */
@@ -30,12 +37,13 @@ interface NativeStore {
  * host), so every action here is unconditionally available and simply finds
  * nothing off-host or with no printer attached.
  */
-export const useNativeStore = create<NativeStore>((set) => ({
+export const useNativeStore = create<NativeStore>((set, get) => ({
   configPath: '/home/pi/printer_data/config',
   devices: null,
   devicesLoading: false,
   canbusQuery: null,
   canbusQueryLoading: false,
+  moonrakerKeySet: false,
 
   loadConfigPath: async () => {
     try {
@@ -44,6 +52,22 @@ export const useNativeStore = create<NativeStore>((set) => ({
     } catch {
       // Backend unreachable — keep the default; the startup read surfaces it.
     }
+  },
+
+  refreshKeyState: async () => {
+    try {
+      const settings = await api.getNativeSettings();
+      set({ moonrakerKeySet: Boolean(settings.moonraker_key_set) });
+    } catch {
+      // Off-host or backend down: nothing to show.
+    }
+  },
+
+  setMoonrakerApiKey: async (token: string) => {
+    // config_path rides along because the PUT replaces the settings
+    // object; the token field is explicit ('' clears).
+    const updated = await api.updateNativeSettings(get().configPath, token);
+    set({ moonrakerKeySet: Boolean(updated.moonraker_key_set) });
   },
 
   refreshDevices: async () => {

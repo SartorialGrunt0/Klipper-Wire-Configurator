@@ -819,24 +819,57 @@ def _moonraker_base_urls() -> list[str]:
     return urls
 
 
+def _moonraker_api_key() -> str:
+    """The Moonraker auth token: env override first, settings second."""
+    env_key = os.environ.get("KWC_MOONRAKER_API_KEY", "").strip()
+    if env_key:
+        return env_key
+    key = load_settings().get("moonraker_api_key")
+    return key.strip() if isinstance(key, str) else ""
+
+
 def _query_moonraker_print_status(timeout: float = 2.0) -> dict[str, Any]:
-    """Query Moonraker for the active print state."""
+    """Query Moonraker for the active print state.
+
+    Honesty rules (security-work 2.0/2.1), all measured failure modes:
+    - 401 (locked-down Moonraker, [authorization] with trusted_clients
+      not covering us) → print_state 'unknown' + moonraker_auth_required;
+      attaching the configured X-Api-Key avoids this on healthy setups.
+    - EMPTY status dict (Moonraker docs: klippy errored or lacks
+      print_stats, which requires [virtual_sdcard]) → 'unknown', never a
+      fake not-printing.
+    - Unreachable (no Moonraker at all — standalone installs) → today's
+      not-printing fallback stays; it is the honest answer there.
+    """
     fallback = {
         "is_printing": False,
         "print_state": None,
         "print_filename": None,
     }
+    auth_required = False
+    misconfigured = False
+
+    api_key = _moonraker_api_key()
+    headers = {"X-Api-Key": api_key} if api_key else None
 
     for base_url in _moonraker_base_urls():
         try:
             with httpx.Client(timeout=timeout) as client:
-                response = client.get(f"{base_url}/printer/objects/query?print_stats")
+                response = client.get(
+                    f"{base_url}/printer/objects/query?print_stats",
+                    headers=headers,
+                )
                 response.raise_for_status()
             payload = response.json()
             result = payload.get("result", {}) if isinstance(payload, dict) else {}
             status = result.get("status", {}) if isinstance(result, dict) else {}
-            print_stats = status.get("print_stats", {}) if isinstance(status, dict) else {}
+            if not status:
+                # Moonraker answered but klippy gave it nothing.
+                misconfigured = True
+                continue
+            print_stats = status.get("print_stats")
             if not isinstance(print_stats, dict):
+                misconfigured = True
                 continue
 
             raw_state = print_stats.get("state")
@@ -847,9 +880,22 @@ def _query_moonraker_print_status(timeout: float = 2.0) -> dict[str, Any]:
                 "print_state": print_state or None,
                 "print_filename": str(filename).strip() or None if filename is not None else None,
             }
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 401:
+                auth_required = True
+            continue
         except (httpx.HTTPError, ValueError, TypeError):
             continue
 
+    if auth_required or misconfigured:
+        unknown: dict[str, Any] = {
+            "is_printing": False,
+            "print_state": "unknown",
+            "print_filename": None,
+        }
+        if auth_required:
+            unknown["moonraker_auth_required"] = True
+        return unknown
     return fallback
 
 

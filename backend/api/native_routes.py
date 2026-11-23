@@ -97,12 +97,24 @@ def get_canbus_uuids(interface: str = "can0"):
 
 class ConfigPathUpdate(BaseModel):
     config_path: str
+    # None = leave the stored token untouched (old clients keep working);
+    # '' = explicit clear.
+    moonraker_api_key: str | None = None
+
+
+def _masked_settings(settings: dict) -> dict:
+    """The Moonraker token is never served — callers get moonraker_key_set.
+    (Same masking law as the AI provider key; no new cleartext route.)"""
+    masked = dict(settings)
+    token = masked.pop("moonraker_api_key", None)
+    masked["moonraker_key_set"] = bool(isinstance(token, str) and token.strip())
+    return masked
 
 
 @router.get("/settings")
 async def get_settings():
-    """Get native settings (config path, etc.)."""
-    return load_settings()
+    """Get native settings (config path, etc.), token masked."""
+    return _masked_settings(load_settings())
 
 
 @router.put("/settings")
@@ -110,8 +122,10 @@ async def update_settings(data: ConfigPathUpdate):
     """Update native settings."""
     settings = load_settings()
     settings["config_path"] = data.config_path
+    if data.moonraker_api_key is not None:
+        settings["moonraker_api_key"] = data.moonraker_api_key
     save_settings(settings)
-    return settings
+    return _masked_settings(settings)
 
 
 # ── Config files from the host ──────────────────────────────────

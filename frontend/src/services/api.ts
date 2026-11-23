@@ -404,15 +404,19 @@ export async function queryCanbusUuids(iface = 'can0'): Promise<CanbusQueryResul
   return request(`/native/canbus-uuids?interface=${encodeURIComponent(iface)}`);
 }
 
-export async function getNativeSettings(): Promise<{ config_path: string }> {
+export async function getNativeSettings(): Promise<{ config_path: string; moonraker_key_set?: boolean }> {
   return request('/native/settings');
 }
 
-export async function updateNativeSettings(configPath: string): Promise<{ config_path: string }> {
-  return request('/native/settings', {
-    method: 'PUT',
-    body: JSON.stringify({ config_path: configPath }),
-  });
+export async function updateNativeSettings(
+  configPath: string,
+  moonrakerApiKey?: string,
+): Promise<{ config_path: string; moonraker_key_set: boolean }> {
+  // moonrakerApiKey omitted = keep the stored token (the backend never
+  // serves the value back; '' clears it explicitly).
+  const body: Record<string, string> = { config_path: configPath };
+  if (moonrakerApiKey !== undefined) body.moonraker_api_key = moonrakerApiKey;
+  return request('/native/settings', { method: 'PUT', body: JSON.stringify(body) });
 }
 
 export async function listNativeConfigFiles(path?: string): Promise<{
