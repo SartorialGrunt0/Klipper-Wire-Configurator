@@ -207,9 +207,9 @@ export default function ApiAccessDialog({ onClose }: ApiAccessDialogProps) {
                   setCopiedId(null);
                   void removeKey(k.id);
                 }}
-                // Standard danger styling (matches SettingsPanel's
-                // destructive actions), not the neutral border variant.
-                className="px-2 py-1 rounded text-[10px] font-medium border border-red-500/30 text-red-400 hover:bg-red-500/10 transition-colors"
+                // Standard delete styling: solid red, same as the Flash
+                // dialog's Delete artifact and Chat history's Delete All.
+                className="px-2 py-1 rounded text-[10px] font-medium bg-red-600 text-white hover:bg-red-700 transition-colors"
               >
                 Delete
               </button>
