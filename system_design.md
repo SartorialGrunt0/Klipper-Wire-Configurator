@@ -264,6 +264,7 @@ If you need to change a specific area, start here.
 - The current frontend does not call the backend project save/load/list API in [backend/api/routes.py](backend/api/routes.py); treat those endpoints as backend-ready, not user-visible.
 - Native layout persistence and warning acknowledgement persistence are separate concerns stored in different files under the native app state directory.
 - The existing `tests/test_roundtrip.py` and `tests/test_diff_roundtrip.py` files are useful diagnostics, but they are not strict assertion suites. Treat them as informational until converted.
+- Security posture is trusted-LAN by decision, not omission (see [SECURITY.md](SECURITY.md)): the only key gate is route-level in `mcp_endpoint` in [backend/main.py](backend/main.py) (`services/api_keys.py` is the store; zero keys = open). The app has no auth path at all — the chat reaches MCP in-process, never over `/api/mcp`. Two guards run app-wide regardless of keys: the DNS-rebinding Host guard (state-changing methods must name this machine) and path containment in [backend/services/path_containment.py](backend/services/path_containment.py) for every request-supplied path in the native routes. Secrets law: stored secrets (AI provider key, Moonraker token) are write-only over HTTP — GETs return presence flags, and callers resolve values server-side (`ai_routes._resolve_api_key`, `native_services._moonraker_api_key`).
 
 ## 9. Common Change Recipes
 

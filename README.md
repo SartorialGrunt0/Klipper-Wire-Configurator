@@ -9,6 +9,7 @@ Special thanks to the Klipper, Mainsail, Moonraker, Fluidd, and other teams whos
 - [Features](#features)
 - [Installing](#installing/uninstalling)
 - [Troubleshooting](#troubleshooting)
+- [Security](#security)
 - [Development](#development)
 
 ## Features
@@ -151,6 +152,19 @@ sudo journalctl -u klipper-wire-configurator -f
 - If Moonraker reports `Unit klipper-wire-configurator.service not found`, rerun the installer once from the repo root to migrate older user-service installs.
 - If Moonraker reports untracked files under `frontend/public/reference/` that would be overwritten, remove that directory once inside the installed repo and retry the update.
 - If the Flash dialog reports that it received HTML instead of JSON, the frontend bundle is newer than the backend service. Rerun the installer or restart the `klipper-wire-configurator` service from the updated repo.
+
+## Security
+
+KWC follows Moonraker's trusted-LAN posture: no login, no accounts, no TLS
+by design. The one key-gated surface is the MCP endpoint
+(`POST /api/mcp`): with no keys defined it behaves as it always has; after
+you create a key in the gear menu (Security → Manage Keys), external MCP
+clients must send it as `X-Api-Key`. Keys are plaintext on disk (owner-only,
+`0600`) and re-copyable from the dialog by design. The web app itself never
+authenticates, so a key can never lock you out. Environment knobs:
+`KWC_MOONRAKER_API_KEY`, `KWC_EXTRA_CONFIG_DIRS`, `KWC_ALLOWED_HOSTS`.
+Full threat model, implemented hardening, and key recovery:
+[SECURITY.md](SECURITY.md).
 
 ## Development
 
