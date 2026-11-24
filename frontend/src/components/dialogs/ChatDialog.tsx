@@ -24,6 +24,7 @@ import {
   type ApprovalCountdownAnchor,
 } from '../../utils/approvalDiff';
 import { buildChatRequestCredentials } from '../../utils/chatRequestBase';
+import { formApiKey, isServerStoredKey, saveApiKey } from '../../utils/apiKeyMask';
 import { loadedSkillNames } from '../../utils/chatSkillTrace';
 import { buildWorkLedger, countUserTurns } from '../../utils/chatWorkLedger';
 import { selectUnsavedDrafts } from '../../utils/chatContext';
@@ -234,7 +235,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const [proposedMemory, setProposedMemory] = useState<PrinterMemory | null>(null);
 
   // ── Settings Editing State (single source of truth) ─────────────
-  const [editApiKey, setEditApiKey] = useState(settings.apiKey);
+  const [editApiKey, setEditApiKey] = useState(formApiKey(settings.apiKey));
   const [editProviderModels, setEditProviderModels] = useState(settings.providerModels);
   const [editModel, setEditModel] = useState(() =>
     getProviderModel(settings.apiProvider, settings.providerModels, settings.model, settings.apiProvider),
@@ -288,7 +289,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   // page → text view → Settings showed values that had never been copied in.
   useEffect(() => {
     if (open || docked) {
-      setEditApiKey(settings.apiKey);
+      setEditApiKey(formApiKey(settings.apiKey));
       setEditProviderModels(settings.providerModels);
       setEditModel(getProviderModel(settings.apiProvider, settings.providerModels, settings.model, settings.apiProvider));
       setEditApiUrl(settings.apiUrl);
@@ -409,8 +410,11 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
   const handleSaveSettings = useCallback(() => {
     const nextModel = editModel.trim();
     const nextProviderModels = { ...editProviderModels, [editApiProvider]: nextModel };
+    // Blank field over a server-stored key round-trips the sentinel so the
+    // save never clobbers the stored key (utils/apiKeyMask).
+    const nextKey = saveApiKey(editApiKey, isServerStoredKey(settings.apiKey));
     setSettings({
-      apiKey: editApiKey,
+      apiKey: nextKey,
       model: nextModel,
       providerModels: nextProviderModels,
       apiUrl: resolvedEditApiUrl,
@@ -435,6 +439,7 @@ const ChatDialog: React.FC<ChatDialogProps> = ({
     editToolProtocol,
     editReasoningEffort,
     resolvedEditApiUrl,
+    settings.apiKey,
     setSettings,
   ]);
 

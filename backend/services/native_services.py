@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import getpass
 import glob
+import logging
 import os
 import json
 import re
+import stat
 import platform
 import socket
 import subprocess
@@ -431,8 +433,41 @@ def load_settings() -> dict:
 
 
 def save_settings(data: dict) -> None:
-    """Save native settings."""
-    _settings_file().write_text(json.dumps(data, indent=2), encoding="utf-8")
+    """Save native settings.
+
+    settings.json can carry the Moonraker token, so it gets the same
+    owner-only mode api_keys.json promises (PR #48 B-08). Written
+    temp+os.replace at 0600 like the key store — write_text-then-chmod
+    left a world-readable create window (round-2), which is the exact
+    pattern A-05 retired for api_keys.json."""
+    path = _settings_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                 stat.S_IRUSR | stat.S_IWUSR)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+    mode = stat.S_IMODE(path.stat().st_mode)
+    if mode & 0o077:
+        try:
+            os.chmod(path, 0o600)
+            mode = stat.S_IMODE(path.stat().st_mode)
+        except OSError:
+            pass
+    if mode & 0o077:
+        logging.getLogger(__name__).warning(
+            "settings.json is group/world-readable (mode %s) on a "
+            "filesystem that ignores file modes — a stored Moonraker "
+            "token in it may be readable by other local users.",
+            oct(mode))
 
 
 # ── Flash profile persistence ─────────────────────────────────
@@ -819,24 +854,71 @@ def _moonraker_base_urls() -> list[str]:
     return urls
 
 
+def _moonraker_api_key() -> str:
+    """The Moonraker auth token: env override first, settings second."""
+    env_key = os.environ.get("KWC_MOONRAKER_API_KEY", "").strip()
+    if env_key:
+        return env_key
+    key = load_settings().get("moonraker_api_key")
+    return key.strip() if isinstance(key, str) else ""
+
+
 def _query_moonraker_print_status(timeout: float = 2.0) -> dict[str, Any]:
-    """Query Moonraker for the active print state."""
+    """Query Moonraker for the active print state.
+
+    Honesty rules (security-work 2.0/2.1), all measured failure modes:
+    - 401 (locked-down Moonraker, [authorization] with trusted_clients
+      not covering us) → print_state 'unknown' + moonraker_auth_required;
+      attaching the configured X-Api-Key avoids this on healthy setups.
+    - EMPTY status dict, an empty print_stats, a non-401 HTTP error
+      (403/5xx from a fronting proxy), or a non-JSON body → 'unknown':
+      Moonraker ANSWERED and the state is unreadable, which is never a
+      fake not-printing (PR #48).
+    - Unreachable BY NETWORK (no Moonraker at all — standalone installs)
+      → today's not-printing fallback stays; it is the honest answer
+      there. (SECURITY.md keeps the same distinction — PR #48 C-04.)
+    """
     fallback = {
         "is_printing": False,
         "print_state": None,
         "print_filename": None,
     }
+    auth_required = False
+    misconfigured = False
+
+    api_key = _moonraker_api_key()
+    headers = {"X-Api-Key": api_key} if api_key else None
 
     for base_url in _moonraker_base_urls():
         try:
             with httpx.Client(timeout=timeout) as client:
-                response = client.get(f"{base_url}/printer/objects/query?print_stats")
+                response = client.get(
+                    f"{base_url}/printer/objects/query?print_stats",
+                    headers=headers,
+                )
                 response.raise_for_status()
-            payload = response.json()
+            try:
+                payload = response.json()
+            except ValueError:
+                # Answered with a non-JSON body (WAF/proxy HTML): an
+                # ANSWERED call whose shape we can't read must never land
+                # in the not-printing fallback (PR #48: only 401 got the
+                # honesty fix; 403/5xx/malformed still lied 'not
+                # printing'). Unreachable-by-network stays the fallback.
+                misconfigured = True
+                continue
             result = payload.get("result", {}) if isinstance(payload, dict) else {}
             status = result.get("status", {}) if isinstance(result, dict) else {}
-            print_stats = status.get("print_stats", {}) if isinstance(status, dict) else {}
-            if not isinstance(print_stats, dict):
+            if not status:
+                # Moonraker answered but klippy gave it nothing.
+                misconfigured = True
+                continue
+            print_stats = status.get("print_stats")
+            if not isinstance(print_stats, dict) or not print_stats:
+                # An EMPTY print_stats object is klippy saying nothing,
+                # not klippy saying "idle" (round-2: the docstring
+                # claimed unknown; the code said not-printing).
+                misconfigured = True
                 continue
 
             raw_state = print_stats.get("state")
@@ -847,9 +929,27 @@ def _query_moonraker_print_status(timeout: float = 2.0) -> dict[str, Any]:
                 "print_state": print_state or None,
                 "print_filename": str(filename).strip() or None if filename is not None else None,
             }
+        except httpx.HTTPStatusError as exc:
+            if exc.response is not None and exc.response.status_code == 401:
+                auth_required = True
+            else:
+                # 403/5xx: Moonraker (or something in front of it)
+                # answered — an unreadable print state is 'unknown', not
+                # a fake 'not printing' (PR #48 L-01).
+                misconfigured = True
+            continue
         except (httpx.HTTPError, ValueError, TypeError):
             continue
 
+    if auth_required or misconfigured:
+        unknown: dict[str, Any] = {
+            "is_printing": False,
+            "print_state": "unknown",
+            "print_filename": None,
+        }
+        if auth_required:
+            unknown["moonraker_auth_required"] = True
+        return unknown
     return fallback
 
 

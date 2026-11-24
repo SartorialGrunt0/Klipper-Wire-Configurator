@@ -404,15 +404,56 @@ export async function queryCanbusUuids(iface = 'can0'): Promise<CanbusQueryResul
   return request(`/native/canbus-uuids?interface=${encodeURIComponent(iface)}`);
 }
 
-export async function getNativeSettings(): Promise<{ config_path: string }> {
+export async function getNativeSettings(): Promise<{ config_path: string; moonraker_key_set?: boolean }> {
   return request('/native/settings');
 }
 
-export async function updateNativeSettings(configPath: string): Promise<{ config_path: string }> {
-  return request('/native/settings', {
-    method: 'PUT',
-    body: JSON.stringify({ config_path: configPath }),
+export interface ApiKeyMeta {
+  id: string;
+  name: string;
+  key_prefix: string;
+  created_at: string | null;
+  expires_at: string | null;
+  expired: boolean;
+  last_used_at: string | null;
+}
+
+export async function getApiKeys(): Promise<{ keys: ApiKeyMeta[] }> {
+  return request('/native/api-keys');
+}
+
+export async function createApiKey(
+  name: string, expiresAt: string | null):
+  Promise<{ id: string; name: string; key: string; expires_at: string | null }> {
+  return request('/native/api-keys', {
+    method: 'POST',
+    body: JSON.stringify({ name, expires_at: expiresAt })
   });
+}
+
+export async function replaceApiKey(id: string): Promise<{ id: string; name: string; key: string; expires_at: string | null }> {
+  // Rotate in place: the route that replaced reveal (PR #48 D-2). The
+  // backend serves NO existing value anymore — this returns the FRESH
+  // one-time value of the rotated row.
+  return request(`/native/api-keys/${id}/replace`, { method: 'POST' });
+}
+
+export async function deleteApiKey(id: string): Promise<{ status: string }> {
+  return request(`/native/api-keys/${id}`, { method: 'DELETE' });
+}
+
+export async function updateNativeSettings(
+  configPath?: string,
+  moonrakerApiKey?: string,
+): Promise<{ config_path: string; moonraker_key_set: boolean }> {
+  // configPath omitted = keep the stored path — a token-only save must
+  // never ship the store's startup default over the real config root
+  // (PR #48 L-01). moonrakerApiKey omitted = keep the stored token (the
+  // backend never serves the value back; '' clears it explicitly).
+  const body: Record<string, string> = {};
+  if (configPath !== undefined) body.config_path = configPath;
+  if (moonrakerApiKey !== undefined) body.moonraker_api_key = moonrakerApiKey;
+  return request('/native/settings', { method: 'PUT', body: JSON.stringify(body) });
 }
 
 export async function listNativeConfigFiles(path?: string): Promise<{
@@ -647,6 +688,19 @@ export async function getNativeFlashState(
   }
   const q = params.toString() ? `?${params.toString()}` : '';
   return request(`/native/flash/${encodeURIComponent(target)}${q}`);
+}
+
+export async function setNativeFlashCheckoutPath(
+  target: FlashTargetKey,
+  checkoutPath: string | null,
+): Promise<{ ok: boolean; checkout_path: string | null; error?: string }> {
+  // The ONLY sanctioned way to point KWC at a custom checkout: the
+  // server validates the tree's identity before storing it. Other
+  // routes' checkout_path params are inert (PR #48 round-4).
+  return request(`/native/flash/${encodeURIComponent(target)}/checkout-path`, {
+    method: 'PUT',
+    body: JSON.stringify({ checkout_path: checkoutPath }),
+  });
 }
 
 export async function getNativeFlashFieldHelp(

@@ -12,6 +12,7 @@ from pydantic import BaseModel
 from parser.config_parser import parse_config
 from parser.config_writer import smart_export
 from parser.validator import validate_project_configs
+from services import api_keys, path_containment
 from services.board_detector import detect_board_from_config
 from services.native_services import (
     delete_flash_profile,
@@ -54,6 +55,7 @@ from services.flash_targets import (
     preview_flash_target_config,
     save_flash_target_config,
     scan_flash_target_devices,
+    set_flash_target_checkout_path,
 )
 
 flash_job_runner = FlashJobRunner()
@@ -73,7 +75,8 @@ async def native_status():
     native reads simply find nothing.
     """
     settings = load_settings()
-    return {"config_path": settings.get("config_path", get_default_config_path())}
+    return {"config_path": str(settings.get("config_path") or "").strip()
+            or get_default_config_path()}
 
 
 # ── Devices ─────────────────────────────────────────────────────
@@ -95,31 +98,136 @@ def get_canbus_uuids(interface: str = "can0"):
 
 
 class ConfigPathUpdate(BaseModel):
-    config_path: str
+    # None = leave the stored path untouched — a token-only save must not
+    # be able to repoint the config root with the store's startup default
+    # (PR #48 L-01). Clients that do send it get it validated.
+    config_path: str | None = None
+    # None = leave the stored token untouched (old clients keep working);
+    # '' = explicit clear.
+    moonraker_api_key: str | None = None
+
+
+def _masked_settings(settings: dict) -> dict:
+    """The Moonraker token is never served — callers get moonraker_key_set.
+    (Same masking law as the AI provider key; no new cleartext route.)"""
+    masked = dict(settings)
+    token = masked.pop("moonraker_api_key", None)
+    masked["moonraker_key_set"] = bool(isinstance(token, str) and token.strip())
+    return masked
 
 
 @router.get("/settings")
 async def get_settings():
-    """Get native settings (config path, etc.)."""
-    return load_settings()
+    """Get native settings (config path, etc.), token masked."""
+    return _masked_settings(load_settings())
 
 
 @router.put("/settings")
 async def update_settings(data: ConfigPathUpdate):
     """Update native settings."""
     settings = load_settings()
-    settings["config_path"] = data.config_path
+    if data.config_path is not None:
+        # The containment roots come FROM this value — an unvalidated one
+        # re-opens every hole containment closed (PR #48 B-02/B-05: PUT
+        # config_path '/' then GET config-files?path=/etc listed /etc).
+        raw = str(data.config_path).strip()
+        candidate = Path(raw).expanduser()
+        if not raw or not candidate.is_absolute() or str(candidate) == os.sep:
+            # '/' is absolute but it is not a SANDBOX — it was the exact
+            # value that re-armed the config-files exfil (PR #48 B-02).
+            raise HTTPException(
+                status_code=400,
+                detail="config_path must be a non-empty absolute path "
+                       "other than the filesystem root")
+        settings["config_path"] = str(candidate)
+    if data.moonraker_api_key is not None:
+        settings["moonraker_api_key"] = data.moonraker_api_key
     save_settings(settings)
-    return settings
+    return _masked_settings(settings)
+
+
+# ── MCP API keys (Manage Keys) ─────────────────────────────────
+# These keys gate the MCP HTTP endpoint ONLY (decision D1) — never the
+# app. A value appears ONLY in its create/replace response (reveal was
+# removed, PR #48 D-2); the list is metadata. Lost a key? Replace
+# rotates it in place; recovery needs no other door.
+
+
+class ApiKeyCreate(BaseModel):
+    name: str = ""
+    # None = never expires (the default on purpose: expiry is opt-in so a
+    # forgotten date can't lock out a fleet agent by surprise).
+    expires_at: str | None = None
+
+
+@router.get("/api-keys")
+async def list_api_keys():
+    return {"keys": api_keys.list_key_metadata()}
+
+
+@router.post("/api-keys")
+async def create_api_key(data: ApiKeyCreate):
+    try:
+        return api_keys.create_key(name=data.name, expires_at=data.expires_at)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/api-keys/{key_id}/replace")
+async def replace_api_key(key_id: str):
+    """Rotate a lost/compromised key IN PLACE: same row (name, expiry),
+    fresh value, shown once — the replacement for the removed reveal
+    route (PR #48 D-2: no route serves an EXISTING value anymore)."""
+    entry = api_keys.replace_key(key_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail="No such key")
+    return entry
+
+
+@router.delete("/api-keys/{key_id}")
+async def delete_api_key(key_id: str):
+    if not api_keys.delete_key(key_id):
+        raise HTTPException(status_code=404, detail="No such key")
+    return {"status": "deleted"}
 
 
 # ── Config files from the host ──────────────────────────────────
 
 
+def _stored_config_root() -> str:
+    """The settings config_path as the containment root sees it.
+
+    An EMPTY stored value must not collapse the roots to the process
+    cwd — that exposed the backend checkout (venv listing, source tree)
+    through config-files/apply (PR #48 B-05). PUT validates and can no
+    longer save ''; this is the read-side guarantee for legacy or
+    hand-edited settings.json files."""
+    raw = str(load_settings().get("config_path") or "").strip()
+    return raw or get_default_config_path()
+
+
+def _contained(raw_path: str) -> str:
+    """Resolve a request-supplied path inside the allowed config roots.
+
+    Roots = settings config_path + KWC_EXTRA_CONFIG_DIRS. A ValueError
+    (symlink or literal escape) arrives as a 400 that names the escape
+    hatch — legitimate symlinked installs learn the fix instead of
+    reading outside the sandbox.
+    """
+    roots = path_containment.config_roots(_stored_config_root())
+    try:
+        return str(path_containment.resolve_within_roots(raw_path, roots))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/config-files")
 async def get_config_files(path: str | None = None):
     """List .cfg files in the config directory."""
-    config_path = path or load_settings().get("config_path", get_default_config_path())
+    if path:
+        config_path = _contained(path)
+    else:
+        config_path = _stored_config_root()
     files = list_config_files(config_path)
     return {"config_path": config_path, "files": files}
 
@@ -127,7 +235,11 @@ async def get_config_files(path: str | None = None):
 @router.post("/config-files/read")
 def read_config_files(data: dict):
     """Read and parse one or more config files from the host."""
-    config_path = data.get("config_path") or load_settings().get("config_path", get_default_config_path())
+    raw_path = data.get("config_path")
+    if raw_path:
+        config_path = _contained(raw_path)
+    else:
+        config_path = _stored_config_root()
     filenames: list[str] = data.get("filenames", [])
 
     if not filenames:
@@ -212,11 +324,26 @@ class ApplyRequest(BaseModel):
 @router.post("/apply")
 def apply_config(data: ApplyRequest):
     """Write config files back to the host filesystem."""
-    config_path = data.config_path or load_settings().get("config_path", get_default_config_path())
+    if data.config_path:
+        config_path = _contained(data.config_path)
+    else:
+        config_path = _stored_config_root()
     base = Path(config_path)
 
     if not base.is_dir():
         raise HTTPException(status_code=400, detail=f"Config directory does not exist: {config_path}")
+    base_resolved = base.resolve(strict=False)
+
+    # Validate the DELETE list BEFORE the write loop: a mixed request
+    # that wrote files and then 400'd on one escaping delete left the
+    # writes applied (round-2). All-or-nothing on containment.
+    for rel_path in data.deleted:
+        if not path_containment.within(
+                base_resolved, (base / rel_path).resolve(strict=False)):
+            raise HTTPException(
+                status_code=400,
+                detail=f"File '{rel_path}' resolves outside the config "
+                       "directory (symlink escape)")
 
     written = []
     errors = []
@@ -224,6 +351,14 @@ def apply_config(data: ApplyRequest):
         # Validate path is safe (no traversal, don't resolve symlinks)
         if '..' in filename or filename.startswith('/'):
             raise HTTPException(status_code=400, detail=f"Invalid filename: {filename}")
+        # A pre-existing symlink inside the config dir must not turn the
+        # write into a primitive against its outside target.
+        if not path_containment.within(
+                base_resolved, (base / filename).resolve(strict=False)):
+            raise HTTPException(
+                status_code=400,
+                detail=f"File '{filename}' resolves outside the config "
+                       "directory (symlink escape)")
         try:
             write_config_file(str(base / filename), content)
             written.append(filename)
@@ -236,6 +371,15 @@ def apply_config(data: ApplyRequest):
     for filename in data.deleted:
         if '..' in filename or filename.startswith('/'):
             raise HTTPException(status_code=400, detail=f"Invalid filename: {filename}")
+        # The write branch above refuses symlink escapes; the delete
+        # branch must too — (base/filename).unlink() through an in-root
+        # symlinked directory deletes OUTSIDE the root (PR #48 B-04).
+        if not path_containment.within(
+                base_resolved, (base / filename).resolve(strict=False)):
+            raise HTTPException(
+                status_code=400,
+                detail=f"File '{filename}' resolves outside the config "
+                       "directory (symlink escape)")
         target = base / filename
         try:
             if target.is_file():
@@ -339,6 +483,20 @@ def _validated_target(target: str) -> str:
     if normalized not in {"klipper", "katapult"}:
         raise HTTPException(status_code=404, detail=f"Unsupported flash target: {target}")
     return normalized
+
+
+class FlashCheckoutPathUpdate(BaseModel):
+    checkout_path: str | None = None
+
+
+@router.put("/flash/{target}/checkout-path")
+def set_flash_checkout_path(target: str, data: FlashCheckoutPathUpdate):
+    """Register a custom checkout directory (validated by identity
+    before it is stored; empty clears back to auto-detection).
+    Request-supplied checkout_path fields on OTHER routes are inert —
+    this is the only sanctioned writer (PR #48 round-4)."""
+    return set_flash_target_checkout_path(
+        _validated_target(target), data.checkout_path)
 
 
 @router.get("/flash/{target}")

@@ -18,6 +18,7 @@ import RevertDialog from './dialogs/RevertDialog';
 import ChatDialog from './dialogs/ChatDialog';
 import FirmwareDialog from './dialogs/FirmwareDialog';
 import AcknowledgementsDialog from './dialogs/AcknowledgementsDialog';
+import ApiAccessDialog from './dialogs/ApiAccessDialog';
 
 interface ToolbarProps {
   showTextView: boolean;
@@ -120,6 +121,7 @@ export default function Toolbar({
   const [showVisibilityMenu, setShowVisibilityMenu] = useState(false);
   const [visibilityMenuPosition, setVisibilityMenuPosition] = useState({ top: 0, left: 0 });
   const [showAcknowledgements, setShowAcknowledgements] = useState(false);
+  const [showApiAccess, setShowApiAccess] = useState(false);
   const validationSettings = useValidationSettingsStore();
   const visibility = useVisibility();
   const aiConfigured = useAiStore((s) => s.isConfigured());
@@ -637,6 +639,23 @@ export default function Toolbar({
             )}
           </div>
 
+          {/* Security (feature/security-work): server-side API tokens */}
+          <div className="border-t border-[var(--color-bg-tertiary)] p-2">
+            <p className="px-2 pt-1 text-[11px] font-semibold text-[var(--color-text-secondary)] uppercase tracking-wide">
+              Security
+            </p>
+            <button
+              type="button"
+              onClick={() => {
+                setShowVisibilityMenu(false);
+                setShowApiAccess(true);
+              }}
+              className="w-full flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg text-xs font-medium border border-[var(--color-bg-tertiary)] text-[var(--color-text-secondary)] hover:bg-[var(--color-bg-primary)] hover:text-[var(--color-text-primary)] transition-colors"
+            >
+              Manage Keys…
+            </button>
+          </div>
+
           <div className="px-3 py-2 border-t border-[var(--color-bg-tertiary)] text-[11px] text-[var(--color-text-secondary)]">
             Text view and the settings button stay visible so this menu is always reachable.
           </div>
@@ -659,6 +678,7 @@ export default function Toolbar({
       {showFlash && <FirmwareDialog onClose={() => setShowFlash(false)} />}
       {showRevert && <RevertDialog onClose={() => setShowRevert(false)} />}
       {showAcknowledgements && <AcknowledgementsDialog onClose={() => setShowAcknowledgements(false)} />}
+      {showApiAccess && <ApiAccessDialog onClose={() => setShowApiAccess(false)} />}
       {/* ChatDialog stays mounted when closed so an in-flight request keeps
           running; `open` hides/shows the overlay. In the text view the same
           instance renders as the docked column instead of an overlay. */}

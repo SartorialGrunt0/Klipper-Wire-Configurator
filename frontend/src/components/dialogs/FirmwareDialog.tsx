@@ -533,7 +533,19 @@ export default function FirmwareDialog({ onClose }: FirmwareDialogProps) {
       katapult: panels.katapult.checkoutPath.trim(),
     };
     setShowTargetSettings(false);
-    await Promise.all(TARGETS.map((target) => loadState(target, requestedPaths[target] || undefined)));
+    // Register each path through the sanctioned endpoint (the server
+    // validates the checkout's identity before storing it); then a
+    // plain reload resolves from settings. Inert checkout_path params
+    // no longer steer anything (PR #48 round-4).
+    await Promise.all(TARGETS.map((target) =>
+      api.setNativeFlashCheckoutPath(target, requestedPaths[target] || null)
+        .then((res) => {
+          if (!res.ok && res.error) {
+            setPanelMessage(target, res.error, 'error');
+          }
+        })
+        .catch(() => undefined)));
+    await Promise.all(TARGETS.map((target) => loadState(target)));
     // Kick off a fresh device scan now that checkout paths may have changed.
     void Promise.all(TARGETS.map((target) => scanDevices(target, true)));
   }

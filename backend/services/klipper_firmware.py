@@ -29,8 +29,9 @@ def _legacy_result_keys(result: dict[str, Any]) -> dict[str, Any]:
     return mapped
 
 
-def resolve_klipper_checkout(requested_path: str | None = None) -> tuple[Path | None, str | None]:
-    return resolve_flash_target_checkout("klipper", requested_path)
+def resolve_klipper_checkout(requested_path: str | None = None,
+                             persist: bool = True) -> tuple[Path | None, str | None]:
+    return resolve_flash_target_checkout("klipper", requested_path, persist=persist)
 
 
 def _load_kconfig_state(klipper_path: Path):
@@ -46,6 +47,7 @@ def pick_primary_klipper_firmware_artifact(artifacts: list[dict[str, Any]]) -> d
 
 
 def get_klipper_firmware_state(klipper_path: str | None = None) -> dict[str, Any]:
+    # Read path (GET-backed): get_flash_target_state never persists.
     return _legacy_state_keys(get_flash_target_state("klipper", klipper_path))
 
 
@@ -73,7 +75,9 @@ def get_klipper_firmware_artifact_path(filename: str, klipper_path: str | None =
     if not filename or Path(filename).name != filename:
         raise ValueError("Invalid artifact filename")
 
-    resolved_path, error = resolve_klipper_checkout(klipper_path)
+    # GET-reachable: no persistence, and the caller-supplied path is
+    # not consulted (round-2 — reads resolve from settings/env/defaults).
+    resolved_path, error = resolve_klipper_checkout(None, persist=False)
     if resolved_path is None:
         raise FileNotFoundError(error or "Klipper checkout not found")
 

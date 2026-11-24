@@ -30,7 +30,8 @@ def test_get_klipper_firmware_artifact_path_rejects_path_traversal(tmp_path, mon
 
     monkeypatch.setattr(
         'services.klipper_firmware.resolve_klipper_checkout',
-        lambda requested_path=None: (checkout, None),
+        # **kw: GET-reachable reads now pass persist=False (round-2).
+        lambda requested_path=None, **kw: (checkout, None),
     )
 
     try:
@@ -48,7 +49,8 @@ def test_get_klipper_firmware_artifact_path_returns_existing_artifact(tmp_path, 
 
     monkeypatch.setattr(
         'services.klipper_firmware.resolve_klipper_checkout',
-        lambda requested_path=None: (checkout, None),
+        # **kw: GET-reachable reads now pass persist=False (round-2).
+        lambda requested_path=None, **kw: (checkout, None),
     )
 
     resolved = get_klipper_firmware_artifact_path('klipper.bin')
