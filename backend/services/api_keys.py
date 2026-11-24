@@ -155,7 +155,13 @@ def _normalize_expiry(value: Any) -> str | None:
     if parsed.tzinfo is not None:
         parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
     elif len(raw) == 10:  # date-only: inclusive through 23:59:59.999999
-        parsed = datetime.combine(parsed.date(), time.max)
+        # End of day means the HOST-LOCAL day the typer read off their
+        # calendar — a UTC-8 host used to kill the key at 16:00 local
+        # (CI runners are UTC, so the suite never saw it). Anchor local
+        # end-of-day, then land it in naive UTC like everything else.
+        local_tz = datetime.now().astimezone().tzinfo
+        parsed = (datetime.combine(parsed.date(), time.max, tzinfo=local_tz)
+                  .astimezone(timezone.utc).replace(tzinfo=None))
     return parsed.isoformat()
 
 
